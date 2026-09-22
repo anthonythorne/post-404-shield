@@ -9,7 +9,8 @@ Moved out of the sites that used it into its own repository.
   install upgrades in place with its config, allowlists and baked pages intact.
 - Settings screen rebuilt with WordPress components: tabs, status tiles, one row
   per post type; matching and depth shown only for hierarchical types, and a save
-  keeps the stored value of any field it does not post.
+  keeps the stored value of any field it does not post. A flat type stored as
+  full-path is still offered matching, so it can be switched back.
 - New entries' URL bases are pre-filled from the bases real permalinks use, with a
   warning when the saved bases match none of them.
 - Yoast SEO Premium redirects are read only while Yoast SEO Premium is active — a
