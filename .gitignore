@@ -1,0 +1,16 @@
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# --- Root dev tooling (NOT shipped) ---
+/vendor/
+/node_modules/
+.phpunit.result.cache
+/.phpunit.cache/
+phpcs.cache
+
+# --- AI working context (local only, never shipped) ---
+/docs/00-ai-context/

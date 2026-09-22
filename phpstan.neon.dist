@@ -1,0 +1,10 @@
+# Static analysis for the shippable plugin. Level 0 matches the consuming
+# sites' critical gate (a single error fails their deploy); raise it here first.
+includes:
+    - vendor/szepeviktor/phpstan-wordpress/extension.neon
+parameters:
+    level: 0
+    paths:
+        - post-404-shield
+    scanFiles:
+        - vendor/php-stubs/wp-cli-stubs/wp-cli-stubs.php

@@ -1,0 +1,94 @@
+<?xml version="1.0"?>
+<ruleset name="Post 404 Shield">
+	<description>Coding standards for the Post 404 Shield must-use plugin.</description>
+
+	<!-- The shippable plugin only; tests and examples are linted by eye. -->
+	<file>post-404-shield</file>
+
+	<exclude-pattern>*/vendor/*</exclude-pattern>
+	<exclude-pattern>*/node_modules/*</exclude-pattern>
+	<exclude-pattern>*\.(css|js)</exclude-pattern>
+
+	<arg value="sp"/>
+	<arg name="colors"/>
+	<arg name="extensions" value="php"/>
+	<arg name="parallel" value="8"/>
+	<arg name="basepath" value="."/>
+
+	<!-- Warnings are reported but never fail the run; errors always do. -->
+	<config name="ignore_warnings_on_exit" value="1"/>
+	<config name="minimum_supported_wp_version" value="6.3"/>
+	<config name="testVersion" value="8.2-"/>
+
+	<!--
+		WordPress + PHPCompatibilityWP + WordPress-VIP-Go, with the same
+		customisations as the consuming sites' house ruleset, so code that is
+		clean here is clean there too.
+	-->
+	<rule ref="WordPress">
+		<exclude name="Generic.Arrays.DisallowShortArraySyntax"/>
+		<exclude name="Universal.Arrays.DisallowShortArraySyntax"/>
+		<exclude name="Universal.Operators.DisallowShortTernary"/>
+		<exclude name="WordPress.Files.FileName"/>
+		<exclude name="Squiz.Commenting.InlineComment.InvalidEndChar"/>
+	</rule>
+
+	<rule ref="WordPress.WP.I18n">
+		<properties>
+			<property name="text_domain" type="array">
+				<element value="post-404-shield"/>
+			</property>
+		</properties>
+	</rule>
+
+	<rule ref="PHPCompatibilityWP">
+		<include-pattern>*\.php</include-pattern>
+	</rule>
+
+	<rule ref="Generic.Metrics.CyclomaticComplexity">
+		<properties>
+			<property name="absoluteComplexity" value="50"/>
+		</properties>
+	</rule>
+	<rule ref="Generic.NamingConventions.ConstructorName"/>
+	<rule ref="Generic.PHP.CharacterBeforePHPOpeningTag"/>
+	<rule ref="Generic.PHP.LowerCaseConstant"/>
+	<rule ref="Generic.VersionControl.GitMergeConflict"/>
+	<rule ref="Squiz.Classes.LowercaseClassKeywords"/>
+	<rule ref="Squiz.PHP.CommentedOutCode">
+		<properties>
+			<property name="maxPercentage" value="45"/>
+		</properties>
+	</rule>
+	<rule ref="Squiz.PHP.Eval"/>
+	<rule ref="Squiz.PHP.InnerFunctions"/>
+	<rule ref="Squiz.PHP.LowercasePHPFunctions"/>
+	<rule ref="Squiz.PHP.NonExecutableCode"/>
+	<rule ref="Squiz.Scope.MemberVarScope"/>
+	<rule ref="Squiz.Scope.StaticThisUsage"/>
+	<rule ref="Generic.Files.OneObjectStructurePerFile">
+		<type>error</type>
+	</rule>
+	<rule ref="WordPress.PHP.DevelopmentFunctions">
+		<type>error</type>
+	</rule>
+
+	<!-- The shield writes its own files (allowlists, artifact, baked 404s) by design. -->
+	<rule ref="WordPress-VIP-Go">
+		<exclude name="WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_file_put_contents"/>
+		<exclude name="WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_flock"/>
+		<exclude name="WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_fputcsv"/>
+		<exclude name="WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_fputs"/>
+		<exclude name="WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_fwrite"/>
+		<exclude name="WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_ftruncate"/>
+		<exclude name="WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_is_writable"/>
+		<exclude name="WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_is_writeable"/>
+		<exclude name="WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_link"/>
+		<exclude name="WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_rename"/>
+		<exclude name="WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_symlink"/>
+		<exclude name="WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_tempnam"/>
+		<exclude name="WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_touch"/>
+		<exclude name="WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_unlink"/>
+		<exclude name="WordPress.WP.AlternativeFunctions.file_system_operations_fopen"/>
+	</rule>
+</ruleset>

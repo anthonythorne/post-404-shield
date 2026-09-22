@@ -1,0 +1,418 @@
+<?php
+/**
+ * Keeps the shield allowlists current as posts change — via instant append only.
+ *
+ * Responsibilities are split in two:
+ *   1. Instant protection (this controller) — when a managed post goes live, its
+ *      slug is APPENDED to the allowlist file synchronously, in the same request:
+ *      on publish, scheduled auto-publish, slug rename, or a PublishPress revision
+ *      that renames the live post. The append is a pure O_APPEND (it never reads
+ *      the file), so concurrent publishes — including many translations sharing a
+ *      slug — cannot race; the only cost is a duplicate line.
+ *   2. Authoritative cleanup (PostShieldCronController) — a DAILY full rebuild
+ *      reads the DB and rewrites each file deduped, dropping stale slugs
+ *      (unpublish / trash / delete / the old slug after a rename).
+ *
+ * There is deliberately NO per-change rebuild. The append handles the only
+ * time-sensitive case (a new or renamed post being reachable). Duplicates and
+ * lingering stale slugs are harmless — the loader still matches a duplicate, and
+ * a stale slug merely lets WordPress load and 404 it — so cleaning them is not
+ * urgent and does not justify a scheduled action per publish. The single daily
+ * rebuild is both the cleanup and the backstop that heals any missed or
+ * duplicated append.
+ *
+ * File Path: wp-content/mu-plugins/post-404-shield/src/php/Controller/PostShieldSyncController.php
+ *
+ * @package Post404Shield\Controller
+ */
+
+declare(strict_types=1);
+
+namespace Post404Shield\Controller;
+
+use Post404Shield\Library\AllowlistBuilder;
+
+/**
+ * Appends a managed post's slug the instant it goes live (publish / rename /
+ * revision); the daily cron does the authoritative dedupe + removals.
+ */
+class PostShieldSyncController {
+
+	/**
+	 * Shared allowlist builder.
+	 *
+	 * @var AllowlistBuilder
+	 */
+	private AllowlistBuilder $builder;
+
+	/**
+	 * Managed, enabled post-type slugs.
+	 *
+	 * @var string[]
+	 */
+	private array $post_types;
+
+	/**
+	 * Construct the sync controller for a set of managed post types.
+	 *
+	 * @param AllowlistBuilder $builder    Shared builder.
+	 * @param string[]         $post_types Managed, enabled post-type slugs.
+	 */
+	public function __construct( AllowlistBuilder $builder, array $post_types ) {
+		$this->builder    = $builder;
+		$this->post_types = $post_types;
+	}
+
+	/**
+	 * Register the post-change hooks that drive the instant append.
+	 *
+	 * @return void
+	 */
+	public function set_up(): void {
+		foreach ( $this->post_types as $post_type ) {
+			// Fires on any update to a managed post, including a slug rename.
+			add_action( 'save_post_' . $post_type, [ $this, 'handle_saved_post' ], 10, 1 );
+		}
+		add_action( 'transition_post_status', [ $this, 'handle_transition_post_status' ], 10, 3 );
+
+		// PublishPress Revisions renames the live post via a direct $wpdb->update()
+		// that bypasses save_post, then fires these — with the live post ID first,
+		// after cleaning the post cache. Harmless no-ops if the plugin is absent.
+		add_action( 'revision_applied', [ $this, 'handle_revision_applied' ], 10, 1 );
+		add_action( 'revision_published', [ $this, 'handle_revision_applied' ], 10, 1 );
+
+		// Root mode only (root-pages v2): attachments join the root union the
+		// instant they upload (S2 — their URLs are real, and status `inherit`
+		// never fires transition_post_status), and a slug/parent change appends
+		// the OLD address to root-extras in the same request (S3 — WordPress
+		// 301s old slugs via _wp_old_slug; a pre-boot 404 there breaks real
+		// redirects). Priority 20 on post_updated: after core's
+		// wp_check_for_changed_slugs (12) has stored the meta.
+		if ( $this->builder->has_root_entries() ) {
+			add_action( 'add_attachment', [ $this, 'handle_attachment' ], 10, 1 );
+			add_action( 'edit_attachment', [ $this, 'handle_attachment' ], 10, 1 );
+		}
+
+		// Every managed type, root or based: core stores the outgoing slug in
+		// `_wp_old_slug` on a rename and 301s it. This was root-only, so on a
+		// based type the old address went straight to a pre-boot 404 until the
+		// nightly rebuild picked the meta up. Priority 20: after core's
+		// wp_check_for_changed_slugs (12) has written it.
+		add_action( 'post_updated', [ $this, 'handle_post_updated' ], 20, 3 );
+	}
+
+	/**
+	 * A media item was uploaded or edited — append its resolved URI and bare
+	 * slug to the root-extras union so its URL never pre-boot-404s.
+	 *
+	 * @param int $post_id Attachment ID.
+	 *
+	 * @return void
+	 */
+	public function handle_attachment( int $post_id ): void {
+		$slug = get_post_field( 'post_name', $post_id );
+		$uri  = get_page_uri( $post_id );
+		if ( is_string( $uri ) && '' !== $uri ) {
+			$this->builder->append_root_extra( $uri );
+		}
+		if ( is_string( $slug ) && '' !== $slug && $slug !== $uri ) {
+			$this->builder->append_root_extra( $slug );
+		}
+	}
+
+	/**
+	 * A post was updated — when a ROOT-shielded post's slug or parent changed,
+	 * its old address must keep reaching WordPress (which serves the 301 / the
+	 * 404-guess redirect). Appends the old bare slug and, for nested URIs, the
+	 * old address in both its old and current parent context. The nightly
+	 * rebuild re-derives the authoritative set from _wp_old_slug.
+	 *
+	 * @param int      $post_id     Post ID.
+	 * @param \WP_Post $post_after  Post after the update.
+	 * @param \WP_Post $post_before Post before the update.
+	 *
+	 * @return void
+	 */
+	public function handle_post_updated( int $post_id, \WP_Post $post_after, \WP_Post $post_before ): void {
+		if ( ! $this->builder->is_root_type( $post_after->post_type ) ) {
+			$this->append_based_old_slug( $post_after, $post_before );
+			return;
+		}
+		$slug_changed   = $post_before->post_name !== $post_after->post_name && '' !== $post_before->post_name;
+		$parent_changed = $post_before->post_parent !== $post_after->post_parent;
+		if ( ! $slug_changed && ! $parent_changed ) {
+			return;
+		}
+		if ( ! $this->builder->is_shielding_status( $post_after->post_type, (string) $post_after->post_status ) ) {
+			return;
+		}
+
+		$old_slug = $slug_changed ? $post_before->post_name : $post_after->post_name;
+		$this->builder->append_root_extra( $old_slug );
+
+		// Old parent context: the address the post lived at before this save.
+		if ( $post_before->post_parent > 0 ) {
+			$old_parent_uri = get_page_uri( $post_before->post_parent );
+			if ( is_string( $old_parent_uri ) && '' !== $old_parent_uri ) {
+				$this->builder->append_root_extra( $old_parent_uri . '/' . $old_slug );
+			}
+		}
+		// Current parent context (renamed in place under the same parent).
+		$uri = get_page_uri( $post_id );
+		if ( is_string( $uri ) && false !== strpos( $uri, '/' ) ) {
+			$this->builder->append_root_extra( substr( $uri, 0, (int) strrpos( $uri, '/' ) ) . '/' . $old_slug );
+		}
+	}
+
+	/**
+	 * A BASED-type post was renamed: append its old slug to that type's own
+	 * allowlist in the same request, so the 301 WordPress now serves from the
+	 * old address is not pre-empted by a shield 404 while the nightly rebuild is
+	 * still hours away.
+	 *
+	 * Mirrors what core records rather than guessing: it only stores (and
+	 * redirects) an old slug for a published, non-hierarchical — therefore top
+	 * level — post, so anything else is skipped here too.
+	 *
+	 * @param \WP_Post $post_after  Post after the update.
+	 * @param \WP_Post $post_before Post before the update.
+	 *
+	 * @return void
+	 */
+	private function append_based_old_slug( \WP_Post $post_after, \WP_Post $post_before ): void {
+		if ( ! in_array( $post_after->post_type, $this->post_types, true ) ) {
+			return;
+		}
+		if ( '' === $post_before->post_name || $post_before->post_name === $post_after->post_name ) {
+			return;
+		}
+		if ( 0 !== (int) $post_after->post_parent ) {
+			return;
+		}
+		if ( ! $this->builder->is_shielding_status( $post_after->post_type, (string) $post_after->post_status ) ) {
+			return;
+		}
+		$this->builder->append_slug( $post_after->post_type, $post_before->post_name );
+	}
+
+	/**
+	 * A managed post was saved — a content edit or a slug rename. If it is live,
+	 * append its current slug instantly so a rename is protected at once. (A
+	 * content edit re-appends the same slug — a harmless duplicate the daily
+	 * rebuild compacts.)
+	 *
+	 * @param int $post_id Saved post ID.
+	 *
+	 * @return void
+	 */
+	public function handle_saved_post( int $post_id ): void {
+		if ( wp_is_post_revision( $post_id ) || wp_is_post_autosave( $post_id ) ) {
+			return;
+		}
+		$post_type = get_post_type( $post_id );
+		if ( ! is_string( $post_type ) || ! in_array( $post_type, $this->post_types, true ) ) {
+			return;
+		}
+		$this->fast_append( $post_id, $post_type );
+	}
+
+	/**
+	 * A managed post changed publish state. Appends on the transition INTO a
+	 * shielded status — a publish, including a scheduled auto-publish, which fires
+	 * in cron and never calls save_post. An unpublish/trash appends nothing;
+	 * removing the now-stale slug is the daily rebuild's job (safe while stale).
+	 *
+	 * @param string   $new_status New post status.
+	 * @param string   $old_status Old post status.
+	 * @param \WP_Post $post       Post being transitioned.
+	 *
+	 * @return void
+	 */
+	public function handle_transition_post_status( string $new_status, string $old_status, \WP_Post $post ): void {
+		if ( ! in_array( $post->post_type, $this->post_types, true ) || $new_status === $old_status ) {
+			return;
+		}
+		$this->fast_append( $post->ID, $post->post_type );
+	}
+
+	/**
+	 * PublishPress Revisions applied/published a revision to a managed post. It can
+	 * rename the live post via a direct DB write that never fires save_post — but
+	 * it cleans the post cache before firing these actions, so the current
+	 * (possibly renamed) slug reads back correctly here. Append it instantly. Both
+	 * actions pass the live post ID first.
+	 *
+	 * @param int $post_id Published/updated live post ID.
+	 *
+	 * @return void
+	 */
+	public function handle_revision_applied( $post_id ): void {
+		$post_id   = (int) $post_id;
+		$post_type = get_post_type( $post_id );
+		if ( ! is_string( $post_type ) || ! in_array( $post_type, $this->post_types, true ) ) {
+			return;
+		}
+		$this->fast_append( $post_id, $post_type );
+	}
+
+	/**
+	 * Append the post's current slug if it is in a shielding status, so a just-live
+	 * or just-renamed post is protected in the same request. Pure append (no
+	 * read-modify-write), so concurrent publishes — including translations sharing
+	 * a slug — cannot race; a duplicate line is the only cost, and the daily
+	 * rebuild compacts it. A non-shielding status (draft/trash) appends nothing;
+	 * removal is the daily rebuild's job. Every caller fires after the post cache
+	 * is refreshed, so the slug reads back correctly.
+	 *
+	 * @param int    $post_id   Post ID.
+	 * @param string $post_type Managed post type.
+	 *
+	 * @return void
+	 */
+	private function fast_append( int $post_id, string $post_type ): void {
+		$status = get_post_status( $post_id );
+		if ( ! is_string( $status ) || ! $this->builder->is_shielding_status( $post_type, $status ) ) {
+			return;
+		}
+
+		// full-path entries store the whole hierarchical sub-path, not the slug —
+		// and a slug/parent change on a page changes EVERY descendant's URI, so
+		// the whole affected subtree is re-appended in the same request (guard a
+		// of the full-path fail-closed set; children must not 404 until the
+		// nightly rebuild). Appends are pure O_APPEND — duplicates are harmless
+		// and the daily rebuild compacts them.
+		if ( 'full-path' === $this->builder->match_for( $post_type ) ) {
+			$uri = get_page_uri( $post_id );
+			if ( ! is_string( $uri ) || '' === $uri ) {
+				return;
+			}
+			$this->builder->append_slug( $post_type, $uri );
+			foreach ( $this->descendant_ids( $post_id, $post_type ) as $child_id ) {
+				$child_status = get_post_status( $child_id );
+				if ( ! is_string( $child_status ) || ! $this->builder->is_shielding_status( $post_type, $child_status ) ) {
+					continue;
+				}
+				$child_uri = get_page_uri( $child_id );
+				if ( is_string( $child_uri ) && '' !== $child_uri ) {
+					$this->builder->append_slug( $post_type, $child_uri );
+				}
+			}
+			$this->purge_page_cache( $post_id );
+			return;
+		}
+
+		$slug = get_post_field( 'post_name', $post_id );
+		if ( is_string( $slug ) && '' !== $slug ) {
+			$this->builder->append_slug( $post_type, $slug );
+			$this->purge_page_cache( $post_id );
+		}
+	}
+
+	/**
+	 * Every descendant ID of a post (breadth-first over post_parent). Raw,
+	 * unfiltered reads so WPML/queries cannot hide translations from the append.
+	 *
+	 * @param int    $post_id   Root post ID.
+	 * @param string $post_type Managed post type.
+	 *
+	 * @return int[]
+	 */
+	private function descendant_ids( int $post_id, string $post_type ): array {
+		global $wpdb;
+
+		$found = [];
+		$queue = [ $post_id ];
+		while ( [] !== $queue ) {
+			$parent = array_shift( $queue );
+			// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+			$children = $wpdb->get_col(
+				$wpdb->prepare(
+					"SELECT ID FROM {$wpdb->posts} WHERE post_parent = %d AND post_type = %s",
+					$parent,
+					$post_type
+				)
+			);
+			// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+			foreach ( $children as $child ) {
+				$child = (int) $child;
+				if ( ! isset( $found[ $child ] ) ) {
+					$found[ $child ] = true;
+					$queue[]         = $child;
+				}
+			}
+		}
+
+		return array_map( 'intval', array_keys( $found ) );
+	}
+
+	/**
+	 * Purge the WP Engine ORIGIN page cache for a just-shielded URL.
+	 *
+	 * A visitor who hit the URL *before* publish got a shielded 404 that WP Engine's
+	 * origin page cache (Varnish) — and the Advanced Network CDN edge — may have
+	 * cached. This purges the ORIGIN for that exact path, so that when the CDN edge
+	 * next revalidates the URL it gets the now-real page instead of the origin
+	 * re-serving a cached 404.
+	 *
+	 * It deliberately does NOT purge the CDN edge itself. The drop-ins expose only a
+	 * *full* CDN purge (`WpeCommon::clear_cdn_cache()` / `clear_maxcdn_cache()`, as
+	 * every other plugin here calls it — no per-URL form), which is far too
+	 * destructive to run on every publish. So the CDN edge is bounded instead by the
+	 * short `cache_ttl` (60s): after it lapses the edge revalidates and, because we
+	 * purged the origin here, self-heals to the live page. That short TTL — not a
+	 * purge — is the real guarantee against a premature visit poisoning an edge PoP.
+	 *
+	 * Platform-native, no API keys: drives `WpeCommon::purge_varnish_cache()` through
+	 * the `wpe_purge_varnish_cache_paths` filter (a targeted single-URL purge, never
+	 * a site-wide flush — the by-URL purge the bundled "WP Engine Advanced Cache
+	 * Options" plugin uses). No-op off WP Engine (local, CI). WP Engine also
+	 * auto-purges a post's permalink on publish; this adds the non-trailing-slash
+	 * form the shield 404s, and covers the PublishPress direct-DB rename that skips
+	 * save_post. The `post_shield_purge_paths` action carries the same paths for a
+	 * CDN that *does* offer a per-URL API.
+	 *
+	 * @param int $post_id Post whose permalink path should be purged.
+	 *
+	 * @return void
+	 */
+	private function purge_page_cache( int $post_id ): void {
+		// get_permalink resolves the correct localised (WPML) URL for THIS post's
+		// language, so each translation purges its own locale on publish.
+		$permalink = get_permalink( $post_id );
+		if ( ! is_string( $permalink ) || '' === $permalink ) {
+			return;
+		}
+		$path = wp_parse_url( $permalink, PHP_URL_PATH );
+		if ( ! is_string( $path ) || '' === $path ) {
+			return;
+		}
+		// Both slash forms — the shield 404s whichever exact path was requested.
+		$paths = array_values( array_unique( [ trailingslashit( $path ), untrailingslashit( $path ) ] ) );
+
+		// Extension seam: a CDN with its own purge API (e.g. a future Cloudflare
+		// token) can hook this to purge the same paths. Core stays WPE-native.
+		do_action( 'post_shield_purge_paths', $paths, $post_id );
+
+		// WP Engine only — WpeCommon is platform-injected; absent locally / on CI.
+		if ( [] === $paths || ! class_exists( '\WpeCommon' ) || ! method_exists( '\WpeCommon', 'purge_varnish_cache' ) ) {
+			return;
+		}
+		// REPLACE the purge list with EXACTLY our two paths — this is a targeted
+		// purge of just the shielded 404 URL, NOT a site-wide or listing purge. WP
+		// Engine already auto-purges the post's permalink + home + archives on this
+		// same publish; we only add the non-trailing-slash form it would miss. The
+		// filter output is the complete purge set (see WP Engine Advanced Cache
+		// Options' purge_cache_by_path), and $paths is guaranteed non-empty above so
+		// this can never degrade into a full-cache flush.
+		$only_paths = static function () use ( $paths ) {
+			return $paths;
+		};
+		add_filter( 'wpe_purge_varnish_cache_paths', $only_paths );
+		try {
+			\WpeCommon::purge_varnish_cache( $post_id );
+		} catch ( \Throwable $e ) {
+			error_log( '[post-404-shield] WPE page-cache purge failed: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+		}
+		remove_filter( 'wpe_purge_varnish_cache_paths', $only_paths );
+	}
+}

@@ -1,0 +1,162 @@
+/**
+ * Settings → Post 404 Shield — the few layouts specific to this screen.
+ *
+ * Page chrome (cards, tiles, chips, badges, field spacing, save bar) comes
+ * from the shared `tcc-admin-ui` stylesheet — the site's copy when it
+ * registers one, else the bundled src/css/admin-ui.css.
+ *
+ * File Path: wp-content/mu-plugins/post-404-shield/src/css/admin.css
+ */
+
+/* Post type rows. */
+.post-shield-group + .post-shield-group {
+	margin-top: 36px;
+}
+
+.post-shield-group__title {
+	margin: 0 0 4px;
+	color: var(--tcc-admin-muted, #646970);
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+
+.post-shield-type {
+	border-bottom: 1px solid var(--tcc-admin-divider, #f0f0f1);
+}
+
+.post-shield-type:last-child {
+	border-bottom: 0;
+}
+
+.post-shield-type__header {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 12px 20px;
+	padding: 16px 0;
+}
+
+.post-shield-type__toggle {
+	flex: 0 0 240px;
+	min-width: 0;
+}
+
+.post-shield-type__toggle .components-toggle-control__label,
+.post-shield-type__toggle label {
+	font-size: 14px;
+	font-weight: 500;
+}
+
+.post-shield-type__meta {
+	display: flex;
+	flex: 1 1 320px;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px 12px;
+	min-width: 0;
+}
+
+.post-shield-type__summary {
+	overflow-wrap: anywhere;
+}
+
+.post-shield-type__body {
+	margin: 0 0 20px;
+	padding: 28px 32px;
+	border: 1px solid var(--tcc-admin-divider, #f0f0f1);
+	border-radius: 8px;
+	background: #fbfbfc;
+}
+
+.post-shield-type.is-open .post-shield-type__header {
+	padding-bottom: 12px;
+}
+
+/* A type row nested inside a card body (root tab) keeps the same rhythm. */
+.tcc-admin__fields > .post-shield-type + .post-shield-type {
+	margin-top: 0;
+}
+
+.post-shield-seen {
+	margin: 10px 0 0;
+}
+
+.post-shield-seen .components-button.is-link {
+	vertical-align: baseline;
+}
+
+.post-shield-filter {
+	min-width: 240px;
+}
+
+/* Disclosures. */
+.post-shield-disclosure .components-button.is-link {
+	font-weight: 500;
+	text-decoration: none;
+}
+
+.post-shield-disclosure__body {
+	margin-top: 16px;
+}
+
+/* Blocked sections. */
+.post-shield-block {
+	padding: 24px 0;
+	border-top: 1px solid var(--tcc-admin-divider, #f0f0f1);
+}
+
+.post-shield-block:first-child {
+	padding-top: 0;
+	border-top: 0;
+}
+
+.post-shield-block__header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+	margin-bottom: 20px;
+}
+
+/* Background job feedback. */
+.post-shield-job--ok {
+	color: #007017;
+}
+
+.post-shield-job--error {
+	color: #b32d2e;
+}
+
+.post-shield-modal-actions {
+	margin-top: 24px;
+}
+
+/* Restore confirm screen. */
+.post-shield-changed {
+	margin: 0 -28px;
+	padding-right: 28px;
+	padding-left: 28px;
+	background: #fcf9e8;
+}
+
+.post-shield-confirm {
+	margin-top: 24px;
+}
+
+@media (max-width: 782px) {
+	.post-shield-type__toggle {
+		flex-basis: 100%;
+	}
+
+	.post-shield-type__body {
+		padding: 20px;
+	}
+
+	.post-shield-changed {
+		margin: 0 -18px;
+		padding-right: 18px;
+		padding-left: 18px;
+	}
+}
