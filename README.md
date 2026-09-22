@@ -73,9 +73,8 @@ sync:
   (status 404, `Cache-Control: no-store`, `Vary: Accept`); `{base_url}` becomes
   the request's validated `https://` origin. Browsers never qualify.
 
-The settings screen uses the shared `tcc-admin-ui` stylesheet: a site that
-registers that handle itself (for several custom admin pages) wins, otherwise the
-plugin's bundled copy is used.
+The settings screen's styles ship with the plugin (`src/css/admin.css`, scoped under
+`.post-shield-admin`) and depend only on core's `wp-components`.
 
 ## Development
 

@@ -98,15 +98,15 @@
 	function Chips({ items, muted }) {
 		return el(
 			'div',
-			{ className: 'tcc-admin__chips' },
+			{ className: 'post-shield-admin__chips' },
 			items.map((item) =>
 				el(
 					'code',
 					{
 						key: item,
 						className:
-							'tcc-admin__chip' +
-							(muted ? ' tcc-admin__chip--muted' : ''),
+							'post-shield-admin__chip' +
+							(muted ? ' post-shield-admin__chip--muted' : ''),
 					},
 					item
 				)
@@ -119,8 +119,8 @@
 			'span',
 			{
 				className:
-					'tcc-admin__badge' +
-					(tone ? ' tcc-admin__badge--' + tone : ''),
+					'post-shield-admin__badge' +
+					(tone ? ' post-shield-admin__badge--' + tone : ''),
 			},
 			children
 		);
@@ -139,13 +139,17 @@
 					el(
 						FlexItem,
 						{ isBlock: true },
-						el('h2', { className: 'tcc-admin__card-title' }, title),
+						el(
+							'h2',
+							{ className: 'post-shield-admin__card-title' },
+							title
+						),
 						description
 							? el(
 									'p',
 									{
 										className:
-											'tcc-admin__card-description',
+											'post-shield-admin__card-description',
 									},
 									description
 								)
@@ -189,7 +193,7 @@
 						{
 							id,
 							className:
-								'post-shield-disclosure__body tcc-admin__fields',
+								'post-shield-disclosure__body post-shield-admin__fields',
 						},
 						children
 					)
@@ -209,10 +213,12 @@
 	function Tile({ label, value, sub }) {
 		return el(
 			'div',
-			{ className: 'tcc-admin__tile' },
-			el('p', { className: 'tcc-admin__tile-label' }, label),
-			el('div', { className: 'tcc-admin__tile-value' }, value),
-			sub ? el('div', { className: 'tcc-admin__tile-sub' }, sub) : null
+			{ className: 'post-shield-admin__tile' },
+			el('p', { className: 'post-shield-admin__tile-label' }, label),
+			el('div', { className: 'post-shield-admin__tile-value' }, value),
+			sub
+				? el('div', { className: 'post-shield-admin__tile-sub' }, sub)
+				: null
 		);
 	}
 
@@ -252,7 +258,7 @@
 		}
 		return el(
 			'div',
-			{ className: 'tcc-admin__tiles', 'data-ps': 'status' },
+			{ className: 'post-shield-admin__tiles', 'data-ps': 'status' },
 			el(Tile, {
 				label: __('Status', 'post-404-shield'),
 				value: s.active
@@ -306,7 +312,7 @@
 		}
 		return el(
 			'div',
-			{ className: 'tcc-admin__notices', 'data-ps': 'notices' },
+			{ className: 'post-shield-admin__notices', 'data-ps': 'notices' },
 			notices.map((notice, index) =>
 				el(
 					Notice,
@@ -336,15 +342,15 @@
 	function StatusChecklist({ type, onChange }) {
 		return el(
 			'fieldset',
-			{ className: 'tcc-admin__fieldset' },
+			{ className: 'post-shield-admin__fieldset' },
 			el(
 				'legend',
-				{ className: 'tcc-admin__field-label' },
+				{ className: 'post-shield-admin__field-label' },
 				__('Post statuses that count as real', 'post-404-shield')
 			),
 			el(
 				'div',
-				{ className: 'tcc-admin__checkbox-grid' },
+				{ className: 'post-shield-admin__checkbox-grid' },
 				data.statuses.map((status) =>
 					el(CheckboxControl, {
 						...MODERN,
@@ -430,7 +436,7 @@
 			fields.push(
 				el(
 					'p',
-					{ key: 'derived', className: 'tcc-admin__meta' },
+					{ key: 'derived', className: 'post-shield-admin__meta' },
 					sprintf(
 						/* translators: %s: URL base. */
 						__(
@@ -462,7 +468,7 @@
 								'p',
 								{
 									className:
-										'tcc-admin__meta post-shield-seen',
+										'post-shield-admin__meta post-shield-seen',
 								},
 								sprintf(
 									/* translators: %s: comma-separated URL bases. */
@@ -564,7 +570,7 @@
 					'div',
 					{
 						key: 'depth',
-						className: 'tcc-admin__grid',
+						className: 'post-shield-admin__grid',
 						'data-ps': 'depth',
 					},
 					el(TextControl, {
@@ -666,7 +672,7 @@
 					{ key: 'reserved-derived', 'data-ps': 'reserved-derived' },
 					el(
 						'span',
-						{ className: 'tcc-admin__field-label' },
+						{ className: 'post-shield-admin__field-label' },
 						__(
 							'Let through because a redirect exists',
 							'post-404-shield'
@@ -689,7 +695,7 @@
 			el(CacheFields, { key: 'cache', type, onChange, idPrefix })
 		);
 
-		return el('div', { className: 'tcc-admin__fields' }, fields);
+		return el('div', { className: 'post-shield-admin__fields' }, fields);
 	}
 
 	function TypeRow({ type, onChange }) {
@@ -739,7 +745,11 @@
 				el(
 					'div',
 					{ className: 'post-shield-type__meta' },
-					el('code', { className: 'tcc-admin__chip' }, type.cpt),
+					el(
+						'code',
+						{ className: 'post-shield-admin__chip' },
+						type.cpt
+					),
 					!type.registered
 						? el(
 								Badge,
@@ -768,7 +778,7 @@
 						'span',
 						{
 							className:
-								'tcc-admin__meta post-shield-type__summary',
+								'post-shield-admin__meta post-shield-type__summary',
 						},
 						summary
 					)
@@ -874,7 +884,7 @@
 			!on.length && !off.length
 				? el(
 						'p',
-						{ className: 'tcc-admin__meta' },
+						{ className: 'post-shield-admin__meta' },
 						__(
 							'No post types match that filter.',
 							'post-404-shield'
@@ -896,7 +906,7 @@
 		const excluded = data.excluded;
 		return el(
 			'div',
-			{ className: 'tcc-admin__stack' },
+			{ className: 'post-shield-admin__stack' },
 			el(
 				SectionCard,
 				{
@@ -908,12 +918,12 @@
 				},
 				el(
 					'div',
-					{ className: 'tcc-admin__fields' },
+					{ className: 'post-shield-admin__fields' },
 					el(
 						'div',
 						{
 							className:
-								'tcc-admin__callout tcc-admin__callout--warning',
+								'post-shield-admin__callout post-shield-admin__callout--warning',
 						},
 						__(
 							'With root mode on, the shield decides every address that no other rule covers, so a real address it does not know about would show the 404 page. Switch it on only as a planned change, with pages and posts together. Saving checks every real address first and stops if any would be blocked.',
@@ -931,7 +941,7 @@
 							)
 						: el(
 								'p',
-								{ className: 'tcc-admin__meta' },
+								{ className: 'post-shield-admin__meta' },
 								__(
 									'This site’s permalinks give posts a fixed base, so they are listed with the other post types.',
 									'post-404-shield'
@@ -964,7 +974,7 @@
 				},
 				el(
 					'div',
-					{ className: 'tcc-admin__fields' },
+					{ className: 'post-shield-admin__fields' },
 					el(
 						Disclosure,
 						{
@@ -985,7 +995,7 @@
 						null,
 						el(
 							'span',
-							{ className: 'tcc-admin__field-label' },
+							{ className: 'post-shield-admin__field-label' },
 							__('Always left alone', 'post-404-shield')
 						),
 						el(Chips, { items: excluded.floor, muted: true })
@@ -1081,7 +1091,7 @@
 							),
 							el(
 								'div',
-								{ className: 'tcc-admin__grid' },
+								{ className: 'post-shield-admin__grid' },
 								el(TextControl, {
 									...MODERN_SIZED,
 									label: __('Name', 'post-404-shield'),
@@ -1129,7 +1139,7 @@
 					)
 				: el(
 						'p',
-						{ className: 'tcc-admin__meta' },
+						{ className: 'post-shield-admin__meta' },
 						__('No blocked sections.', 'post-404-shield')
 					)
 		);
@@ -1153,7 +1163,7 @@
 		}
 		return el(
 			'div',
-			{ className: 'tcc-admin__stack' },
+			{ className: 'post-shield-admin__stack' },
 			el(
 				SectionCard,
 				{
@@ -1165,7 +1175,7 @@
 				},
 				el(
 					'div',
-					{ className: 'tcc-admin__fields' },
+					{ className: 'post-shield-admin__fields' },
 					el(SelectControl, {
 						...MODERN_SIZED,
 						label: __('Language URL prefix', 'post-404-shield'),
@@ -1375,7 +1385,7 @@
 			'span',
 			{
 				className:
-					'tcc-admin__meta post-shield-job' +
+					'post-shield-admin__meta post-shield-job' +
 					(tone ? ' post-shield-job--' + tone : ''),
 				role: 'status',
 				'aria-live': 'polite',
@@ -1440,12 +1450,19 @@
 
 		return el(
 			'div',
-			{ className: 'tcc-admin__row', 'data-post-type': row.postType },
+			{
+				className: 'post-shield-admin__row',
+				'data-post-type': row.postType,
+			},
 			el(
 				'div',
-				{ className: 'tcc-admin__row-main' },
+				{ className: 'post-shield-admin__row-main' },
 				el('strong', null, row.label),
-				el('code', { className: 'tcc-admin__chip' }, row.postType),
+				el(
+					'code',
+					{ className: 'post-shield-admin__chip' },
+					row.postType
+				),
 				!info.registered
 					? el(
 							Badge,
@@ -1458,7 +1475,7 @@
 					: null,
 				el(
 					'span',
-					{ className: 'tcc-admin__meta' },
+					{ className: 'post-shield-admin__meta' },
 					sprintf(
 						/* translators: 1: number of names, 2: how long ago. */
 						__('%1$s names · updated %2$s', 'post-404-shield'),
@@ -1470,7 +1487,7 @@
 			),
 			el(
 				'div',
-				{ className: 'tcc-admin__row-actions' },
+				{ className: 'post-shield-admin__row-actions' },
 				busy ? el(Spinner) : null,
 				el(
 					Button,
@@ -1565,13 +1582,13 @@
 
 		return el(
 			'div',
-			{ className: 'tcc-admin__row', 'data-ps': 'bake' },
+			{ className: 'post-shield-admin__row', 'data-ps': 'bake' },
 			el(
 				'div',
-				{ className: 'tcc-admin__row-main' },
+				{ className: 'post-shield-admin__row-main' },
 				el(
 					'span',
-					{ className: 'tcc-admin__meta' },
+					{ className: 'post-shield-admin__meta' },
 					sprintf(
 						/* translators: 1: number of pages, 2: how long ago. */
 						__('%1$s pages · last built %2$s', 'post-404-shield'),
@@ -1583,7 +1600,7 @@
 					? el(
 							'span',
 							{
-								className: 'tcc-admin__progress',
+								className: 'post-shield-admin__progress',
 								role: 'progressbar',
 								'aria-valuemin': 0,
 								'aria-valuemax': 100,
@@ -1594,7 +1611,7 @@
 								),
 							},
 							el('span', {
-								className: 'tcc-admin__progress-fill',
+								className: 'post-shield-admin__progress-fill',
 								style: { width: percent + '%' },
 							})
 						)
@@ -1603,7 +1620,7 @@
 			),
 			el(
 				'div',
-				{ className: 'tcc-admin__row-actions' },
+				{ className: 'post-shield-admin__row-actions' },
 				busy ? el(Spinner) : null,
 				el(
 					Button,
@@ -1622,7 +1639,7 @@
 	function MaintenanceTab() {
 		return el(
 			'div',
-			{ className: 'tcc-admin__stack' },
+			{ className: 'post-shield-admin__stack' },
 			el(
 				SectionCard,
 				{
@@ -1638,7 +1655,7 @@
 						)
 					: el(
 							'p',
-							{ className: 'tcc-admin__meta' },
+							{ className: 'post-shield-admin__meta' },
 							__(
 								'No post types are shielded yet — switch one on and save first.',
 								'post-404-shield'
@@ -1680,21 +1697,24 @@
 							'div',
 							{
 								key: revision.stamp,
-								className: 'tcc-admin__row',
+								className: 'post-shield-admin__row',
 								'data-ps-revision': revision.stamp,
 							},
 							el(
 								'div',
-								{ className: 'tcc-admin__row-main' },
+								{ className: 'post-shield-admin__row-main' },
 								el(
 									'code',
-									{ className: 'tcc-admin__chip' },
+									{ className: 'post-shield-admin__chip' },
 									revision.stamp
 								),
 								revision.valid
 									? el(
 											'span',
-											{ className: 'tcc-admin__meta' },
+											{
+												className:
+													'post-shield-admin__meta',
+											},
 											sprintf(
 												/* translators: 1: timestamp, 2: who saved it. */
 												__(
@@ -1728,7 +1748,7 @@
 					)
 				: el(
 						'p',
-						{ className: 'tcc-admin__meta' },
+						{ className: 'post-shield-admin__meta' },
 						__('No revisions yet.', 'post-404-shield')
 					)
 		);
@@ -2024,7 +2044,7 @@
 				CONFIG_TABS.includes(tab.name)
 					? el(
 							'div',
-							{ className: 'tcc-admin__savebar' },
+							{ className: 'post-shield-admin__savebar' },
 							el(
 								Button,
 								{
@@ -2038,7 +2058,8 @@
 							el(
 								'span',
 								{
-									className: 'tcc-admin__savebar-note',
+									className:
+										'post-shield-admin__savebar-note',
 									'aria-live': 'polite',
 								},
 								dirty

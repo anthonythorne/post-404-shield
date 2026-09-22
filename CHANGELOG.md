@@ -18,6 +18,6 @@ Moved out of the sites that used it into its own repository.
 - Optional Markdown 404s: a site that provides
   `mu-plugins/post-404-shield-markdown-404.md` answers `Accept: text/markdown`
   with it (status 404, never cached).
-- Bundled copy of the shared `tcc-admin-ui` admin stylesheet, used when the site
-  does not register its own.
+- The settings screen owns all of its styles (`src/css/admin.css`, scoped under
+  `.post-shield-admin`); it depends on nothing but core's `wp-components`.
 - Own test suites (PHPUnit + pure functions), PHPCS, PHPStan and CI.

@@ -16,8 +16,7 @@
  * jobs over AJAX (the admin-post handlers remain as a fallback).
  *
  * The screen itself is built from WordPress components (src/js/admin.js,
- * no build step) styled by the shared `tcc-admin-ui` stylesheet (the site's
- * copy when it registers one, else the bundled src/css/admin-ui.css). It
+ * no build step) and styled by its own src/css/admin.css. It
  * still submits an ordinary form to admin-post.php with the same field names,
  * so validation, nonces, capability checks and the root-mode acknowledgement
  * all stay server-side, exactly as before.
@@ -841,9 +840,9 @@ class PostShieldAdminController {
 	// --- Page render -------------------------------------------------------------
 
 	/**
-	 * Enqueue the settings screen: the shared admin UI stylesheet (`tcc-admin-ui`
-	 * — the site's copy, else the bundled one), this page's own styles, and — except on the
-	 * static restore-confirm screen — the component app with its state.
+	 * Enqueue the settings screen: its stylesheet (all of the screen's styles,
+	 * scoped under `.post-shield-admin`) and — except on the static
+	 * restore-confirm screen — the component app with its state.
 	 *
 	 * @param string $hook_suffix Current admin page hook.
 	 *
@@ -854,12 +853,7 @@ class PostShieldAdminController {
 			return;
 		}
 
-		// The shared admin UI: a site-registered `tcc-admin-ui` wins; otherwise
-		// the plugin's bundled copy, so the screen is styled on any install.
-		if ( ! wp_style_is( 'tcc-admin-ui', 'registered' ) ) {
-			wp_register_style( 'tcc-admin-ui', $this->asset_url( 'src/css/admin-ui.css' ), [ 'wp-components' ], $this->asset_version( 'src/css/admin-ui.css' ) );
-		}
-		wp_enqueue_style( 'post-shield-admin', $this->asset_url( 'src/css/admin.css' ), [ 'wp-components', 'tcc-admin-ui' ], $this->asset_version( 'src/css/admin.css' ) );
+		wp_enqueue_style( 'post-shield-admin', $this->asset_url( 'src/css/admin.css' ), [ 'wp-components' ], $this->asset_version( 'src/css/admin.css' ) );
 
 		if ( '' !== $this->requested_restore_stamp() ) {
 			return; // The restore-confirm screen is static markup.
@@ -933,17 +927,17 @@ class PostShieldAdminController {
 			return;
 		}
 		?>
-		<div class="wrap tcc-admin post-shield-admin">
+		<div class="wrap post-shield-admin">
 			<h1><?php esc_html_e( 'Post 404 Shield', 'post-404-shield' ); ?></h1>
 			<hr class="wp-header-end" />
-			<p class="tcc-admin__lede">
+			<p class="post-shield-admin__lede">
 				<?php esc_html_e( 'Stops bots from loading WordPress for made-up addresses. For each post type you switch on, the shield keeps a list of the real post names and answers anything else with the site’s normal 404 page before WordPress starts. New and renamed posts are added the moment they are saved, and every list is rebuilt nightly.', 'post-404-shield' ); ?>
 			</p>
 			<div id="post-shield-admin-root">
-				<p class="tcc-admin__meta"><?php esc_html_e( 'Loading…', 'post-404-shield' ); ?></p>
+				<p class="post-shield-admin__meta"><?php esc_html_e( 'Loading…', 'post-404-shield' ); ?></p>
 			</div>
 			<noscript>
-				<div class="tcc-admin-notice tcc-admin-notice--warning"><?php esc_html_e( 'This screen needs JavaScript. Turn it on in your browser to configure the shield.', 'post-404-shield' ); ?></div>
+				<div class="post-shield-admin-notice post-shield-admin-notice--warning"><?php esc_html_e( 'This screen needs JavaScript. Turn it on in your browser to configure the shield.', 'post-404-shield' ); ?></div>
 			</noscript>
 		</div>
 		<?php
@@ -1472,19 +1466,19 @@ class PostShieldAdminController {
 		$current  = $this->store->artifact();
 		$back     = add_query_arg( [ 'page' => self::PAGE_SLUG ], admin_url( 'options-general.php' ) );
 		?>
-		<div class="wrap tcc-admin post-shield-admin">
+		<div class="wrap post-shield-admin">
 			<h1><?php esc_html_e( 'Restore config revision', 'post-404-shield' ); ?></h1>
 			<hr class="wp-header-end" />
 			<?php if ( null === $incoming ) : ?>
-				<div class="tcc-admin-notice tcc-admin-notice--error"><?php esc_html_e( 'That revision does not exist or is not a valid config.', 'post-404-shield' ); ?></div>
-				<p class="tcc-admin__actions"><a class="button" href="<?php echo esc_url( $back ); ?>">&larr; <?php esc_html_e( 'Back to Post 404 Shield', 'post-404-shield' ); ?></a></p>
+				<div class="post-shield-admin-notice post-shield-admin-notice--error"><?php esc_html_e( 'That revision does not exist or is not a valid config.', 'post-404-shield' ); ?></div>
+				<p class="post-shield-admin__actions"><a class="button" href="<?php echo esc_url( $back ); ?>">&larr; <?php esc_html_e( 'Back to Post 404 Shield', 'post-404-shield' ); ?></a></p>
 			</div>
 				<?php
 				return;
 			endif;
 			?>
 
-			<p class="tcc-admin__lede">
+			<p class="post-shield-admin__lede">
 				<?php
 				printf(
 					/* translators: 1: revision stamp, 2: who generated it. */
@@ -1517,17 +1511,17 @@ class PostShieldAdminController {
 				}
 			}
 			if ( [] !== $warnings ) {
-				echo '<div class="tcc-admin__notices">';
+				echo '<div class="post-shield-admin__notices">';
 				foreach ( $warnings as $warning ) {
-					echo '<div class="tcc-admin-notice tcc-admin-notice--warning">' . esc_html( $warning ) . '</div>';
+					echo '<div class="post-shield-admin-notice post-shield-admin-notice--warning">' . esc_html( $warning ) . '</div>';
 				}
 				echo '</div>';
 			}
 			?>
 
-			<section class="tcc-admin-card">
-				<header class="tcc-admin-card__header"><h2><?php esc_html_e( 'Changes', 'post-404-shield' ); ?></h2></header>
-				<div class="tcc-admin-card__body">
+			<section class="post-shield-admin-card">
+				<header class="post-shield-admin-card__header"><h2><?php esc_html_e( 'Changes', 'post-404-shield' ); ?></h2></header>
+				<div class="post-shield-admin-card__body">
 				<?php
 				$summarise   = static function ( ?array $entry ): string {
 					if ( null === $entry ) {
@@ -1551,12 +1545,12 @@ class PostShieldAdminController {
 
 				$row = static function ( string $label, string $from, string $to ): void {
 					$changed = $from !== $to;
-					echo '<div class="tcc-admin__row' . ( $changed ? ' post-shield-changed' : '' ) . '">';
-					echo '<div class="tcc-admin__row-main"><code class="tcc-admin__chip">' . esc_html( $label ) . '</code>';
+					echo '<div class="post-shield-admin__row' . ( $changed ? ' post-shield-changed' : '' ) . '">';
+					echo '<div class="post-shield-admin__row-main"><code class="post-shield-admin__chip">' . esc_html( $label ) . '</code>';
 					if ( $changed ) {
-						echo '<span class="tcc-admin__badge tcc-admin__badge--warning">' . esc_html__( 'changes', 'post-404-shield' ) . '</span>';
+						echo '<span class="post-shield-admin__badge post-shield-admin__badge--warning">' . esc_html__( 'changes', 'post-404-shield' ) . '</span>';
 					}
-					echo '<span class="tcc-admin__meta">' . esc_html( $from ) . ' &rarr; <strong>' . esc_html( $to ) . '</strong></span></div></div>';
+					echo '<span class="post-shield-admin__meta">' . esc_html( $from ) . ' &rarr; <strong>' . esc_html( $to ) . '</strong></span></div></div>';
 				};
 
 				$excluded_line = static function ( ?array $config ): string {
@@ -1591,14 +1585,14 @@ class PostShieldAdminController {
 				<input type="hidden" name="ps_stamp" value="<?php echo esc_attr( $stamp ); ?>" />
 				<?php wp_nonce_field( 'post_shield_restore' ); ?>
 				<?php if ( $restore_needs_confirm ) : ?>
-					<div class="tcc-admin-notice tcc-admin-notice--warning post-shield-confirm">
+					<div class="post-shield-admin-notice post-shield-admin-notice--warning post-shield-confirm">
 						<label>
 							<input type="checkbox" name="ps_root_confirm" value="1" />
 							<strong><?php esc_html_e( 'This revision turns ROOT MATCHING ON — the shield will decide every URL not owned by a base or exclusion. I understand.', 'post-404-shield' ); ?></strong>
 						</label>
 					</div>
 				<?php endif; ?>
-				<p class="tcc-admin__actions">
+				<p class="post-shield-admin__actions">
 					<button type="submit" class="button button-primary"><?php esc_html_e( 'Restore this revision', 'post-404-shield' ); ?></button>
 					<a class="button" href="<?php echo esc_url( $back ); ?>"><?php esc_html_e( 'Cancel', 'post-404-shield' ); ?></a>
 				</p>

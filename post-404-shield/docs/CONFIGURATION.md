@@ -34,8 +34,7 @@ self-heal and kill switches, see
 
 Settings → Post 404 Shield is built from **WordPress components** (`src/js/admin.js`,
 no build step — it uses the `wp.element` / `wp.components` modules core registers)
-and styled by the shared `tcc-admin-ui` stylesheet (a site that registers its
-own copy wins; otherwise the bundled `src/css/admin-ui.css`). It still saves through an ordinary form POST
+and styled by its own `src/css/admin.css` (everything scoped under `.post-shield-admin`). It still saves through an ordinary form POST
 with the same field names, so every check below stays server-side. Four **status
 tiles** sit above the tabs (active/inactive with who saved it last, types shielded,
 themed 404 pages, root mode); then:
