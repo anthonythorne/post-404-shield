@@ -502,7 +502,7 @@
 			);
 		}
 
-		if (type.hierarchical && !type.unsupportedPost) {
+		if (type.offerMatch && !type.unsupportedPost) {
 			fields.push(
 				el(SelectControl, {
 					...MODERN_SIZED,
@@ -1794,14 +1794,20 @@
 			if (!type.root && !type.unsupportedPost && !type.derivedBase) {
 				add('[url_base]', type.urlBase);
 			}
-			// Matching and depth are only shown (and so only posted) for
-			// hierarchical types; the server keeps the stored values otherwise.
-			if (type.hierarchical && !type.root && !type.unsupportedPost) {
+			// Posted only where the screen shows them — matching when offered
+			// (hierarchical, or stored as full-path), depth for hierarchical slug
+			// types. The server keeps the stored value of anything not posted.
+			if (type.offerMatch && !type.root && !type.unsupportedPost) {
 				add('[match]', type.match);
-				if ('slug' === type.match) {
-					add('[depth_allowed]', type.depthAllowed);
-					add('[depth_action]', type.depthAction);
-				}
+			}
+			if (
+				type.hierarchical &&
+				!type.root &&
+				!type.unsupportedPost &&
+				'slug' === type.match
+			) {
+				add('[depth_allowed]', type.depthAllowed);
+				add('[depth_action]', type.depthAction);
 			}
 			if (type.allowPagination) {
 				add('[allow_pagination]', '1');

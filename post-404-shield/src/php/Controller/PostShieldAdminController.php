@@ -1273,6 +1273,10 @@ class PostShieldAdminController {
 			'enabled'         => null !== $entry && ( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] ),
 			'urlBase'         => isset( $entry['url_base'] ) && is_array( $entry['url_base'] ) ? implode( "\n", $entry['url_base'] ) : $default_base,
 			'match'           => (string) ( $entry['match'] ?? 'slug' ),
+			// Matching is offered for hierarchical types, and for any type already
+			// stored as full-path (so it can be switched back). Fixed per page load:
+			// the control must not vanish mid-edit when the select changes.
+			'offerMatch'      => null === $type_object || (bool) $type_object->hierarchical || 'full-path' === ( $entry['match'] ?? 'slug' ),
 			'allowPagination' => null === $entry || ! isset( $entry['allow_pagination'] ) || false !== $entry['allow_pagination'],
 			'depthAllowed'    => isset( $entry['depth_allowed'] ) && null !== $entry['depth_allowed'] ? (string) (int) $entry['depth_allowed'] : ( null === $entry ? '0' : '' ),
 			'depthAction'     => (string) ( $entry['depth_action'] ?? ( null === $entry ? 'redirect' : 'passthrough' ) ),
