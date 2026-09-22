@@ -441,7 +441,7 @@
 					)
 				)
 			);
-		} else if (!type.unsupportedPost) {
+		} else if (!type.unsupportedPost && !type.root) {
 			fields.push(
 				el(
 					'div',
@@ -502,7 +502,8 @@
 			);
 		}
 
-		if (type.offerMatch && !type.unsupportedPost) {
+		// Root types have no base and are always full-path: nothing to choose.
+		if (type.offerMatch && !type.unsupportedPost && !type.root) {
 			fields.push(
 				el(SelectControl, {
 					...MODERN_SIZED,
@@ -554,6 +555,7 @@
 		// Depth only means something when a post can have posts below it.
 		if (
 			type.hierarchical &&
+			!type.root &&
 			!type.unsupportedPost &&
 			'slug' === type.match
 		) {
