@@ -17,6 +17,7 @@ namespace Post404Shield\Tests;
 use PHPUnit\Framework\TestCase;
 
 use function Post404Shield\read_config;
+use function Post404Shield\config_shape_is_valid;
 use function Post404Shield\config_is_valid;
 use function Post404Shield\locale_pattern_is_valid;
 use function Post404Shield\url_base_is_valid;
@@ -98,6 +99,79 @@ class PostShieldConfigReaderTest extends TestCase {
 	 */
 	private function write( $config, string $guard = '<?php exit; // guard' ): void {
 		file_put_contents( $this->file, $guard . "\n" . json_encode( $config ) . "\n" );
+	}
+
+	/**
+	 * The per-request memo must never serve a stale document. An in-place
+	 * rewrite of the SAME size within the same second is the case a stat()
+	 * key cannot see; the memo compares bytes, so it must catch it.
+	 */
+	public function test_memo_sees_a_same_size_in_place_rewrite() {
+		$a = $this->valid_config();
+		$b = $this->valid_config();
+		$b['entries']['story']['url_base'] = [ 'storiez' ]; // same length as `stories`
+
+		$this->write( $a );
+		$this->assertSame( [ 'stories' ], read_config( $this->file )['entries']['story']['url_base'] );
+
+		$size = filesize( $this->file );
+		$this->write( $b );
+		clearstatcache();
+		$this->assertSame( $size, filesize( $this->file ), 'Precondition: same size.' );
+		$this->assertSame( [ 'storiez' ], read_config( $this->file )['entries']['story']['url_base'] );
+	}
+
+	/**
+	 * The validity verdict is tied to the bytes it was computed for: an invalid
+	 * document swapped in after a valid one reads as null, and back again.
+	 */
+	public function test_memo_revalidates_when_the_document_changes() {
+		$this->write( $this->valid_config() );
+		$this->assertNotNull( read_config( $this->file ) );
+
+		$bad = $this->valid_config();
+		$bad['entries']['story']['url_base'] = [ '../escape' ];
+		$this->write( $bad );
+		$this->assertNull( read_config( $this->file ), 'Invalid replacement is rejected, not served from memo.' );
+
+		$this->write( $this->valid_config() );
+		$this->assertNotNull( read_config( $this->file ) );
+
+		unlink( $this->file );
+		$this->assertNull( read_config( $this->file ), 'Deleted artifact is null, not the memoised copy.' );
+	}
+
+	/**
+	 * The loader's pre-filter check is types only: it passes a document the
+	 * full validator would reject (that is deferred, not skipped), and rejects
+	 * anything the pre-filter could fatal on.
+	 */
+	public function test_shape_check_guards_the_prefilter_only() {
+		$valid = $this->valid_config();
+		$this->assertTrue( config_shape_is_valid( $valid ) );
+
+		$regex_invalid = $valid;
+		$regex_invalid['entries']['story']['url_base'] = [ '../escape' ];
+		$this->assertTrue( config_shape_is_valid( $regex_invalid ), 'Charset is the full validator\'s job.' );
+		$this->assertFalse( config_is_valid( $regex_invalid ) );
+
+		foreach (
+			[
+				[ 'url_base', [ [ 'nested' ] ] ],
+				[ 'url_base', 'stories' ],
+				[ 'enabled', 'yes' ],
+				[ 'mode', [ 'block' ] ],
+				[ 'root', 1 ],
+			] as [ $field, $value ]
+		) {
+			$broken                               = $valid;
+			$broken['entries']['story'][ $field ] = $value;
+			$this->assertFalse( config_shape_is_valid( $broken ), "Rejects $field of the wrong type." );
+		}
+
+		$this->assertFalse( config_shape_is_valid( [ 'entries' => 'x', 'locale' => [ 'mode' => 'none' ] ] ) );
+		$this->assertFalse( config_shape_is_valid( [ 'entries' => [] ] ), 'Locale block required.' );
+		$this->assertFalse( config_shape_is_valid( 'nope' ) );
 	}
 
 	/**

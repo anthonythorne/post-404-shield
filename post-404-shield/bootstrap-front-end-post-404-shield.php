@@ -101,11 +101,16 @@ define( 'POST_SHIELD_LOADED', true );
 	} catch ( \Throwable ) {
 		return;
 	}
-	if ( ! function_exists( 'Post404Shield\\read_config' ) ) {
+	if ( ! function_exists( 'Post404Shield\\read_config' ) || ! function_exists( 'Post404Shield\\config_shape_is_valid' ) ) {
 		return;
 	}
-	$config = \Post404Shield\read_config( $allowlist_dir . '/config.php' );
-	if ( null === $config ) {
+	// Decode + a types-only check first; the full (regex-heavy) validation
+	// runs below, once the pre-filter says this request is shield business.
+	// Most requests are not, and they exit without acting either way — so
+	// deferring the validation changes no outcome, only what it costs.
+	$config_file = $allowlist_dir . '/config.php';
+	$config      = \Post404Shield\read_config_document( $config_file );
+	if ( null === $config || ! \Post404Shield\config_shape_is_valid( $config ) ) {
 		return;
 	}
 	$types = $config['entries'];
@@ -163,6 +168,12 @@ define( 'POST_SHIELD_LOADED', true );
 		}
 	}
 	if ( ! $relevant ) {
+		return;
+	}
+
+	// Shield business: validate the whole document before acting on any of
+	// it. Same file, same request — the decode above is reused, not repeated.
+	if ( null === \Post404Shield\read_config( $config_file ) ) {
 		return;
 	}
 

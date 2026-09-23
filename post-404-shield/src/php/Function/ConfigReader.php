@@ -648,37 +648,154 @@ function config_is_valid( $config ): bool {
 }
 
 /**
+ * Per-request memo slot for one artifact path.
+ *
+ * Holds the raw bytes last read, their decoded document and, once computed,
+ * their validity. Keyed on the CONTENT rather than on stat() identity: stat
+ * has one-second resolution, so an in-place rewrite of the same size within
+ * a second would look unchanged, whereas comparing bytes cannot be fooled.
+ * PHP statics last one request, so nothing here can outlive the request that
+ * read it.
+ *
+ * @param string $file Absolute path to the artifact.
+ *
+ * @return array{raw: ?string, document: ?array<string, mixed>, valid: ?bool}
+ */
+function &config_memo_slot( string $file ): array {
+	static $slots = [];
+	if ( ! isset( $slots[ $file ] ) ) {
+		$slots[ $file ] = [
+			'raw'      => null,
+			'document' => null,
+			'valid'    => null,
+		];
+	}
+	return $slots[ $file ];
+}
+
+/**
+ * Decode the config artifact WITHOUT validating it — memoised per request.
+ *
+ * Text-read only: strip the `<?php exit;` guard line and json_decode the
+ * rest. Null when the file is missing, unreadable, lacks the guard or holds
+ * malformed JSON.
+ *
+ * The file is read every time (cheap) but decoded only when its bytes differ
+ * from the last read, so the second read in a request — pre-boot loader, then
+ * the write side at mu-plugin load — skips the decode and, via read_config(),
+ * the validation too.
+ *
+ * Callers that act on the document MUST validate it: use read_config(), or
+ * config_shape_is_valid() for the loader's pre-filter only.
+ *
+ * @param string $file Absolute path to the artifact.
+ *
+ * @return array<string, mixed>|null The decoded document, or null.
+ */
+function read_config_document( string $file ): ?array {
+	$slot = &config_memo_slot( $file );
+
+	$raw = is_readable( $file ) ? file_get_contents( $file ) : false; // phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
+	if ( false === $raw ) {
+		$slot = [
+			'raw'      => null,
+			'document' => null,
+			'valid'    => null,
+		];
+		return null;
+	}
+	if ( $raw === $slot['raw'] ) {
+		return $slot['document'];
+	}
+
+	$document = null;
+	// Line 1 must be the `<?php exit;` guard; the JSON document follows it.
+	$newline = strpos( $raw, "\n" );
+	if ( false !== $newline && 0 === strpos( $raw, '<?php' ) ) {
+		$decoded  = json_decode( substr( $raw, $newline + 1 ), true );
+		$document = is_array( $decoded ) ? $decoded : null;
+	}
+
+	$slot = [
+		'raw'      => $raw,
+		'document' => $document,
+		'valid'    => null,
+	];
+	return $document;
+}
+
+/**
+ * Whether a decoded document has the TYPES the loader's pre-filter reads.
+ *
+ * Deliberately not validation: no regexes, no charset or reserved-namespace
+ * checks. It only guarantees the pre-filter cannot fatal on a malformed
+ * document (`strpos()` on an array under strict_types, say) — the pre-boot
+ * loader must never fatal. Everything the loader goes on to ACT on is fully
+ * validated by read_config() first, so outcomes are identical: a request that
+ * is not shield business exits without acting whether or not the document is
+ * valid.
+ *
+ * @param mixed $config Decoded JSON document.
+ *
+ * @return bool
+ */
+function config_shape_is_valid( $config ): bool {
+	if ( ! is_array( $config ) || ! isset( $config['entries'], $config['locale'] ) ) {
+		return false;
+	}
+	if ( ! is_array( $config['entries'] ) || ! is_array( $config['locale'] ) || ! is_string( $config['locale']['mode'] ?? null ) ) {
+		return false;
+	}
+	if ( isset( $config['locale']['pattern'] ) && ! is_string( $config['locale']['pattern'] ) ) {
+		return false;
+	}
+	foreach ( $config['entries'] as $entry ) {
+		if ( ! is_array( $entry ) ) {
+			return false;
+		}
+		if ( ( isset( $entry['enabled'] ) && ! is_bool( $entry['enabled'] ) )
+			|| ( isset( $entry['root'] ) && ! is_bool( $entry['root'] ) )
+			|| ( isset( $entry['mode'] ) && ! is_string( $entry['mode'] ) )
+			|| ( isset( $entry['post_type'] ) && ! is_string( $entry['post_type'] ) ) ) {
+			return false;
+		}
+		if ( isset( $entry['url_base'] ) ) {
+			if ( ! is_array( $entry['url_base'] ) ) {
+				return false;
+			}
+			foreach ( $entry['url_base'] as $base ) {
+				if ( ! is_string( $base ) ) {
+					return false;
+				}
+			}
+		}
+	}
+	return true;
+}
+
+/**
  * Read and validate the generated config artifact.
  *
- * Text-read only: strip the `<?php exit;` guard line, json_decode the rest,
- * then re-enforce every runtime invariant (config_is_valid). Returns null on
- * ANY doubt — unreadable file, missing/never-generated artifact, non-PHP first
- * line, malformed JSON, or an invariant violation — and the caller treats null
- * as "shield not in place" (fail-open).
+ * The decoded document (read_config_document()) plus every runtime
+ * invariant (config_is_valid).
+ * Returns null on ANY doubt — unreadable file, missing/never-generated
+ * artifact, non-PHP first line, malformed JSON, or an invariant violation —
+ * and the caller treats null as "shield not in place" (fail-open). The
+ * validity verdict is memoised with the bytes it was computed for, so a
+ * second call in the same request costs one file read.
  *
  * @param string $file Absolute path to the artifact.
  *
  * @return array<string, mixed>|null The validated config document, or null.
  */
 function read_config( string $file ): ?array {
-	if ( ! is_readable( $file ) ) {
+	$document = read_config_document( $file );
+	if ( null === $document ) {
 		return null;
 	}
-	$raw = file_get_contents( $file ); // phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
-	if ( false === $raw ) {
-		return null;
+	$slot = &config_memo_slot( $file );
+	if ( null === $slot['valid'] ) {
+		$slot['valid'] = config_is_valid( $document );
 	}
-
-	// Line 1 must be the `<?php exit;` guard; the JSON document follows it.
-	$newline = strpos( $raw, "\n" );
-	if ( false === $newline || 0 !== strpos( $raw, '<?php' ) ) {
-		return null;
-	}
-
-	$config = json_decode( substr( $raw, $newline + 1 ), true );
-	if ( ! is_array( $config ) || ! config_is_valid( $config ) ) {
-		return null;
-	}
-
-	return $config;
+	return $slot['valid'] ? $document : null;
 }
