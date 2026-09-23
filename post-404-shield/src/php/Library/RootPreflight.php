@@ -364,72 +364,23 @@ class RootPreflight {
 			$has_root = true;
 		}
 
-		foreach ( $entries as $key => $settings ) {
-			if ( ! is_array( $settings ) || ( isset( $settings['enabled'] ) && false === $settings['enabled'] ) ) {
-				continue;
-			}
-
-			$shield_type = (string) ( $settings['post_type'] ?? $key );
-
-			if ( 'block' === ( $settings['mode'] ?? 'allowlist' ) ) {
-				foreach ( (array) ( $settings['url_base'] ?? [] ) as $base ) {
-					if ( null !== \Post404Shield\match_blocked_base( $path, (string) $base, $locale_pattern ) ) {
-						return [
-							'marker' => 'blocked-denied-base',
-							'stage'  => 'based',
-						];
-					}
-				}
-				continue;
-			}
-
-			foreach ( (array) ( $settings['url_base'] ?? [] ) as $base ) {
-				$match = \Post404Shield\match_entry( $path, (string) $base, [], $locale_pattern );
-				if ( null === $match ) {
-					continue;
-				}
-				$based = static function ( string $marker ): array {
-					return [
-						'marker' => $marker,
-						'stage'  => 'based',
-					];
-				};
-				// Both buckets, wildcard-aware — exactly as the loader checks them.
-				// Reading only the operator bucket, or matching exactly, reports a
-				// reserved derived slug (or a `prefix*` family) as a would-block.
-				$reserved = array_merge(
-					(array) ( $settings['reserved_allowlist'] ?? [] ),
-					(array) ( $settings['reserved_derived'] ?? [] )
-				);
-				if ( [] !== $reserved && \Post404Shield\slug_is_reserved( $match['slug'], $reserved ) ) {
-					return $based( 'allowed-reserved-slug' );
-				}
-				$body = $bodies[ $shield_type ] ?? '';
-				if ( '' === $body ) {
-					return $based( 'pass' ); // Mirrors the loader's fail-open return on a missing/empty list.
-				}
-				$allow_pagination = ! isset( $settings['allow_pagination'] ) || false !== $settings['allow_pagination'];
-				$segments         = \Post404Shield\strip_trailing_sub_routes( array_merge( [ $match['slug'] ], $match['extra'] ), $allow_pagination );
-				if ( [] === $segments ) {
-					return $based( 'pass' );
-				}
-				if ( 'full-path' === ( $settings['match'] ?? 'slug' ) ) {
-					return $based( \Post404Shield\is_allowed( implode( '/', $segments ), $body ) ? 'allowed-known-slug' : 'blocked-unknown-slug' );
-				}
-				if ( ! \Post404Shield\is_allowed( $match['slug'], $body ) ) {
-					return $based( 'blocked-unknown-slug' );
-				}
-				$depth_allowed = $settings['depth_allowed'] ?? null;
-				$depth         = count( $segments ) - 1;
-				if ( null === $depth_allowed || $depth <= (int) $depth_allowed ) {
-					return $based( 'allowed-known-slug' );
-				}
-				$action = $settings['depth_action'] ?? 'passthrough';
-				if ( '404' === $action ) {
-					return $based( 'blocked-deep-path' );
-				}
-				return $based( 'redirect' === $action ? 'redirect-deep-path' : 'allowed-deep-path' );
-			}
+		// The based stage is the loader's own decision function, so this gate
+		// cannot drift from what runs pre-boot. Bodies are already in memory;
+		// a type with none reads as missing, exactly like a missing file.
+		$based = \Post404Shield\decide_based(
+			$path,
+			$path,
+			$entries,
+			static function ( string $type ) use ( $bodies ): ?string {
+				return $bodies[ $type ] ?? null;
+			},
+			$locale_pattern
+		);
+		if ( null !== $based ) {
+			return [
+				'marker' => $based['marker'],
+				'stage'  => 'based',
+			];
 		}
 
 		if ( ! $has_root ) {

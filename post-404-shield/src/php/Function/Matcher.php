@@ -389,3 +389,154 @@ function prefers_markdown( string $accept ): bool {
 	}
 	return $markdown > 0.0 && $markdown >= $html;
 }
+
+/**
+ * The based-entry decision for one request — what the pre-boot loader does,
+ * returned as data instead of emitted.
+ *
+ * The single source of truth for the based stage: the loader acts on the
+ * result (headers, TTLs, the 404 body, the redirect) and the root preflight
+ * replays it. Two hand-written copies of this tree drifted twice before it
+ * was shared, and each drift was a gate that could not see what the loader
+ * would do.
+ *
+ * Entries are walked in config order and the FIRST entry/base that claims
+ * the path decides. A base whose substring matches but whose precise match
+ * fails does NOT claim it — the next base, then the next entry, may (a
+ * return there was a live shield bypass).
+ *
+ * Markers: `blocked-denied-base`, `allowed-reserved-slug`,
+ * `allowed-known-slug`, `blocked-unknown-slug`, `allowed-deep-path`,
+ * `blocked-deep-path`, `redirect-deep-path` (with `location`), and `pass` —
+ * claimed, but handed to WordPress with no marker (missing or empty
+ * allowlist, a bare sub-route, or a redirect target that cannot be trusted).
+ * Null means no entry claimed the path: the root stage decides next.
+ *
+ * Pure: the only I/O is through $allowlist, which the loader backs with a
+ * lazy file read and the preflight with bodies already in memory.
+ *
+ * @param string                    $uri            Request URI, query included (substring pre-checks, redirect query).
+ * @param string                    $path           Its path component.
+ * @param array<string|int, mixed>  $entries        Validated config entries, in config order.
+ * @param callable(string): ?string $allowlist      Raw allowlist (guard line + lines) for a type; null when missing or unreadable.
+ * @param string                    $locale_pattern Locale pattern body ('' = none).
+ *
+ * @return array{marker: string, key: string|int, type: string, locale: string, location: string}|null
+ */
+function decide_based( string $uri, string $path, array $entries, callable $allowlist, string $locale_pattern ): ?array {
+	foreach ( $entries as $key => $settings ) {
+		if ( ! is_array( $settings ) || ( isset( $settings['enabled'] ) && false === $settings['enabled'] ) ) {
+			continue;
+		}
+		$type     = (string) ( $settings['post_type'] ?? $key );
+		$decision = static function ( string $marker, string $locale = '', string $location = '' ) use ( $key, $type ): array {
+			return [
+				'marker'   => $marker,
+				'key'      => $key,
+				'type'     => $type,
+				'locale'   => $locale,
+				'location' => $location,
+			];
+		};
+
+		// mode=block: the bare base and anything under it, at any depth.
+		if ( 'block' === ( $settings['mode'] ?? 'allowlist' ) ) {
+			foreach ( (array) ( $settings['url_base'] ?? [] ) as $base ) {
+				if ( false === strpos( $uri, '/' . $base ) ) {
+					continue;
+				}
+				$blocked = match_blocked_base( $path, (string) $base, $locale_pattern );
+				if ( null !== $blocked ) {
+					return $decision( 'blocked-denied-base', (string) $blocked['locale'] );
+				}
+			}
+			continue;
+		}
+
+		foreach ( (array) ( $settings['url_base'] ?? [] ) as $base ) {
+			if ( false === strpos( $uri, '/' . $base . '/' ) ) {
+				continue;
+			}
+			$match = match_entry( $path, (string) $base, [], $locale_pattern );
+			if ( null === $match ) {
+				continue; // Substring only — let a later base or entry claim it.
+			}
+
+			// Both reserved buckets, wildcard-aware: operator-typed (exact) and
+			// derived from redirect plugins (may carry `prefix*`).
+			$reserved = array_merge(
+				(array) ( $settings['reserved_allowlist'] ?? [] ),
+				(array) ( $settings['reserved_derived'] ?? [] )
+			);
+			if ( [] !== $reserved && slug_is_reserved( $match['slug'], $reserved ) ) {
+				return $decision( 'allowed-reserved-slug' );
+			}
+
+			// Missing, unreadable or empty allowlist → WordPress (fail-open).
+			// O(1) emptiness test: only the byte after the guard's newline.
+			$raw = $allowlist( $type );
+			if ( null === $raw ) {
+				return $decision( 'pass' );
+			}
+			$guard_end = strpos( $raw, "\n" );
+			if ( false === $guard_end || ! isset( $raw[ $guard_end + 1 ] ) || "\n" === $raw[ $guard_end + 1 ] ) {
+				return $decision( 'pass' );
+			}
+
+			$allow_pagination = ! isset( $settings['allow_pagination'] ) || false !== $settings['allow_pagination'];
+			$segments         = strip_trailing_sub_routes( array_merge( [ $match['slug'] ], $match['extra'] ), $allow_pagination );
+			if ( [] === $segments ) {
+				return $decision( 'pass' ); // A sub-route alone (`/{base}/feed/`) — WordPress owns it.
+			}
+
+			// match=full-path: the whole sub-path is exact-matched; no depth policy.
+			if ( 'full-path' === ( $settings['match'] ?? 'slug' ) ) {
+				return is_allowed( implode( '/', $segments ), $raw )
+					? $decision( 'allowed-known-slug' )
+					: $decision( 'blocked-unknown-slug', (string) $match['locale'] );
+			}
+
+			if ( ! is_allowed( $match['slug'], $raw ) ) {
+				return $decision( 'blocked-unknown-slug', (string) $match['locale'] );
+			}
+
+			$depth_allowed = $settings['depth_allowed'] ?? null;
+			if ( null === $depth_allowed || count( $segments ) - 1 <= (int) $depth_allowed ) {
+				return $decision( 'allowed-known-slug' );
+			}
+
+			$action = $settings['depth_action'] ?? 'passthrough';
+			if ( 'passthrough' === $action ) {
+				return $decision( 'allowed-deep-path' );
+			}
+			if ( '404' === $action ) {
+				return $decision( 'blocked-deep-path', (string) $match['locale'] );
+			}
+
+			// 'redirect': 301 to the truncation, query string kept. A locale the
+			// operator's pattern captured is only trusted if it is a plain
+			// segment — a custom character class can span `/` and turn the target
+			// into `//evil.com/…` — and a target that could leave the site fails
+			// open rather than redirect.
+			if ( 'default' !== $match['locale'] && 1 !== preg_match( '/^[a-z0-9-]+$/', (string) $match['locale'] ) ) {
+				return $decision( 'pass' );
+			}
+			$kept   = array_slice( $match['extra'], 0, (int) $depth_allowed );
+			$target = ( 'default' === $match['locale'] ? '' : '/' . $match['locale'] ) . '/' . $base . '/' . $match['slug'];
+			if ( [] !== $kept ) {
+				$target .= '/' . implode( '/', $kept );
+			}
+			$target .= '/';
+			$query   = parse_url( $uri, PHP_URL_QUERY ); // phpcs:ignore WordPress.WP.AlternativeFunctions.parse_url_parse_url -- pure and pre-boot: wp_parse_url() may not exist.
+			if ( is_string( $query ) && '' !== $query ) {
+				$target .= '?' . $query;
+			}
+			$target = str_replace( [ "\r", "\n", "\0" ], '', $target ); // Header-injection guard.
+			if ( 0 === strpos( $target, '//' ) || 0 === strpos( $target, '/\\' ) ) {
+				return $decision( 'pass' );
+			}
+			return $decision( 'redirect-deep-path', (string) $match['locale'], $target );
+		}
+	}
+	return null;
+}

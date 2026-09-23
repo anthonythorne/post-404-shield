@@ -193,7 +193,9 @@ define( 'POST_SHIELD_LOADED', true );
 	} catch ( \Throwable ) {
 		return;
 	}
-	if ( ! function_exists( 'Post404Shield\\match_entry' ) ) {
+	// Both checked: a Matcher.php from another release (a half-finished deploy)
+	// must leave the shield off, never fatal the request.
+	if ( ! function_exists( 'Post404Shield\\match_entry' ) || ! function_exists( 'Post404Shield\\decide_based' ) ) {
 		return;
 	}
 
@@ -347,221 +349,62 @@ define( 'POST_SHIELD_LOADED', true );
 		return; // Valid token — the baker's own loopback; let WordPress render it.
 	}
 
-	foreach ( $types as $post_type => $settings ) {
-		if ( isset( $settings['enabled'] ) && false === $settings['enabled'] ) {
-			continue;
+	// --- Based entries -------------------------------------------------------
+	// The decision itself lives in decide_based() (Matcher.php), shared with
+	// the root preflight so the gate replays exactly what runs here. This block
+	// only carries it out: marker header, New Relic tag, cache lifetimes, the
+	// 404 body or the redirect. $emit_404 always exits.
+	$read_allowlist = static function ( string $type ) use ( $allowlist_dir ): ?string {
+		$file = $allowlist_dir . '/' . $type . '/allowlist.php';
+		if ( ! is_readable( $file ) ) {
+			return null;
 		}
-
-		// Effective CPT: an entry may name the registered CPT it queries via
-		// `post_type` (defaults to the entry key) — every base in the entry reads
-		// that ONE shared allowlist.
-		$shield_type = (string) ( $settings['post_type'] ?? $post_type );
-
-		// Per-entry cache lifetime; null => use the per-outcome default above.
-		$entry_ttl = isset( $settings['cache_ttl'] ) ? max( 0, (int) $settings['cache_ttl'] ) : null;
-		// Per-entry CDN-edge TTL (publishable outcomes only); null => global default.
+		$raw = file_get_contents( $file ); // phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
+		return false === $raw ? null : $raw;
+	};
+	$decision = \Post404Shield\decide_based( $uri, $path, $types, $read_allowlist, $locale_pattern );
+	if ( null !== $decision ) {
+		$settings    = $types[ $decision['key'] ];
+		$shield_type = $decision['type'];
+		$marker      = $decision['marker'];
+		// Per-entry lifetimes; null => the per-outcome defaults above.
+		$entry_ttl      = isset( $settings['cache_ttl'] ) ? max( 0, (int) $settings['cache_ttl'] ) : null;
 		$entry_edge_ttl = isset( $settings['edge_ttl'] ) ? max( 0, (int) $settings['edge_ttl'] ) : null;
 
-		// mode=block: the base has no real content at all — the bare base and
-		// anything under it, at any depth, is a cacheable themed 404. No allowlist
-		// is read (there is nothing to allow) and no generator runs for the entry.
-		// Safe to cache hard: no publish can ever turn one of these into a page.
-		if ( 'block' === ( $settings['mode'] ?? 'allowlist' ) ) {
-			foreach ( (array) ( $settings['url_base'] ?? [] ) as $base ) {
-				if ( false === strpos( $uri, '/' . $base ) ) {
-					continue;
-				}
-				$blocked = \Post404Shield\match_blocked_base( $path, (string) $base, $locale_pattern );
-				if ( null === $blocked ) {
-					continue;
-				}
-				$nr_tag( 'blocked-denied-base', $shield_type );
-				$emit_404( 'blocked-denied-base', $blocked['locale'], $entry_ttl ?? $denied_base_ttl );
-			}
-			continue;
-		}
+		switch ( $marker ) {
+			case 'pass':
+				return; // Claimed, but WordPress decides — no marker.
 
-		foreach ( (array) ( $settings['url_base'] ?? [] ) as $base ) {
-			if ( false === strpos( $uri, '/' . $base . '/' ) ) {
-				continue;
-			}
+			case 'blocked-denied-base':
+				// Nothing can ever be published under a denied base: cache hard.
+				$nr_tag( $marker, $shield_type );
+				$emit_404( $marker, $decision['locale'], $entry_ttl ?? $denied_base_ttl );
+				return;
 
-			// Match without the reserved list so a reserved slug is flagged distinctly
-			// (rather than silently falling through like a structural non-match).
-			$match = \Post404Shield\match_entry( $path, (string) $base, [], $locale_pattern );
-			if ( null === $match ) {
-				// NOT a return: the strpos pre-check above is substring-based, so a URI
-				// that merely CONTAINS this base mid-path lands here (e.g. a `page`
-				// entry pre-matching /accommodation/x/page/2/). A return would skip
-				// every later base/entry — a live-proven shield bypass. Let the next
-				// base, then the next entry, try to claim the URI; if none does, the
-				// loop ends and the request falls through to WordPress anyway.
-				continue;
-			}
+			case 'blocked-unknown-slug':
+			case 'blocked-deep-path':
+				// Short TTLs: publishing the slug (or a child) makes the URL real.
+				$nr_tag( $marker, $shield_type );
+				$emit_404( $marker, $decision['locale'], $entry_ttl ?? $publishable_ttl, $entry_edge_ttl ?? $publishable_edge_ttl );
+				return;
 
-			// Reserved slug — a real URL at this base owned by another post type (e.g.
-			// a /team/team/ listing PAGE). Deliberately allow, with a
-			// marker so debugging can tell it apart from "the shield never ran".
-			// Two buckets, same meaning at match time: `reserved_allowlist` is
-			// operator-typed and exact; `reserved_derived` is rebuilt from the
-			// site's redirect plugins and may carry `prefix*` entries. They are
-			// stored separately so a rebuild can replace the derived bucket
-			// without ever touching what an operator typed.
-			$reserved = array_merge(
-				(array) ( $settings['reserved_allowlist'] ?? [] ),
-				(array) ( $settings['reserved_derived'] ?? [] )
-			);
-			if ( [] !== $reserved && \Post404Shield\slug_is_reserved( $match['slug'], $reserved ) ) {
-				$nr_tag( 'allowed-reserved-slug', $shield_type );
+			case 'redirect-deep-path':
+				$nr_tag( $marker, $shield_type );
 				if ( ! headers_sent() ) {
-					header( 'X-Post-Shield: allowed-reserved-slug' );
+					header( 'X-Post-Shield: redirect-deep-path' );
+					header( 'Location: ' . $decision['location'], true, 301 );
 				}
-				return;
-			}
+				exit;
 
-			// Read this type's allowlist. Missing/empty → fall through (fail-open).
-			$allowlist_file = $allowlist_dir . '/' . $shield_type . '/allowlist.php';
-			if ( ! is_readable( $allowlist_file ) ) {
-				return;
-			}
-			$raw = file_get_contents( $allowlist_file ); // phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
-			if ( false === $raw ) {
-				return;
-			}
-
-			// Line 1 is the `<?php exit;` guard (newline-terminated); slugs follow one
-			// per line. If nothing follows the guard the allowlist is empty → fall
-			// through rather than 404 every URL at this base (fail-open). O(1): inspect
-			// only the byte after the guard's newline — never copy a large body.
-			$guard_end = strpos( $raw, "\n" );
-			if ( false === $guard_end || ! isset( $raw[ $guard_end + 1 ] ) || "\n" === $raw[ $guard_end + 1 ] ) {
-				return;
-			}
-
-			// Pagination allowance (per-type checkbox, default ON): ticked, the
-			// pagination sub-routes (`page/N`, `comment-page-N`, bare-numeric
-			// <!--nextpage-->) are stripped before matching; unticked they count
-			// as ordinary segments, so fake pagination under a type that never
-			// paginates fast-404s. Core sub-routes (feed/embed/trackback) are
-			// always stripped regardless.
-			$allow_pagination = ! isset( $settings['allow_pagination'] ) || false !== $settings['allow_pagination'];
-
-			// match=full-path: the allowlist holds FULL hierarchical sub-paths
-			// relative to the base (one per line); the whole post-base sub-path is
-			// exact-matched and all depth policy is skipped. Trailing sub-routes
-			// of a real page are stripped per the rules above so they pass through
-			// with their parent instead of 404ing (fail-closed guard b).
-			if ( 'full-path' === ( $settings['match'] ?? 'slug' ) ) {
-				$segments = \Post404Shield\strip_trailing_sub_routes( array_merge( [ $match['slug'] ], $match['extra'] ), $allow_pagination );
-				if ( [] === $segments ) {
-					return; // The sub-route alone (e.g. /{base}/feed/) — WordPress owns it.
-				}
-
-				if ( ! \Post404Shield\is_allowed( implode( '/', $segments ), $raw ) ) {
-					$nr_tag( 'blocked-unknown-slug', $shield_type );
-					$emit_404( 'blocked-unknown-slug', $match['locale'], $entry_ttl ?? $publishable_ttl, $entry_edge_ttl ?? $publishable_edge_ttl );
-				}
-
-				$nr_tag( 'allowed-known-slug', $shield_type );
+			default:
+				// allowed-known-slug, allowed-reserved-slug, allowed-deep-path:
+				// hand off to WordPress, marked so debugging can tell it apart
+				// from "the shield never ran".
+				$nr_tag( $marker, $shield_type );
 				if ( ! headers_sent() ) {
-					header( 'X-Post-Shield: allowed-known-slug' );
+					header( 'X-Post-Shield: ' . $marker );
 				}
 				return;
-			}
-
-			// Slug mode. Trailing sub-routes are stripped FIRST (per the pagination
-			// checkbox), for two reasons: an all-sub-route path (`/{base}/feed/`,
-			// `/{base}/page/2/` — archive feeds/pagination) empties out and belongs
-			// to WordPress, never the allowlist; and pagination under a real slug
-			// (`/{slug}/page/2/`) must not count toward depth, so a tight
-			// `depth_allowed` + `depth_action: 404` can no longer eat it (the
-			// slug-mode depth guardrail). Stripping only trims the tail, so the
-			// slug itself is untouched.
-			$segments = \Post404Shield\strip_trailing_sub_routes( array_merge( [ $match['slug'] ], $match['extra'] ), $allow_pagination );
-			if ( [] === $segments ) {
-				return; // The sub-route alone — WordPress owns it.
-			}
-
-			// Fake top-level slug → cacheable 404 before the render, at any depth.
-			// is_allowed scans the raw buffer directly for "\n{slug}\n" (every slug,
-			// the first included, sits between two newlines), so even a 100 KB+ list
-			// is one SIMD substring scan with no body copy.
-			if ( ! \Post404Shield\is_allowed( $match['slug'], $raw ) ) {
-				$nr_tag( 'blocked-unknown-slug', $shield_type );
-				// Short edge TTL: publishing this slug makes the URL real immediately.
-				$emit_404( 'blocked-unknown-slug', $match['locale'], $entry_ttl ?? $publishable_ttl, $entry_edge_ttl ?? $publishable_edge_ttl );
-			}
-
-			// Real slug. Within the allowed depth → hand off to WordPress.
-			$depth_allowed = $settings['depth_allowed'] ?? null;
-			$depth         = count( $segments ) - 1;
-			if ( null === $depth_allowed || $depth <= (int) $depth_allowed ) {
-				$nr_tag( 'allowed-known-slug', $shield_type );
-				if ( ! headers_sent() ) {
-					header( 'X-Post-Shield: allowed-known-slug' );
-				}
-				return;
-			}
-
-			// Too deep under a valid slug — behaviour per depth_action.
-			$action = $settings['depth_action'] ?? 'passthrough';
-
-			// 'passthrough' (default) → let WordPress assess the deeper path.
-			if ( 'passthrough' === $action ) {
-				$nr_tag( 'allowed-deep-path', $shield_type );
-				if ( ! headers_sent() ) {
-					header( 'X-Post-Shield: allowed-deep-path' );
-				}
-				return;
-			}
-
-			// '404' → cacheable 404. Short TTL: a deeper path under a real slug can
-			// become routable (a new child/sub-route), same publish hazard as above.
-			if ( '404' === $action ) {
-				$nr_tag( 'blocked-deep-path', $shield_type );
-				$emit_404( 'blocked-deep-path', $match['locale'], $entry_ttl ?? $publishable_ttl, $entry_edge_ttl ?? $publishable_edge_ttl );
-			}
-
-			// 'redirect' → 301 to the truncation (locale + base + slug + first N levels),
-			// preserving the original query string. With no locale segment configured
-			// the matcher returned the literal `default`, which never appears in URLs.
-			// The locale comes from an operator-supplied pattern. In `custom` mode a
-			// character class can span `/` — `[,-z]{1,20}` passes the validator —
-			// so the capture can be `/evil.com`, making the target a protocol-
-			// relative `//evil.com/…`: an open redirect off the site. Fail OPEN
-			// (hand the request to WordPress) rather than redirect to a value we
-			// can't trust.
-			if ( 'default' !== $match['locale'] && 1 !== preg_match( '/^[a-z0-9-]+$/', (string) $match['locale'] ) ) {
-				return;
-			}
-
-			$kept   = array_slice( $match['extra'], 0, (int) $depth_allowed );
-			$target = ( 'default' === $match['locale'] ? '' : '/' . $match['locale'] ) . '/' . $base . '/' . $match['slug'];
-			if ( [] !== $kept ) {
-				$target .= '/' . implode( '/', $kept );
-			}
-			$target .= '/';
-
-			// Carry the query string over so filters/UTMs etc. survive the redirect.
-			$query = parse_url( $uri, PHP_URL_QUERY ); // phpcs:ignore WordPress.WP.AlternativeFunctions.parse_url_parse_url -- wp_parse_url() does not exist pre-boot.
-			if ( is_string( $query ) && '' !== $query ) {
-				$target .= '?' . $query;
-			}
-
-			$target = str_replace( [ "\r", "\n", "\0" ], '', $target ); // header-injection guard.
-
-			// Belt and braces: whatever produced it, a Location starting `//` (or
-			// `/\`, which browsers normalise the same way) leaves the site.
-			if ( 0 === strpos( $target, '//' ) || 0 === strpos( $target, '/\\' ) ) {
-				return;
-			}
-
-			$nr_tag( 'redirect-deep-path', $shield_type );
-			if ( ! headers_sent() ) {
-				header( 'X-Post-Shield: redirect-deep-path' );
-				header( 'Location: ' . $target, true, 301 );
-			}
-			exit;
 		}
 	}
 
