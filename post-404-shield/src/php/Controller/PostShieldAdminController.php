@@ -52,6 +52,11 @@ class PostShieldAdminController {
 	private const PAGE_SLUG = 'post-404-shield';
 
 	/**
+	 * The capability every screen, handler and endpoint of this page requires.
+	 */
+	private const CAPABILITY = 'manage_options';
+
+	/**
 	 * Errors raised while assembling the candidate from the posted form, before
 	 * the document is well-formed enough for validate() to speak about them.
 	 *
@@ -136,6 +141,35 @@ class PostShieldAdminController {
 	}
 
 	/**
+	 * Stop an admin-post handler unless the user may manage the shield.
+	 *
+	 * Each handler still calls check_admin_referer() itself, with its own
+	 * action, on the line before: WPCS's nonce sniff only recognises a direct
+	 * call in the function that reads $_POST, and the sites that vendor this
+	 * plugin lint it with their own rulesets.
+	 *
+	 * @return void
+	 */
+	private function require_capability(): void {
+		if ( ! current_user_can( self::CAPABILITY ) ) {
+			wp_die( esc_html__( 'Insufficient permissions.', 'post-404-shield' ) );
+		}
+	}
+
+	/**
+	 * Stop an AJAX endpoint with a 403 unless the user may manage the shield.
+	 * The nonce is checked inline by each endpoint, for the same reason as
+	 * require_capability().
+	 *
+	 * @return void
+	 */
+	private function require_capability_json(): void {
+		if ( ! current_user_can( self::CAPABILITY ) ) {
+			wp_send_json_error( [ 'message' => __( 'Insufficient permissions.', 'post-404-shield' ) ], 403 );
+		}
+	}
+
+	/**
 	 * Add the page under Settings.
 	 *
 	 * @return void
@@ -144,7 +178,7 @@ class PostShieldAdminController {
 		add_options_page(
 			__( 'Post 404 Shield', 'post-404-shield' ),
 			__( 'Post 404 Shield', 'post-404-shield' ),
-			'manage_options',
+			self::CAPABILITY,
 			self::PAGE_SLUG,
 			[ $this, 'render_page' ]
 		);
@@ -164,9 +198,7 @@ class PostShieldAdminController {
 	 */
 	public function handle_save_config(): void {
 		check_admin_referer( 'post_shield_save_config' );
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_die( esc_html__( 'Insufficient permissions.', 'post-404-shield' ) );
-		}
+		$this->require_capability();
 
 		$previous             = $this->current_document();
 		$this->request_errors = [];
@@ -229,9 +261,7 @@ class PostShieldAdminController {
 	 */
 	public function handle_restore(): void {
 		check_admin_referer( 'post_shield_restore' );
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_die( esc_html__( 'Insufficient permissions.', 'post-404-shield' ) );
-		}
+		$this->require_capability();
 
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
 		$stamp    = isset( $_POST['ps_stamp'] ) ? sanitize_text_field( wp_unslash( $_POST['ps_stamp'] ) ) : '';
@@ -273,9 +303,7 @@ class PostShieldAdminController {
 	 */
 	public function handle_disable(): void {
 		check_admin_referer( 'post_shield_disable' );
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_die( esc_html__( 'Insufficient permissions.', 'post-404-shield' ) );
-		}
+		$this->require_capability();
 
 		$current = $this->current_document();
 		if ( null === $current || [] === ( $current['entries'] ?? [] ) ) {
@@ -686,9 +714,7 @@ class PostShieldAdminController {
 	 */
 	public function ajax_rebuild(): void {
 		check_ajax_referer( 'post_shield_rebuild' );
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_send_json_error( [ 'message' => __( 'Insufficient permissions.', 'post-404-shield' ) ], 403 );
-		}
+		$this->require_capability_json();
 
 		$post_type = isset( $_POST['post_type'] ) ? sanitize_key( wp_unslash( $_POST['post_type'] ) ) : '';
 		if ( ! in_array( $post_type, $this->post_types, true ) ) {
@@ -713,9 +739,7 @@ class PostShieldAdminController {
 	 */
 	public function ajax_bake(): void {
 		check_ajax_referer( 'post_shield_bake_404' );
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_send_json_error( [ 'message' => __( 'Insufficient permissions.', 'post-404-shield' ) ], 403 );
-		}
+		$this->require_capability_json();
 
 		$state = $this->queue_bake();
 		wp_send_json_success(
@@ -737,9 +761,7 @@ class PostShieldAdminController {
 	 */
 	public function ajax_status(): void {
 		check_ajax_referer( 'post_shield_status' );
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_send_json_error( [ 'message' => __( 'Insufficient permissions.', 'post-404-shield' ) ], 403 );
-		}
+		$this->require_capability_json();
 
 		$subject = isset( $_GET['subject'] ) ? sanitize_key( wp_unslash( $_GET['subject'] ) ) : '';
 
@@ -777,9 +799,7 @@ class PostShieldAdminController {
 	 */
 	public function handle_rebuild_request(): void {
 		check_admin_referer( 'post_shield_rebuild' );
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_die( esc_html__( 'Insufficient permissions.', 'post-404-shield' ) );
-		}
+		$this->require_capability();
 
 		$post_type = isset( $_POST['post_type'] ) ? sanitize_key( wp_unslash( $_POST['post_type'] ) ) : '';
 		if ( ! in_array( $post_type, $this->post_types, true ) ) {
@@ -796,9 +816,7 @@ class PostShieldAdminController {
 	 */
 	public function handle_bake_request(): void {
 		check_admin_referer( 'post_shield_bake_404' );
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_die( esc_html__( 'Insufficient permissions.', 'post-404-shield' ) );
-		}
+		$this->require_capability();
 
 		$this->redirect_back( $this->queue_bake(), '404' );
 	}
@@ -865,7 +883,7 @@ class PostShieldAdminController {
 	 * @return void
 	 */
 	public function enqueue_assets( string $hook_suffix ): void {
-		if ( 'settings_page_' . self::PAGE_SLUG !== $hook_suffix || ! current_user_can( 'manage_options' ) ) {
+		if ( 'settings_page_' . self::PAGE_SLUG !== $hook_suffix || ! current_user_can( self::CAPABILITY ) ) {
 			return;
 		}
 
@@ -933,7 +951,7 @@ class PostShieldAdminController {
 	 * @return void
 	 */
 	public function render_page(): void {
-		if ( ! current_user_can( 'manage_options' ) ) {
+		if ( ! current_user_can( self::CAPABILITY ) ) {
 			return;
 		}
 
