@@ -325,8 +325,24 @@ class PostShieldAdminController {
 			if ( ! is_array( $row ) ) {
 				continue;
 			}
-			$label = sanitize_key( (string) ( $row['label'] ?? '' ) );
-			$bases = $this->lines_from_textarea( (string) ( $row['url_base'] ?? '' ) );
+			$raw_label = trim( (string) ( $row['label'] ?? '' ) );
+			$label     = sanitize_key( $raw_label );
+			$bases     = $this->lines_from_textarea( (string) ( $row['url_base'] ?? '' ) );
+			// A row with bases but no usable name is NOT a cleared row: dropping
+			// it would discard what the operator typed — or delete an existing
+			// block entry whose name they edited — behind a "Config saved"
+			// banner. sanitize_key() keeps only a–z, 0–9, `-` and `_`, so a
+			// name such as "!!!" or one in another script reduces to nothing.
+			if ( '' === $label && [] !== $bases ) {
+				$this->request_errors[] = '' === $raw_label
+					? __( 'A blocked base has addresses but no name. Give it a name, or clear its addresses to remove it.', 'post-404-shield' )
+					: sprintf(
+						/* translators: %s: the name as typed. */
+						__( 'Blocked base name "%s" has no usable characters. Use lowercase letters, numbers, hyphens or underscores.', 'post-404-shield' ),
+						$raw_label
+					);
+				continue;
+			}
 			if ( '' === $label || [] === $bases ) {
 				continue; // A cleared/blank repeater row deletes the entry.
 			}
