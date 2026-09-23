@@ -79,7 +79,8 @@ request falls through to WordPress; the generator self-heals the artifact from
 the `post_shield_config` option on the next admin request or the daily health
 cron. So Tier 1 can be
 wired before an environment has any config; it just does nothing until a config
-is saved (or an option is staged / `wp post-shield config import-legacy` run).
+is saved (or an option is staged / `wp post-shield config import-legacy <file>`
+run).
 
 Emergency off-switch that survives self-heal: `define( 'POST_SHIELD_DISABLED',
 true );` in `wp-config.php`, ABOVE the Tier-1 require — checked before anything

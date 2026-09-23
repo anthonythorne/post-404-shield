@@ -55,8 +55,12 @@ uploads/post-404-shield/config.php  ◀──read ONLY this──  loader + gene
 - **The edit surface** is the settings page; it validates everything and stores
   the document in the `post_shield_config` option (main site, not autoloaded).
 - **The runtime truth** is the artifact `uploads/post-404-shield/config.php`:
-  line 1 the `<?php exit;` guard, the rest one JSON document. It is **never
-  executed** — the pure `ConfigReader` text-reads it, strips the guard line,
+  line 1 the `<?php exit; __halt_compiler();` guard, the rest one JSON
+  document. The guard line also carries a small pre-filter (` prefilter:` —
+  root mode on or off, and the base substrings that make a URI shield
+  business), so a request that is not shield business exits without decoding
+  the document; an artifact without it is decoded and filtered as before. It
+  is **never executed** — the pure `ConfigReader` text-reads it, strips the guard line,
   `json_decode`s and **re-validates every invariant** (base charsets, enum
   fields, the locale pattern, int-or-null numerics). Anything wrong → the
   shield is simply not in place (fail-open). This is a security posture, not a
@@ -99,8 +103,12 @@ filter adds the probe path's Disallow line) and the bake probe's own loopback.
 A site running `ALTERNATE_WP_CRON` loads it everywhere, because that setting
 runs cron inside ordinary page requests. A plain page view never builds,
 bakes or saves anything, so it skips the ten class files and four controllers;
-on a production site that was about 6 ms per uncached request. If the check is
-missing or fails, the loader falls back to loading the generator as before.
+on a production site that was about 6 ms per uncached request. If something
+does write a post during a page view — PublishPress Revisions publishes a due
+scheduled revision inline when its WP-Cron scheduling is off — the first
+post-write hook loads the generator there and then, and its listeners run in
+the same dispatch. If the check is missing or fails, the loader falls back to
+loading the generator as before.
 
 Inside the generator, the three schedule checks (weekly bake, daily rebuild,
 daily health) run only in wp-admin, on a cron run or under WP-CLI.
@@ -193,16 +201,22 @@ slug is appended to the file **synchronously, in the same request**. Triggers
 incl. scheduled auto-publish, which fires in cron), `save_post_<type>` (a slug
 rename), and PublishPress's `revision_applied` / `revision_published` (a revision
 that renames the live post). Full-path and root entries append the post's whole
-`get_page_uri()` path, and a slug/parent change re-appends the **entire affected
-subtree** in the same request. With root mode on, two more instant appends run:
-a media upload adds the attachment's URI + slug to root-extras (`add_attachment`
-/ `edit_attachment`), and a root-type slug/parent change appends the OLD address
-(bare + in both parent contexts) so WordPress keeps serving its 301
-(`post_updated`, after core stores `_wp_old_slug`). The append is a pure
-`O_APPEND` — it never reads the file — so concurrent publishes, including many
-translations sharing a slug, can't race; the only cost is a duplicate line. A
-new or renamed post is reachable the instant it goes live, even
-mid-release-storm.
+path (a flat type's is its bare slug — WordPress ignores its `post_parent`), and
+a slug/parent change re-appends the **entire affected subtree** in the same
+request — even when the moved post is itself a draft, since WordPress still
+serves its published children at the new path. A content-only edit walks
+nothing. With root mode on, three more instant appends run: a media upload adds
+the attachment's URI + slug to root-extras (`add_attachment` /
+`edit_attachment`) when its post is live, a post going live adds its media, and
+a root-type slug/parent change appends the OLD address (bare + in both parent
+contexts) so WordPress keeps serving its 301 (`post_updated`, after core stores
+`_wp_old_slug`). An append skips lines already listed, and it and a rebuild take
+the same per-list lock (`.lock` in the list's directory) from the rebuild's
+SELECT to its rename — so an append can never land on a file the rename then
+replaces, and concurrent publishes, including many translations sharing a slug,
+can't lose one. The lock waits at most 20 s, then goes ahead unlocked rather
+than hang an editor's save. A new or renamed post is reachable the instant it
+goes live, even mid-release-storm.
 
 **Purge on the same hook.** Right after the append, the controller purges that
 post's exact URL (both slash forms) from the WP Engine page cache — because a
@@ -231,7 +245,7 @@ time-sensitive thing; the daily pass covers correctness.
 | Concern | Handling |
 |---|---|
 | 100 posts publish in one window | Each just appends its slug in its own request — no queue, no admin impact. Scheduled publishes append from cron. |
-| Same type, translations sharing a slug | Each append lands (pure `O_APPEND`, serialised by `LOCK_EX`); a shared slug makes duplicate lines — harmless. |
+| Same type, translations sharing a slug | Each append lands, serialised by the list's lock; a slug already listed by the first translation is skipped by the rest. |
 | Spread over 10 min | Every publish appends the moment it lands; nothing waits. |
 | Cleanup | The daily rebuild dedupes and drops stale slugs in one pass. |
 

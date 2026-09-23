@@ -87,17 +87,19 @@ Two mechanisms, split by urgency:
 - **Instant append (`PostShieldSyncController`)** — when a managed post goes live
   (publish, scheduled auto-publish, slug rename, or a PublishPress revision that
   renames it) its slug is **appended to the file synchronously**, in the same
-  request. Pure `O_APPEND` — it never reads the file — so concurrent publishes,
-  including translations sharing a slug, can't race; the only cost is a duplicate
-  line. This is the only time-sensitive part: a new or renamed post is reachable
+  request. Lines already listed are skipped, and appends and rebuilds share a
+  per-list lock, so concurrent publishes — including translations sharing a
+  slug — and a rebuild in flight can't lose one. This is the only
+  time-sensitive part: a new or renamed post is reachable
   at once. There is **no per-change rebuild** — duplicates and lingering stale
   slugs are harmless (the loader still matches a duplicate; a stale slug just lets
   WordPress load and 404 it), so cleaning them isn't urgent.
 - **Daily rebuild (`PostShieldCronController`)** — once a day, `AllowlistBuilder`
   rewrites every enabled type's file from a single indexed query (top-level
-  `post_parent = 0` slugs in slug mode; full `get_page_uri()` paths in full-path
-  and root modes; `[a-z0-9_-]` charset), plus the root-extras union (attachments
-  + `_wp_old_slug` values) when root mode is on — atomically (temp file +
+  `post_parent = 0` slugs in slug mode; full paths, built in memory, in
+  full-path and root modes; `[a-z0-9_-]` charset), plus the root-extras union
+  (live attachments, private posts and `_wp_old_slug` values) when root mode
+  is on — atomically (temp file +
   `rename()`; no opcache). This is the authoritative pass: it dedupes the
   appends, drops stale slugs (unpublish/trash/delete/old-rename), **reconciles**
   uploads (removes dirs for disabled/dropped types), and is the backstop that

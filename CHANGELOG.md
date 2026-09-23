@@ -32,6 +32,33 @@ Moved out of the sites that used it into its own repository.
   (`ConfigStore::self_heal()`), never on a page view.
 - One data-directory helper, `shield_dir()`, for the loader and every writer; the
   writers no longer call `wp_upload_dir()`.
+- Root mode follows the site: a permalink change, or the daily health check,
+  switches root matching off (fail-open, with a notice) when the saved root
+  config no longer validates. Rewrite endpoints and bare feed formats are stripped
+  like sub-routes, and a path starting `//` goes straight to WordPress.
+- Root-extras lists private posts and the media of live posts only; drafts,
+  pending and scheduled posts (never served at their address) join when they
+  publish, so anonymous requests can no longer confirm unreleased slugs.
+- Allowlist paths are built in memory from one query instead of a `get_post()`
+  per row, and a flat type's line is its bare slug. The root preflight also
+  replays a sample of real permalinks.
+- Allowlist writes: a per-list lock stops an append being lost to a rebuild's
+  rename, lines already listed are skipped, a failed write is reported (and a
+  mode-switch save aborts before the swap), a stale builder never writes a slug
+  list over a full-path one, and temp files end in `.php` so their guard runs.
+- A content-only edit no longer re-appends a page's subtree; a moved draft
+  parent's published children are appended.
+- The write side loads the moment a page view writes a post (PublishPress
+  Revisions' inline scheduled publish). Sites should copy the updated
+  `examples/mu-plugins/05-post-404-shield-bootstrap.php`.
+- The artifact's guard line carries the loader's pre-filter, so a request that
+  is not shield business exits without decoding the document.
+- Settings screen: a stale form is refused instead of silently reverting a newer
+  save; a rejected save keeps the operator's edits; messages name entries as the
+  screen shows them; the restore diff covers every field the loader acts on.
+- A redirect source deeper than one segment reserves its first segment, so its
+  301 fires; the bake refuses the shield's own probe 404; `import-legacy` needs
+  a path.
 
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing

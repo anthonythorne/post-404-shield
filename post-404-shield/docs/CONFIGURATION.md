@@ -207,14 +207,18 @@ the design is about COMPLETENESS, enforced rather than documented:
   404 every post URL.
 - **The union**: requests are membership-tested against every enabled root
   type's allowlist (`page` full `get_page_uri()` paths; `post` slugs) PLUS the
-  automatic **root-extras** list — every attachment URI/slug (S2 — Media never
-  appears as a row; its URLs are real, and the SEO plugin's attachment 301
-  needs WordPress to receive the request), every `_wp_old_slug` value (S3 —
-  a pre-boot 404 on an old slug would break real 301s), and every root-type
-  post in a human-managed non-shielded status (draft/pending/private/future —
-  their URLs belong to WordPress, which enforces access itself; this also
-  means a scheduled or draft slug can never be edge-cached as a shield 404
-  before publish). Core's `attachment/{name}` URL marker
+  automatic **root-extras** list — the URI/slug of every attachment whose page
+  WordPress serves (S2 — unattached, or on a published, public-status or
+  private post; Media never appears as a row; its URLs are real, and the SEO
+  plugin's attachment 301 needs WordPress to receive the request), every
+  `_wp_old_slug` value (S3 — a pre-boot 404 on an old slug would break real
+  301s), and every PRIVATE root-type post (a logged-in reader opens it at its
+  address; WordPress enforces access itself). Drafts, pending and scheduled
+  posts are left out on purpose: WordPress never serves them at their pretty
+  address (previews are `?p=` links), and listing them would let anyone
+  confirm an unreleased slug exists by comparing allowed with blocked. They
+  are appended the moment they publish — and media on them the moment their
+  post goes live. Core's `attachment/{name}` URL marker
   (`/{parent}/attachment/1/`) is stripped structurally, like `feed`.
 - **Redirect plugins**: active redirect SOURCES are ingested into the DERIVED
   exclusions so WordPress keeps serving those 301s — root mode 404s pre-boot,
@@ -245,7 +249,7 @@ so the operator textarea is a last resort, not the main mechanism:
 | **Custom / virtual rewrite routes** | `schema-preview`, an AMP endpoint, WooCommerce `/checkout/`, any plugin `add_rewrite_rule('^my-endpoint/…')` | Derived from **WordPress's own rewrite table** — the leading literal segment of every rewrite rule. This is the general answer: if WordPress routes it, the shield excludes it. Content rules are capture-group-prefixed and yield no base, so real page/post space is never excluded. |
 | **Plugin redirect sources** | any 301s served by a redirect plugin | Ingested from the active plugin's own storage — Rank Math, Redirection (John Godley), Yoast Premium, Safe Redirect Manager, AIOSEO, Simple 301 Redirects (others via the `post_shield_redirect_sources` filter). Full multi-segment paths preserved so a redirect never over-excludes its parent tree. |
 | **Date archives** | `/2026/`, `/2026/07/` | An all-digit first segment always passes structurally. |
-| **Logged-in / non-public content** | draft/pending/private/future page & post URLs | Folded into the root-extras union (WordPress enforces access itself). |
+| **Logged-in / non-public content** | private page & post URLs | Folded into the root-extras union (WordPress enforces access itself). Drafts, pending and scheduled posts join when they publish — WordPress never serves them at their address before that. |
 | **Anything else site-specific** | a hand-rolled front-controller path with no rewrite rule | The **operator textarea** — the escape hatch for the rare route none of the above sees. |
 
 The practical upshot: **you almost never hand-list a route.** REST is one entry;
@@ -486,8 +490,8 @@ The shield closes that itself. On every save it reads the active redirect
 sources from the site's redirect plugins (Rank Math, Redirection, Yoast
 Premium, Safe Redirect Manager, AIOSEO, Simple 301, plus the
 `post_shield_redirect_sources` filter) and derives a **reserved slug** for any
-source that lands one segment under an enabled base. Those URLs then pass
-through to WordPress so the redirect plugin can answer.
+source under an enabled base. Those URLs then pass through to WordPress so the
+redirect plugin can answer.
 
 - Stored per entry as `reserved_derived`, **separate from** the operator's
   `reserved_allowlist`, so a rebuild replaces the derived bucket wholesale and
@@ -497,8 +501,12 @@ through to WordPress so the redirect plugin can answer.
 - An **exact** source yields an exact slug. A **regex or starts-with** source
   yields its literal prefix plus `*` (`x-t*` reserves every slug starting
   `x-t`), matched by `slug_is_reserved()`. Only a TRAILING `*` is a wildcard.
-- Sources deeper than one segment under a base are skipped — slug mode only
-  ever matches a single segment.
+- A source deeper than one segment under a base reserves its **first**
+  segment: reserved slugs are checked against the first segment at any depth,
+  so `products/cameras/old-model/specifications` reserves `old-model` and
+  every URL under it reaches WordPress. That is wider than the redirect, and it
+  switches the depth rule off for that one slug, but only in the fail-open
+  direction — and without it the depth rule would answer before the 301.
 - Reserved slugs are **locale-agnostic**, like allowlists: a source under
   `/it-it/` reserves that slug in every locale. Wider than the redirect itself,
   but only ever in the fail-open direction.
@@ -560,8 +568,13 @@ current rewrite slugs for exactly this reason. Structural caveats:
   through the UI (or `wp post-shield config …`).
 - **Nothing seeds automatically.** Deploying the plugin does not configure a
   site. An environment is brought onto the artifact model either by staging its
-  `post_shield_config` option before the code lands (the self-heal then writes
-  the artifact on the first request), or through the settings page. Sites
+  `post_shield_config` option before the code lands, or through the settings
+  page. A staged option becomes the artifact on the next **admin** request (or
+  the daily health check); page views never write it. Until then every request
+  simply reaches WordPress — the shield is off, never broken. To switch it on at
+  once after a deploy, open any wp-admin page or run
+  `wp post-shield config write`, then check a shielded URL for an
+  `X-Post-Shield` header. Sites
   migrating from the old committed-array format run
   `wp post-shield config import-legacy <path-to-that-file>` once. All of these
   are explicit operator actions.
