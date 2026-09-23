@@ -60,7 +60,7 @@ loader decision, and a non-empty would-block list **aborts the save**.
 **Disable shield** writes an artifact with every entry disabled — still a
 validated, revisioned save.
 
-CLI equivalents: `wp post-shield config export | write | import-legacy |
+CLI equivalents: `wp post-shield config export | write | import-legacy <file> |
 revisions | restore <stamp>` (plus the existing `rebuild` / `bake-404`), and
 `wp post-shield root-preflight` — the stand-alone S6 coverage gate (simulates
 the root config when root mode is not yet enabled; non-zero exit on any
@@ -561,10 +561,9 @@ current rewrite slugs for exactly this reason. Structural caveats:
   site. An environment is brought onto the artifact model either by staging its
   `post_shield_config` option before the code lands (the self-heal then writes
   the artifact on the first request), or through the settings page. Sites
-  migrating from the old committed-array format can drop that file at
-  `post-404-shield/config/allowed-post-types.php` and run
-  `wp post-shield config import-legacy` once. All of these are explicit
-  operator actions.
+  migrating from the old committed-array format run
+  `wp post-shield config import-legacy <path-to-that-file>` once. All of these
+  are explicit operator actions.
 - **Root mode: the excluded-bases snapshot goes stale silently.** Changing
   permalinks, category/tag bases, or (de)activating a plugin that registers
   rewrite bases changes the DERIVED exclusions — but the loader reads the

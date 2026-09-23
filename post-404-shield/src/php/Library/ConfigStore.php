@@ -1839,12 +1839,17 @@ class ConfigStore {
 			// Entries sharing one CPT (category-segmented bases) collapse into the
 			// FIRST entry's position — bases append in legacy order, so the loader's
 			// early-return iteration order is preserved for every enabled base.
+			//
+			// The legacy loader decided enabled PER BASE; the v1 schema has one
+			// `enabled` per entry. So each base is recorded against its own
+			// legacy switch and the entry is resolved once all siblings are seen
+			// (below): a disabled sibling's base must not become shielded just
+			// because another sibling is on.
 			if ( isset( $cpt_keys[ $post_type ] ) ) {
 				$target                                   = $cpt_keys[ $post_type ];
-				$entries[ $target ]['url_base'][]         = $base;
+				$entries[ $target ]['base_switches'][]    = [ $base, $enabled ];
 				$entries[ $target ]['reserved_allowlist'] = array_values( array_unique( array_merge( $entries[ $target ]['reserved_allowlist'], $reserved ) ) );
 				$entries[ $target ]['post_status']        = array_values( array_unique( array_merge( $entries[ $target ]['post_status'], $statuses ) ) );
-				$entries[ $target ]['enabled']            = $entries[ $target ]['enabled'] || $enabled;
 				$entries[ $target ]['merged_keys'][]      = $key;
 				continue;
 			}
@@ -1863,7 +1868,29 @@ class ConfigStore {
 				'cache_ttl'          => isset( $settings['cache_ttl'] ) ? (int) $settings['cache_ttl'] : null,
 				'edge_ttl'           => isset( $settings['edge_ttl'] ) ? (int) $settings['edge_ttl'] : null,
 				'merged_keys'        => [ $key ],
+				'base_switches'      => [ [ $base, $enabled ] ],
 			];
+		}
+
+		// Resolve each merged entry's single switch from its bases' legacy ones.
+		// Any base on → the entry is on and shields ONLY the bases that were on.
+		// All off → the entry is off and keeps every base, so the operator loses
+		// nothing by importing a fully disabled type.
+		foreach ( $entries as $key => $entry ) {
+			if ( ! isset( $entry['base_switches'] ) ) {
+				continue;
+			}
+			$bases_on  = [];
+			$bases_all = [];
+			foreach ( $entry['base_switches'] as [ $base, $on ] ) {
+				$bases_all[] = $base;
+				if ( $on ) {
+					$bases_on[] = $base;
+				}
+			}
+			$entries[ $key ]['enabled']  = [] !== $bases_on;
+			$entries[ $key ]['url_base'] = [] !== $bases_on ? $bases_on : $bases_all;
+			unset( $entries[ $key ]['base_switches'] );
 		}
 
 		// Re-key merged entries to the trimmed common key prefix (e.g. the four

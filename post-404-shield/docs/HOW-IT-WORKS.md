@@ -364,6 +364,7 @@ environment for the config, revisions, allowlists and the probe token).
 Save. See [CONFIGURATION.md](CONFIGURATION.md).
 
 **What about the old committed `config/allowed-post-types.php`?** Earlier
-versions read a committed PHP array. Nothing reads it at runtime any more; drop it
-at `config/allowed-post-types.php` and run `wp post-shield config import-legacy`
-once to convert it (see [The config lifecycle](#the-config-lifecycle)).
+versions read a committed PHP array. Nothing reads it at runtime any more; run
+`wp post-shield config import-legacy <path-to-that-file>` once to convert it (see
+[The config lifecycle](#the-config-lifecycle)). Siblings that shared a post type
+merge into one entry, and only the bases that were enabled are shielded.

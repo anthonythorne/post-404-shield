@@ -439,9 +439,16 @@ if ( defined( 'WP_CLI' ) && WP_CLI && class_exists( '\WP_CLI' ) ) {
 					if ( null !== $post_shield_store->option() ) {
 						\WP_CLI::error( 'A config option already exists — refusing to overwrite it. Use the admin UI, or delete the option first.' );
 					}
-					$legacy_file = POST_SHIELD_PLUGIN_DIR . '/config/allowed-post-types.php';
+					// The legacy array is site-owned, so it is passed in rather
+					// than looked for inside the plugin: a vendored copy is
+					// replaced wholesale on every sync, and a file dropped into it
+					// would not survive one. The in-plugin location is still read
+					// when no path is given, for sites following the old docs.
+					$legacy_file = isset( $args[1] ) && '' !== (string) $args[1]
+						? (string) $args[1]
+						: POST_SHIELD_PLUGIN_DIR . '/config/allowed-post-types.php';
 					if ( ! is_readable( $legacy_file ) ) {
-						\WP_CLI::error( 'No legacy committed config to import.' );
+						\WP_CLI::error( sprintf( 'No legacy config at %s. Pass the path to the old committed array: wp post-shield config import-legacy <file>', $legacy_file ) );
 					}
 					$legacy = require $legacy_file;
 					if ( ! is_array( $legacy ) || [] === $legacy ) {
@@ -493,7 +500,7 @@ if ( defined( 'WP_CLI' ) && WP_CLI && class_exists( '\WP_CLI' ) ) {
 					return;
 
 				default:
-					\WP_CLI::error( 'Usage: wp post-shield config <export|write|import-legacy|revisions|restore <stamp>>' );
+					\WP_CLI::error( 'Usage: wp post-shield config <export|write|import-legacy <file>|revisions|restore <stamp>>' );
 			}
 		},
 		[
@@ -507,7 +514,7 @@ if ( defined( 'WP_CLI' ) && WP_CLI && class_exists( '\WP_CLI' ) ) {
 				[
 					'type'        => 'positional',
 					'name'        => 'stamp',
-					'description' => 'Revision stamp (restore only).',
+					'description' => 'restore: the revision stamp. import-legacy: path to the old committed config array.',
 					'optional'    => true,
 				],
 				[

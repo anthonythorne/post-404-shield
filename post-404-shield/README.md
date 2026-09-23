@@ -124,8 +124,9 @@ self-heal, kill switches):
 full field/UI reference and recipes:
 **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
 Nothing seeds automatically: a site is configured on the settings page (or by
-staging its option). The one-off `wp post-shield config import-legacy` command
-converts an old committed-array config dropped at `config/allowed-post-types.php`.
+staging its option). The one-off `wp post-shield config import-legacy <file>`
+command converts an old committed-array config, read from wherever the site keeps
+it (not from inside this folder, which a sync replaces wholesale).
 
 ## Markdown 404s (optional)
 
