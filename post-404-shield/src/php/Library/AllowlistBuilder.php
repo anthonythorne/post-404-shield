@@ -71,6 +71,66 @@ class AllowlistBuilder {
 	}
 
 	/**
+	 * Whether this builder reads the live artifact's entries (follow_live()).
+	 *
+	 * @var bool
+	 */
+	private bool $follow_live = false;
+
+	/**
+	 * The live entries last read, and the file state they were read at.
+	 *
+	 * @var array<string, array<string, mixed>>|null
+	 */
+	private ?array $live_entries = null;
+
+	/**
+	 * Inode, size and mtime of the artifact when $live_entries was read.
+	 *
+	 * @var string
+	 */
+	private string $live_key = '';
+
+	/**
+	 * Read the LIVE artifact's entries from now on, whenever one is valid,
+	 * falling back to this builder's own. For the long-lived builder a request
+	 * makes at load: a save in another request can change a type's format,
+	 * statuses or root mode while this one runs (a daily rebuild, a queued
+	 * job, a CLI import), and a list built or appended from the config this
+	 * request started with would drop real URLs until the next rebuild. A
+	 * builder for a CANDIDATE config — a save's own rebuilds, the preflights —
+	 * must not follow: it builds what is about to go live.
+	 *
+	 * @return self
+	 */
+	public function follow_live(): self {
+		$this->follow_live = true;
+		return $this;
+	}
+
+	/**
+	 * The entries this builder works from (see follow_live()). The artifact is
+	 * re-read only when the file changed: a save renames a new one into place.
+	 *
+	 * @return array<string, array<string, mixed>>
+	 */
+	private function entries(): array {
+		if ( ! $this->follow_live || ! function_exists( '\Post404Shield\read_config' ) || ! function_exists( '\Post404Shield\shield_dir' ) ) {
+			return $this->config;
+		}
+		$file = \Post404Shield\shield_dir() . '/config.php';
+		clearstatcache( true, $file );
+		$stat = is_file( $file ) ? stat( $file ) : false;
+		$key  = false === $stat ? '' : $stat['ino'] . ':' . $stat['size'] . ':' . $stat['mtime'];
+		if ( $key !== $this->live_key || '' === $key ) {
+			$live               = '' === $key ? null : \Post404Shield\read_config( $file );
+			$this->live_entries = null === $live ? null : (array) $live['entries'];
+			$this->live_key     = $key;
+		}
+		return $this->live_entries ?? $this->config;
+	}
+
+	/**
 	 * Number of slugs in an allowlist file's raw contents.
 	 *
 	 * Counts the non-blank lines after the guard line. Counting newlines is
@@ -139,16 +199,18 @@ class AllowlistBuilder {
 			error_log( '[post-404-shield] rebuild: post type "' . $post_type . '" is NOT registered — its allowlist will be empty and that base fails open. Fix the entry\'s post type on Settings → Post 404 Shield.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 		}
 
-		$match = $this->match_for( $post_type );
-		$file  = $this->get_allowlist_file( $post_type );
+		$file = $this->get_allowlist_file( $post_type );
 
 		// Held from before the SELECT until after the rename, so an instant
 		// append (a publish in another request) either lands before the read
 		// or waits for the new file — never onto the inode the rename replaces.
 		$lock = $this->lock( dirname( $file ) );
 		try {
-			// A builder made before a concurrent save — the daily cron's, or a
-			// queued job's — can hold a stale match mode. Writing a SLUG list
+			// Read under the lock: a save that finished while this waited has
+			// swapped its artifact in, and a builder following it sees it now.
+			$match = $this->match_for( $post_type );
+			// A builder made before a concurrent save that does not follow the
+			// live artifact can hold a stale match mode. Writing a SLUG list
 			// for a type the live artifact now serves FULL-PATH would 404 every
 			// nested real URL; that is the one unsafe direction (a slug artifact
 			// reading a full-path list still matches every top-level slug). The
@@ -348,7 +410,7 @@ class AllowlistBuilder {
 	 */
 	public function allowlist_type_map(): array {
 		$map = [];
-		foreach ( $this->config as $key => $settings ) {
+		foreach ( $this->entries() as $key => $settings ) {
 			if ( isset( $settings['enabled'] ) && false === $settings['enabled'] ) {
 				continue;
 			}
@@ -421,7 +483,7 @@ class AllowlistBuilder {
 	 * @return string `slug` or `full-path`.
 	 */
 	public function match_for( string $post_type ): string {
-		foreach ( $this->config as $key => $settings ) {
+		foreach ( $this->entries() as $key => $settings ) {
 			if ( isset( $settings['enabled'] ) && false === $settings['enabled'] ) {
 				continue;
 			}
@@ -459,7 +521,7 @@ class AllowlistBuilder {
 	 */
 	public function root_types(): array {
 		$types = [];
-		foreach ( $this->config as $key => $settings ) {
+		foreach ( $this->entries() as $key => $settings ) {
 			if ( true !== ( $settings['root'] ?? false ) ) {
 				continue;
 			}
@@ -729,9 +791,9 @@ class AllowlistBuilder {
 	 * just-published post is protected in the very same request, before the async
 	 * rebuild runs.
 	 *
-	 * Deliberately a pure append (`FILE_APPEND | LOCK_EX`), NOT a read-modify-write:
-	 * there is no lost-update race across concurrent publishes (nothing is read
-	 * first). The only cost is a possible duplicate line — harmless, since the
+	 * Deliberately a pure append (`FILE_APPEND`, under the list directory's
+	 * lock), NOT a read-modify-write: there is no lost-update race across
+	 * concurrent publishes (nothing is rewritten). The only cost is a possible duplicate line — harmless, since the
 	 * loader still matches it, and the next daily rebuild rewrites the file
 	 * deduped and compacted. No-op if the guarded file does not exist yet (the
 	 * rebuild creates it) or the slug is malformed. Used for publishes and renames;
@@ -803,9 +865,13 @@ class AllowlistBuilder {
 		// request until the nightly compaction. Checked once without the lock,
 		// so the common case — nothing new — never waits on a rebuild; and
 		// again under it, since a rebuild may have replaced the file meanwhile.
+		// The rebuild probe comes first: a rebuild that takes the lock after it
+		// reads the database after this post's write, and one that finished
+		// before it left the file unlisted() then reads.
 		$candidates = array_values( array_unique( $lines ) );
+		$in_flight  = $this->rebuild_in_flight( dirname( $file ) );
 		$lines      = self::unlisted( $candidates, $file );
-		if ( [] === $lines && ! $this->rebuild_in_flight( dirname( $file ) ) ) {
+		if ( [] === $lines && ! $in_flight ) {
 			return 0;
 		}
 		// Nothing new in the file as it stands, but a rebuild holds the lock
@@ -821,9 +887,15 @@ class AllowlistBuilder {
 				return 0;
 			}
 			// The file always ends in "\n", so appending "a\nb\n" keeps every slug
-			// newline-wrapped for the loader's "\n{slug}\n" match.
-			$written = file_put_contents( $file, implode( "\n", $lines ) . "\n", FILE_APPEND | LOCK_EX ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_file_put_contents
-			return false === $written ? 0 : count( $lines );
+			// newline-wrapped for the loader's "\n{slug}\n" match. No LOCK_EX:
+			// the directory lock already orders writers, and on storage that
+			// cannot flock() at all, a LOCK_EX write fails without writing.
+			$written = file_put_contents( $file, implode( "\n", $lines ) . "\n", FILE_APPEND ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_file_put_contents
+			if ( false === $written ) {
+				error_log( '[post-404-shield] append: could not write to ' . $file . ' — ' . count( $lines ) . ' line(s) wait for the next rebuild.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+				return 0;
+			}
+			return count( $lines );
 		} finally {
 			$this->unlock( $lock );
 		}

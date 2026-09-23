@@ -173,44 +173,84 @@ class PostShieldConfigStoreImportTest extends TestCase {
 
 	/**
 	 * The redirect-derivation version salts the redirect fingerprint, so a
-	 * reducer change reaches existing sites only when the version moves. This
-	 * pins both together: change what the reducers produce and this fails
-	 * until REDIRECT_DERIVATION_VERSION is bumped and the hash updated.
+	 * reducer change reaches existing sites only when the version moves.
+	 *
+	 * The table says what each shape derives today; the history maps every
+	 * version to the hash of that table's outputs. Change what a shape
+	 * derives and the table must change — and then the hash no longer
+	 * matches the version's, so a NEW version has to be appended. History is
+	 * append-only: never edit a past line.
 	 *
 	 * @return void
 	 */
 	public function test_derivation_version_moves_with_the_reducers(): void {
 		require_once __DIR__ . '/../../post-404-shield/src/php/Function/ConfigReader.php';
+		$history = [
+			3 => 'cca3e5ba921bf138e780eab3d1583dc5', // Round 3; round 4 changed shapes not in this table.
+			4 => '0bc27ca5d83125a18dd4731b02b502f6', // Round 5: escaped slashes, top-level alternation, any locale form.
+		];
 		$pattern = '[a-z]{2}-[a-z]{2}|global';
-		$sources = [
-			[ '^/old-product-\\d+/?$', true ],
-			[ '^/promo', true ],
-			[ '^/promo/', true ],
-			[ '^/sale\\-', true ],
-			[ '^/news/(.+)$', true ],
-			[ '^/product-.*$', true ],
-			[ '^/colou?r$', true ],
-			[ '^/([a-z]{2}-[a-z]{2})/stories/old/?$', true ],
-			[ '^([a-z]{2}-[a-z]{2}|global)/products/(finder|grip)/?$', true ],
-			[ '/old-page/', false ],
-			[ 'faq?x=1', false ],
-			[ 'ja-jp/special/x/', false ],
-			[ '^/?products/cameras/old-model/?$', true ],
-			[ '^([a-z]{2}-[a-z]{2}|global)?/?products/cameras/old-model/?$', true ],
-			[ '^(?:[a-z]{2}-[a-z]{2}/)?products/cameras/old-model/?$', true ],
-			[ '^/(en-us|Nope1)/x', true ],
+		$table   = [
+			[ '^/old-product-\\d+/?$', true, [ 'old-product-*' ] ],
+			[ '^/promo', true, [ 'promo*' ] ],
+			[ '^/promo/', true, [ 'promo' ] ],
+			[ '^/sale\\-', true, [ 'sale-*' ] ],
+			[ '^/news/(.+)$', true, [ 'news' ] ],
+			[ '^/product-.*$', true, [ 'product-*' ] ],
+			[ '^/colou?r$', true, [ 'colo*' ] ],
+			[ '^/([a-z]{2}-[a-z]{2})/stories/old/?$', true, [ 'stories/old' ] ],
+			[ '^([a-z]{2}-[a-z]{2}|global)/products/(finder|grip)/?$', true, [ 'products/finder', 'products/grip' ] ],
+			[ '/old-page/', false, [ 'old-page' ] ],
+			[ 'faq?x=1', false, [ 'faq*' ] ],
+			[ 'ja-jp/special/x/', false, [ 'special/x' ] ],
+			[ '^/?products/cameras/old-model/?$', true, [ 'products/cameras/old-model' ] ],
+			[ '^([a-z]{2}-[a-z]{2}|global)?/?products/cameras/old-model/?$', true, [ 'products/cameras/old-model' ] ],
+			[ '^(?:[a-z]{2}-[a-z]{2}/)?products/cameras/old-model/?$', true, [ 'products/cameras/old-model' ] ],
+			[ '^/(en-us|Nope1)/x', true, [ '' ] ],
+			// Version 4: escaped slashes, top-level alternation, any locale form.
+			[ '^[a-z]{2}-[a-z]{2}/news/old-article/?$', true, [ 'news/old-article' ] ],
+			[ '^\\/ja-jp\\/news\\/old-article\\/?$', true, [ 'news/old-article' ] ],
+			[ '^(?:/[a-z]{2}-[a-z]{2})?/photographers/x$', true, [ 'photographers/x' ] ],
+			[ '^(?:([a-z]{2}-[a-z]{2}|global)/)?photographers/x$', true, [ 'photographers/x' ] ],
+			[ '^global/stories/a/?$|^global/stories/b/?$', true, [ 'stories/a', 'stories/b' ] ],
+			[ '^\\/([a-z]{2}-[a-z]{2}|global)\\/news\\/y', true, [ 'news/y*' ] ],
+			[ '^\\/news\\/(\\d+)\\/?$', true, [ 'news' ] ],
+			[ '^(ja-jp)x/news/q', true, [ 'ja-jpx/news/q*' ] ],
+			[ '^(en-us|news)/x', true, [ 'en-us/x*', 'news/x*' ] ],
+			[ '^(.*)/old', true, [ '' ] ],
 		];
 		$out = [];
-		foreach ( $sources as [ $source, $regex ] ) {
+		foreach ( $table as [ $source, $regex, $expected ] ) {
+			$got = [];
 			foreach ( \Post404Shield\redirect_source_variants( $source, $regex, $pattern ) as $variant ) {
-				$out[] = \Post404Shield\redirect_pattern_base( $variant, $regex );
+				$got[] = \Post404Shield\redirect_pattern_base( $variant, $regex );
 			}
+			$this->assertSame( $expected, $got, $source );
+			$out[] = implode( ',', $got );
 		}
 		$version = ( new \ReflectionClassConstant( ConfigStore::class, 'REDIRECT_DERIVATION_VERSION' ) )->getValue();
-		$this->assertSame(
-			[ 3, 'cca3e5ba921bf138e780eab3d1583dc5' ],
-			[ $version, md5( implode( '|', $out ) ) ],
-			'The reducers changed: bump REDIRECT_DERIVATION_VERSION and update this hash. Outputs: ' . implode( ' | ', $out )
-		);
+		$this->assertSame( max( array_keys( $history ) ), $version, 'Append the new version to the history.' );
+		$this->assertSame( $history[ $version ], md5( implode( '|', $out ) ), 'The table changed: bump REDIRECT_DERIVATION_VERSION and append its hash.' );
+	}
+
+	/**
+	 * Where the literal run of a source ends, in bytes of the source: an
+	 * escape is two bytes for one literal character.
+	 *
+	 * @return void
+	 */
+	public function test_the_reducer_says_where_the_literal_run_ended(): void {
+		require_once __DIR__ . '/../../post-404-shield/src/php/Function/ConfigReader.php';
+		$cases = [
+			[ 'news/(\\d+)', 'news', 5 ],
+			[ 'my\\-news/(\\d+)', 'my-news', 9 ],
+			[ '^colou?r$', 'colo*', 5 ],
+			[ '(.+)', '', 0 ],
+		];
+		foreach ( $cases as [ $source, $base, $consumed ] ) {
+			$got = null;
+			$this->assertSame( $base, \Post404Shield\redirect_pattern_base( $source, true, $got ), $source );
+			$this->assertSame( $consumed, $got, $source );
+		}
 	}
 }

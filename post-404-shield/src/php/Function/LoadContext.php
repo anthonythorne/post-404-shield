@@ -25,8 +25,12 @@ namespace Post404Shield;
  * its hooks answers:
  *   - wp-admin, including admin-ajax and admin-post (the settings screen, saves);
  *   - a cron run, WP-CLI or XML-RPC;
- *   - REST, by path or by `?rest_route=` (the block editor saves through it);
- *   - any method other than GET or HEAD (a front-end form can create a post);
+ *   - any method other than GET or HEAD (a front-end form can create a post;
+ *     the block editor saves through REST with POST or PUT);
+ *   - a REST request (by path or `?rest_route=`) that overrides its method
+ *     (`?_method=`, `X-HTTP-Method-Override`), so a GET can still write. A
+ *     plain REST read writes nothing, like a page view — the theme's own
+ *     front-end fetches are REST reads;
  *   - `/robots.txt` (its filter adds the probe path's Disallow line);
  *   - the bake probe's own loopback (`?post_shield_bake=`).
  * The loader counts ALTERNATE_WP_CRON as a cron run, because it runs cron inside
@@ -60,21 +64,20 @@ function generator_needed( array $server, bool $is_admin, bool $is_cron, bool $i
 	$path = parse_url( $uri, PHP_URL_PATH ); // phpcs:ignore WordPress.WP.AlternativeFunctions.parse_url_parse_url -- pure, no WordPress here.
 	$path = is_string( $path ) ? $path : '';
 
-	$prefix = trim( $rest_prefix, '/' );
-	if ( '' !== $prefix && false !== strpos( $path . '/', '/' . $prefix . '/' ) ) {
-		return true;
-	}
 	if ( str_ends_with( $path, '/robots.txt' ) ) {
 		return true;
 	}
 
-	$query = parse_url( $uri, PHP_URL_QUERY ); // phpcs:ignore WordPress.WP.AlternativeFunctions.parse_url_parse_url -- pure, no WordPress here.
+	$params = [];
+	$query  = parse_url( $uri, PHP_URL_QUERY ); // phpcs:ignore WordPress.WP.AlternativeFunctions.parse_url_parse_url -- pure, no WordPress here.
 	if ( is_string( $query ) && '' !== $query ) {
 		parse_str( $query, $params );
-		if ( isset( $params['rest_route'] ) || isset( $params['post_shield_bake'] ) ) {
-			return true;
-		}
+	}
+	if ( isset( $params['post_shield_bake'] ) ) {
+		return true;
 	}
 
-	return false;
+	$prefix  = trim( $rest_prefix, '/' );
+	$is_rest = isset( $params['rest_route'] ) || ( '' !== $prefix && false !== strpos( $path . '/', '/' . $prefix . '/' ) );
+	return $is_rest && ( isset( $params['_method'] ) || isset( $server['HTTP_X_HTTP_METHOD_OVERRIDE'] ) );
 }

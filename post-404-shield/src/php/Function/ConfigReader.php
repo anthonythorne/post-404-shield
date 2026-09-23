@@ -279,15 +279,22 @@ function rewrite_pattern_base( string $pattern ): string {
  * Returns '' when there is no usable literal prefix (`^/(.+)-old$` → '').
  * Pure string logic, no WordPress.
  *
- * @param string $source   The plugin's stored source pattern.
- * @param bool   $is_regex Whether the source is a regular expression.
+ * @param string   $source   The plugin's stored source pattern.
+ * @param bool     $is_regex Whether the source is a regular expression.
+ * @param int|null $consumed Set to how many bytes of $source the literal run
+ *                           read — where the rest of the pattern starts. An
+ *                           escape (`\/`, `\-`) is two bytes of source for one
+ *                           of literal, so strlen() of the result cannot say.
  *
  * @return string The excluded-base literal, or '' when none.
  */
-function redirect_pattern_base( string $source, bool $is_regex ): string {
-	$source    = ltrim( trim( $source ), '^' );
+function redirect_pattern_base( string $source, bool $is_regex, ?int &$consumed = null ): string {
+	$trimmed   = ltrim( ltrim( $source ), '^' );
+	$lead      = strlen( $source ) - strlen( $trimmed );
+	$source    = rtrim( $trimmed );
 	$metachars = $is_regex ? '()[]{}.*+?|$ ' : '*? ';
 	$out       = '';
+	$ends      = []; // Source offset just past each kept literal character.
 	$truncated = false;
 	$len       = strlen( $source );
 	for ( $i = 0; $i < $len; $i++ ) {
@@ -297,6 +304,7 @@ function redirect_pattern_base( string $source, bool $is_regex ): string {
 			if ( '' !== $next && ! ctype_alnum( $next ) ) {
 				$out .= $next; // Escaped literal (\. \/).
 				++$i;
+				$ends[] = $i + 1;
 				// Literal to the very end, unanchored: a prefix (see below).
 				if ( $i === $len - 1 && '/' !== $next ) {
 					$truncated = true;
@@ -314,6 +322,7 @@ function redirect_pattern_base( string $source, bool $is_regex ): string {
 			// `colo*`, not `colou*`, or `/color…` is never reserved.
 			if ( $is_regex && in_array( $char, [ '?', '*', '{' ], true ) && '' !== $out && '/' !== substr( $out, -1 ) ) {
 				$out = substr( $out, 0, -1 );
+				array_pop( $ends );
 			}
 			// Stopped at a metacharacter / wildcard. `$` is the regex
 			// end-anchor — the literal is then the WHOLE (exact) match, no
@@ -323,7 +332,8 @@ function redirect_pattern_base( string $source, bool $is_regex ): string {
 			$truncated = '$' !== $char && '' !== $out && '/' !== substr( $out, -1 );
 			break;
 		}
-		$out .= $char; // '/' is a literal path separator — kept.
+		$out   .= $char; // '/' is a literal path separator — kept.
+		$ends[] = $i + 1;
 		// An unanchored regex that is literal to the end matches as a PREFIX
 		// (`^/promo` matches /promotional-offer/), so it is one — unless it
 		// ended on a separator, which the loader's segment match covers.
@@ -331,7 +341,8 @@ function redirect_pattern_base( string $source, bool $is_regex ): string {
 			$truncated = true;
 		}
 	}
-	$base = trim( $out, '/' );
+	$consumed = $lead + ( [] === $ends ? 0 : (int) end( $ends ) );
+	$base     = trim( $out, '/' );
 	if ( '' === $base ) {
 		return '';
 	}
@@ -339,18 +350,195 @@ function redirect_pattern_base( string $source, bool $is_regex ): string {
 }
 
 /**
+ * Split a regex into its top-level atoms: a literal character, an escape
+ * (`\d`, `\/`), a class (`[a-z]`) or a group (`(?:…)`), each with the
+ * quantifier that follows it (`?`, `*`, `+`, `{2}`, lazy or possessive).
+ * Unbalanced input ends the last atom at the end of the string.
+ *
+ * Pure string logic, no WordPress.
+ *
+ * @param string $regex Regex body (no delimiters).
+ *
+ * @return string[] Atoms, in order; their concatenation is $regex.
+ */
+function regex_atoms( string $regex ): array {
+	$atoms = [];
+	$len   = strlen( $regex );
+	$i     = 0;
+	while ( $i < $len ) {
+		$start = $i;
+		$char  = $regex[ $i ];
+		if ( '\\' === $char ) {
+			$i += 2;
+		} elseif ( '[' === $char ) {
+			$i = regex_class_end( $regex, $i );
+		} elseif ( '(' === $char ) {
+			$depth = 0;
+			while ( $i < $len ) {
+				if ( '\\' === $regex[ $i ] ) {
+					$i += 2;
+					continue;
+				}
+				if ( '[' === $regex[ $i ] ) {
+					$i = regex_class_end( $regex, $i );
+					continue;
+				}
+				if ( '(' === $regex[ $i ] ) {
+					++$depth;
+				} elseif ( ')' === $regex[ $i ] && 0 === --$depth ) {
+					++$i;
+					break;
+				}
+				++$i;
+			}
+		} else {
+			++$i;
+		}
+		$i = min( $i, $len );
+		if ( 1 === preg_match( '/\G(?:[?*+]|\{\d+(?:,\d*)?\})[?+]?/', $regex, $quantifier, 0, $i ) ) {
+			$i += strlen( $quantifier[0] );
+		}
+		$atoms[] = substr( $regex, $start, $i - $start );
+	}
+	return $atoms;
+}
+
+/**
+ * The offset just past the class that opens at $start (`[…]`, where a `]`
+ * right after `[` or `[^` is a literal).
+ *
+ * @param string $regex Regex body.
+ * @param int    $start Offset of the `[`.
+ *
+ * @return int Offset after the closing `]`, or the length when unclosed.
+ */
+function regex_class_end( string $regex, int $start ): int {
+	$len = strlen( $regex );
+	$i   = $start + 1;
+	if ( $i < $len && '^' === $regex[ $i ] ) {
+		++$i;
+	}
+	if ( $i < $len && ']' === $regex[ $i ] ) {
+		++$i;
+	}
+	while ( $i < $len && ']' !== $regex[ $i ] ) {
+		$i += '\\' === $regex[ $i ] ? 2 : 1;
+	}
+	return min( $i + 1, $len );
+}
+
+/**
+ * The top-level alternatives of a regex (`a|b(c|d)` → `a`, `b(c|d)`).
+ *
+ * @param string $regex Regex body.
+ *
+ * @return string[] One element when there is no top-level `|`.
+ */
+function regex_alternatives( string $regex ): array {
+	$out     = [ '' ];
+	$current = 0;
+	foreach ( regex_atoms( $regex ) as $atom ) {
+		if ( '|' === $atom ) {
+			$out[ ++$current ] = '';
+			continue;
+		}
+		$out[ $current ] .= $atom;
+	}
+	return $out;
+}
+
+/**
+ * How many leading bytes of a regex source are a LOCALE segment, whatever
+ * shape it is written in: a literal (`ja-jp/`), an ungrouped class
+ * (`[a-z]{2}-[a-z]{2}/`), a group (`(en-us|global)/`), an optional one
+ * (`(?:…/)?`, `(…)?/?`, `(?:/…)?`, nested `(?:(…)/)?`), a capture reused as
+ * `$1` (`(\w{2}-\w{2})/`). The leading run of atoms, within the first
+ * segment, counts when it matches a locale this site uses, can never match
+ * more than one segment, and each of its alternatives is a locale on its own
+ * (so `(en-us|news)` stays). Stripping one is wider than the redirect, but
+ * only ever in the fail-open direction.
+ *
+ * @param string   $source    Regex source, leading `^` and `/` removed.
+ * @param callable $is_locale fn( string ): bool — a literal the locale pattern matches.
+ * @param string[] $samples   Locales this site's pattern matches.
+ *
+ * @return int Bytes to strip, including the `/` after the locale; 0 for none.
+ */
+function redirect_leading_locale( string $source, callable $is_locale, array $samples ): int {
+	$matches = static function ( string $regex, string $subject ): bool {
+		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- an engine error on a plugin-supplied pattern must read as "no match".
+		return 1 === @preg_match( '#^(?:' . $regex . ')$#', $subject );
+	};
+	$is_one_locale = static function ( string $regex ) use ( $matches, $is_locale, $samples ): bool {
+		// A plain literal (`fr-ca`, `ja\-jp`) is judged by the pattern itself.
+		if ( 1 === preg_match( '/^(?:[a-z0-9-]|\\\\-)+$/', $regex ) ) {
+			return $is_locale( str_replace( '\\-', '-', $regex ) );
+		}
+		foreach ( $samples as $sample ) {
+			if ( $matches( $regex, $sample ) ) {
+				return true;
+			}
+		}
+		return false;
+	};
+
+	$atoms  = regex_atoms( $source );
+	$prefix = '';
+	foreach ( $atoms as $index => $atom ) {
+		if ( '/' === $atom[0] && '' !== $prefix ) {
+			break; // Past the first segment.
+		}
+		$prefix .= $atom;
+		$rest    = substr( $source, strlen( $prefix ) );
+
+		// The core: the prefix without its wrapping groups and slashes, split
+		// into alternatives — each must be a locale by itself.
+		$core = $prefix;
+		for ( $depth = 0; $depth < 8; $depth++ ) {
+			$single = 1 === preg_match( '#^\((?:\?:)?(.*)\)\??$#s', $core, $group ) && 1 === count( regex_atoms( $core ) );
+			if ( ! $single ) {
+				break;
+			}
+			$core = (string) preg_replace( '#^/|/\??$#', '', $group[1] );
+		}
+		$alternatives = regex_alternatives( $core );
+		if ( count( $alternatives ) !== count( array_filter( $alternatives, $is_one_locale ) ) ) {
+			continue;
+		}
+
+		// One segment at most, and it ends where the prefix does: the rest
+		// starts at a `/`, or the prefix carries the `/` itself.
+		foreach ( [ 'x/y', 'en-us/x', 'x/en-us', 'en-us/x/', '/en-us/x' ] as $wider ) {
+			if ( $matches( $prefix, $wider ) ) {
+				continue 2;
+			}
+		}
+		$carries_slash = false;
+		foreach ( $samples as $sample ) {
+			$carries_slash = $carries_slash || $matches( $prefix, $sample . '/' );
+		}
+		if ( '/' !== ( $rest[0] ?? '' ) && ! $carries_slash && [] !== array_slice( $atoms, $index + 1 ) ) {
+			continue;
+		}
+		$stray = preg_match( '#^(?:/[?*]?|\?)*#', $rest, $lead ) ? strlen( $lead[0] ) : 0;
+		return strlen( $prefix ) + $stray;
+	}
+	return 0;
+}
+
+/**
  * Rewrite one redirect SOURCE into the locale-free source(s) the reducer can
  * read — run BEFORE redirect_pattern_base().
  *
- * Two shapes the reducer alone cannot see past, both common redirect-plugin idioms:
- *   - a leading LOCALE segment, literal (`ja-jp/special/x/`) or a regex group
- *     (`^([a-z]{2}-[a-z]{2}|global)/products/…`, optionally `(?:…/)?`). The
- *     reducer stops at the `(` and yields nothing, so the redirect was never
- *     reserved; and a literal locale kept in an excluded base can never match,
- *     because match_root() strips the locale before comparing. Stripped when
- *     the group body IS the configured pattern, or every alternative is a
- *     literal that matches it. Locale-agnostic is wider than the redirect, but
- *     only ever in the fail-open direction.
+ * The shapes the reducer alone cannot see past, all common redirect-plugin idioms:
+ *   - an escaped slash (`^\/news\/old\/?$`): read as the `/` it is, so the
+ *     locale and base tests below see segments;
+ *   - a TOP-LEVEL alternation (`^global/stories/a/?$|^global/stories/b/?$`):
+ *     several sources, each read on its own (capped);
+ *   - a leading LOCALE segment in any form (see redirect_leading_locale()).
+ *     The reducer stops at the `(` or `[` and yields nothing, so the redirect
+ *     was never reserved; and a literal locale kept in an excluded base can
+ *     never match, because match_root() strips the locale before comparing;
  *   - a pure-literal ALTERNATION (`stories/(video|technology|tips)/?$`):
  *     expanded into one source per alternative (capped), since each is a
  *     real redirected URL. Anything else — nested groups, classes, an
@@ -365,10 +553,26 @@ function redirect_pattern_base( string $source, bool $is_regex ): string {
  * @return string[] One or more sources, leading `^` and `/` removed.
  */
 function redirect_source_variants( string $source, bool $is_regex, string $locale_pattern = '' ): array {
-	$source = ltrim( ltrim( trim( $source ), '^' ), '/' );
-	// A regex's optional leading slash (`^/?…`, `^\/?…`) leaves a stray `?`.
+	$source = trim( $source );
 	if ( $is_regex ) {
-		$source = (string) preg_replace( '#^(?:\\\\/)?\?#', '', $source );
+		// `\/` is a literal slash wherever it appears (an escaped backslash
+		// before a slash, `\\/`, is left alone).
+		$source   = (string) preg_replace( '#(?<!\\\\)((?:\\\\\\\\)*)\\\\/#', '$1/', $source );
+		$branches = regex_alternatives( $source );
+		if ( count( $branches ) > 1 && count( $branches ) <= 50 ) {
+			$variants = [];
+			foreach ( $branches as $branch ) {
+				foreach ( redirect_source_variants( $branch, true, $locale_pattern ) as $variant ) {
+					$variants[] = $variant;
+				}
+			}
+			return array_values( array_unique( $variants ) );
+		}
+	}
+	$source = ltrim( ltrim( $source, '^' ), '/' );
+	// A regex's optional leading slash (`^/?…`) leaves a stray `?`.
+	if ( $is_regex ) {
+		$source = (string) preg_replace( '#^\?#', '', $source );
 	}
 
 	if ( '' !== $locale_pattern ) {
@@ -377,51 +581,13 @@ function redirect_source_variants( string $source, bool $is_regex, string $local
 			return 1 === preg_match( '/^[a-z0-9-]+$/', $token ) && 1 === @preg_match( '#^(?:' . $locale_pattern . ')$#', $token );
 		};
 
-		if ( $is_regex && 1 === preg_match( '#^\((?:\?:)?([^()\\\\]+)\)(\?)?/#', $source, $group ) ) {
-			// `(locale)/rest`, or `(?:locale/)?rest` is not this shape — see below.
-			$alternatives = explode( '|', $group[1] );
-			$all_locale   = [] !== $alternatives && count( $alternatives ) === count( array_filter( $alternatives, $is_locale ) );
-			if ( empty( $group[2] ) && ( $group[1] === $locale_pattern || $all_locale ) ) {
-				$source = substr( $source, strlen( $group[0] ) );
-			}
-		} elseif ( $is_regex && 1 === preg_match( '#^\((?:\?:)?([^()\\\\]+)/\)\?#', $source, $group ) ) {
-			// Optional locale segment: `(?:locale/)?rest`.
-			$alternatives = explode( '|', $group[1] );
-			if ( $group[1] === $locale_pattern || count( $alternatives ) === count( array_filter( $alternatives, $is_locale ) ) ) {
-				$source = substr( $source, strlen( $group[0] ) );
-			}
+		if ( $is_regex ) {
+			$samples = array_values( array_unique( array_filter( array_merge( [ 'en-us', 'ja-jp', 'en-gb', 'de-de', 'global', 'en', 'ja', 'de', 'fr' ], explode( '|', $locale_pattern ) ), $is_locale ) ) );
+			$source  = substr( $source, redirect_leading_locale( $source, $is_locale, $samples ) );
 		} else {
 			$slash = strpos( $source, '/' );
 			if ( false !== $slash && $is_locale( substr( $source, 0, $slash ) ) ) {
 				$source = substr( $source, $slash + 1 );
-			}
-		}
-
-		// Any other leading group that is a locale in its own words — a
-		// capture reused as `$1` (`([a-z]{2}-[a-z]{2})`, `(\w{2}-\w{2})`), a
-		// reordered alternation, an optional one (`(…)?/?`, `(?:…/)?`):
-		// stripped when EVERY alternative matches a locale this site uses,
-		// and the group can never match across a `/`. Only ever wider, in the
-		// fail-open direction.
-		if ( $is_regex && 1 === preg_match( '#^\((?:\?:)?((?:[^()\\\\]|\\\\.)+?)(?:\\\\?/)?\)\??(?:\\\\?/)?\??#', $source, $group ) ) {
-			$samples = array_values( array_filter( array_merge( [ 'en-us', 'ja-jp', 'en-gb', 'de-de', 'global' ], explode( '|', $locale_pattern ) ), $is_locale ) );
-			$matches = static function ( string $regex, string $subject ): bool {
-				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- an engine error on a plugin-supplied pattern must read as "no match".
-				return 1 === @preg_match( '#^(?:' . $regex . ')$#', $subject );
-			};
-			$all = [] !== $samples;
-			foreach ( explode( '|', $group[1] ) as $alternative ) {
-				$one = false;
-				foreach ( $samples as $sample ) {
-					if ( $matches( $alternative, $sample ) ) {
-						$one = true;
-						break;
-					}
-				}
-				$all = $all && $one;
-			}
-			if ( $all && ! $matches( $group[1], 'en-us/x' ) && ! $matches( $group[1], 'x/y' ) ) {
-				$source = substr( $source, strlen( $group[0] ) );
 			}
 		}
 	}

@@ -127,7 +127,12 @@ define( 'POST_SHIELD_LOADED', true );
 	} catch ( \Throwable ) {
 		return;
 	}
-	if ( ! function_exists( 'Post404Shield\\read_config' ) || ! function_exists( 'Post404Shield\\config_shape_is_valid' ) || ! function_exists( 'Post404Shield\\shield_dir' ) ) {
+	// Every reader function this file calls unguarded: a ConfigReader.php from
+	// another release (a half-finished deploy) must leave the shield off,
+	// never fatal the request.
+	if ( ! function_exists( 'Post404Shield\\read_config' ) || ! function_exists( 'Post404Shield\\read_config_document' )
+		|| ! function_exists( 'Post404Shield\\config_shape_is_valid' ) || ! function_exists( 'Post404Shield\\shield_dir' )
+	) {
 		return;
 	}
 
@@ -150,7 +155,9 @@ define( 'POST_SHIELD_LOADED', true );
 	// decoding the document — most requests are not. An artifact from before
 	// it existed is decoded and filtered as it always was, below. (A reader
 	// from an older release has neither function: same path.)
-	$prefilter = function_exists( 'Post404Shield\\config_prefilter' ) ? \Post404Shield\config_prefilter( $config_raw ) : null;
+	$prefilter = function_exists( 'Post404Shield\\config_prefilter' ) && function_exists( 'Post404Shield\\prefilter_matches' )
+		? \Post404Shield\config_prefilter( $config_raw )
+		: null;
 	if ( null !== $prefilter && ! \Post404Shield\prefilter_matches( $prefilter, $uri ) ) {
 		return;
 	}
@@ -248,7 +255,9 @@ define( 'POST_SHIELD_LOADED', true );
 	}
 	// All checked: a Matcher.php from another release (a half-finished deploy)
 	// must leave the shield off, never fatal the request.
-	if ( ! function_exists( 'Post404Shield\\match_entry' ) || ! function_exists( 'Post404Shield\\decide_based' ) || ! function_exists( 'Post404Shield\\list_is_empty' ) ) {
+	if ( ! function_exists( 'Post404Shield\\match_entry' ) || ! function_exists( 'Post404Shield\\decide_based' ) || ! function_exists( 'Post404Shield\\list_is_empty' )
+		|| ! function_exists( 'Post404Shield\\match_blocked_base' ) || ! function_exists( 'Post404Shield\\prefers_markdown' )
+	) {
 		return;
 	}
 

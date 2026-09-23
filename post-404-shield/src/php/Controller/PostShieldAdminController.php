@@ -466,12 +466,12 @@ class PostShieldAdminController {
 			if ( '' === $label || [] === $bases ) {
 				continue; // A cleared/blank repeater row deletes the entry.
 			}
-			// An all-digit name would become an integer array key, which no
-			// entry may have.
-			if ( ctype_digit( $label ) ) {
+			// A name PHP reads as a number (`404`, `-1`) would become an integer
+			// array key, which no entry may have. The same test PHP applies.
+			if ( is_int( array_key_first( [ $label => true ] ) ) ) {
 				$this->request_errors[] = sprintf(
 					/* translators: %s: the name as typed. */
-					__( 'Blocked base name "%s" needs a letter, hyphen or underscore — a name of digits only cannot be used.', 'post-404-shield' ),
+					__( 'Blocked base name "%s" needs at least one letter — a name that reads as a number cannot be used.', 'post-404-shield' ),
 					$label
 				);
 				continue;

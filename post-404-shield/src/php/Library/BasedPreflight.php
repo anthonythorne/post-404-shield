@@ -285,7 +285,7 @@ final class BasedPreflight {
 			}
 		} finally {
 			if ( function_exists( 'do_action' ) ) {
-				do_action( 'wpml_switch_language', $lang );
+				\Post404Shield\switch_language( $lang );
 			}
 		}
 
@@ -570,7 +570,7 @@ final class BasedPreflight {
 			]
 		);
 		if ( is_string( $lang ) && '' !== $lang ) {
-			do_action( 'wpml_switch_language', $lang );
+			\Post404Shield\switch_language( $lang );
 		}
 		$link = get_permalink( $id );
 		if ( ! is_string( $link ) || '' === $link || false !== strpos( $link, '?' ) ) {

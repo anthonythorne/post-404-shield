@@ -52,6 +52,37 @@ class RootPreflight {
 	private const PERMALINK_OLDEST = 5;
 
 	/**
+	 * Per root type, the PUBLIC statuses to measure: `publish`, plus every
+	 * registered public status the stored or the candidate config lists for
+	 * it — so a save that drops one (an archive status) is measured against
+	 * the posts it would stop serving, as the based coverage gate does.
+	 *
+	 * @param array<string, mixed> $entries Candidate entries.
+	 *
+	 * @return array<string, string[]> Effective CPT => statuses.
+	 */
+	private function corpus_statuses( array $entries ): array {
+		$stored  = function_exists( 'get_option' ) ? get_option( ConfigStore::OPTION, null ) : null;
+		$sources = [ $entries, is_array( $stored['entries'] ?? null ) ? $stored['entries'] : [] ];
+		$out     = [];
+		foreach ( $sources as $source ) {
+			foreach ( $source as $key => $settings ) {
+				if ( ! is_array( $settings ) || true !== ( $settings['root'] ?? false ) ) {
+					continue;
+				}
+				$type = (string) ( $settings['post_type'] ?? $key );
+				foreach ( array_merge( [ 'publish' ], (array) ( $settings['post_status'] ?? [] ) ) as $status ) {
+					$object = is_string( $status ) && function_exists( 'get_post_status_object' ) ? get_post_status_object( $status ) : null;
+					if ( 'publish' === $status || ( null !== $object && ! $object->private && AllowlistBuilder::is_servable_status( $status ) ) ) {
+						$out[ $type ][ (string) $status ] = true;
+					}
+				}
+			}
+		}
+		return array_map( 'array_keys', $out );
+	}
+
+	/**
 	 * Real addresses of a sample of each root type's published posts, taken
 	 * from get_permalink() — independent of the allowlist derivation the rest
 	 * of the corpus shares with the builder. If the builder ever derives a
@@ -59,11 +90,12 @@ class RootPreflight {
 	 * filtered permalink), the real address misses the list and shows up as a
 	 * would-block instead of passing unmeasured.
 	 *
-	 * @param string[] $root_types Effective CPTs of the enabled root entries.
+	 * @param string[]                $root_types Effective CPTs of the enabled root entries.
+	 * @param array<string, string[]> $statuses   Effective CPT => public statuses to sample (corpus_statuses()).
 	 *
 	 * @return string[] Paths with a trailing slash, locale prefix included.
 	 */
-	private function permalink_sample( array $root_types ): array {
+	private function permalink_sample( array $root_types, array $statuses = [] ): array {
 		global $wpdb;
 		if ( ! isset( $wpdb ) || [] === $root_types ) {
 			return [];
@@ -76,12 +108,12 @@ class RootPreflight {
 				'DESC' => self::PERMALINK_RECENT,
 				'ASC'  => self::PERMALINK_OLDEST,
 			];
+			$in = $statuses[ $type ] ?? [ 'publish' ];
 			foreach ( $orders as $order => $limit ) {
 				foreach ( (array) $wpdb->get_col(
 					$wpdb->prepare(
-						"SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_status = 'publish' AND post_name <> '' ORDER BY ID " . ( 'DESC' === $order ? 'DESC' : 'ASC' ) . ' LIMIT %d', // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the ORDER keyword is one of two literals.
-						$type,
-						$limit
+						"SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_status IN (" . implode( ', ', array_fill( 0, count( $in ), '%s' ) ) . ") AND post_name <> '' ORDER BY ID " . ( 'DESC' === $order ? 'DESC' : 'ASC' ) . ' LIMIT %d', // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare -- placeholders built to match the list; the ORDER keyword is one of two literals.
+						array_merge( [ $type ], $in, [ $limit ] )
 					)
 				) as $id ) {
 					$ids[ (int) $id ] = $type;
@@ -103,7 +135,7 @@ class RootPreflight {
 				]
 			);
 			if ( is_string( $post_lang ) && '' !== $post_lang ) {
-				do_action( 'wpml_switch_language', $post_lang );
+				\Post404Shield\switch_language( $post_lang );
 			}
 			$link = get_permalink( $id );
 			if ( ! is_string( $link ) || '' === $link || false !== strpos( $link, '?' ) ) {
@@ -115,7 +147,7 @@ class RootPreflight {
 			}
 		}
 		if ( is_string( $lang ) && '' !== $lang ) {
-			do_action( 'wpml_switch_language', $lang );
+			\Post404Shield\switch_language( $lang );
 		}
 		return $paths;
 	}
@@ -215,13 +247,15 @@ class RootPreflight {
 			}
 		}
 
-		// The probe corpus's root-type lines come from PUBLISHED content,
-		// independently of the candidate config — a misconfigured entry (wrong
-		// statuses, wrong match) must shrink the allowlist it is measured
-		// AGAINST, never the corpus it is measured WITH.
+		// The probe corpus's root-type lines come from live content in every
+		// PUBLIC status the stored or the candidate config lists for the type —
+		// a misconfigured entry (a status dropped, a wrong match) must shrink
+		// the allowlist it is measured AGAINST, never the corpus it is measured
+		// WITH. Private posts are root-extras lines, measured there.
+		$corpus    = $this->corpus_statuses( $entries );
 		$published = [];
 		foreach ( array_keys( $root_candidates ) as $root_type ) {
-			$published[ $root_type ] = $builder->lines_for( (string) $root_type, [ 'publish' ] );
+			$published[ $root_type ] = $builder->lines_for( (string) $root_type, $corpus[ $root_type ] ?? [ 'publish' ] );
 		}
 
 		// Two block classes, deliberately separated: a ROOT-stage block is what
@@ -233,7 +267,7 @@ class RootPreflight {
 		$would_block = [];
 		$warn_block  = [];
 		$urls        = $this->probe_urls( $candidate, $bodies, $root_candidates, $published, $extras_lines, $excluded_flat, $locale_pattern );
-		$urls        = array_values( array_unique( array_merge( $urls, $this->permalink_sample( array_keys( $root_candidates ) ) ) ) );
+		$urls        = array_values( array_unique( array_merge( $urls, $this->permalink_sample( array_keys( $root_candidates ), $corpus ) ) ) );
 		foreach ( $urls as $url ) {
 			$decision = $this->decide( $url, $entries, $bodies, $excluded_flat, $match_candidates, $locale_pattern );
 			if ( 0 !== strpos( $decision['marker'], 'blocked' ) ) {

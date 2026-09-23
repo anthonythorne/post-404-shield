@@ -75,6 +75,7 @@ class PostShieldSiteLoaderTest extends TestCase {
 		$GLOBALS['post_shield_test_hooks'] = [];
 		eval( // phpcs:ignore Squiz.PHP.Eval.Discouraged -- test-only global stubs, in a separate process.
 			'function add_action( $hook, $callback, $priority = 10, $args = 1 ) { $GLOBALS["post_shield_test_hooks"][] = [ $hook, $callback, $priority ]; return true; }
+			function add_filter( $hook, $callback, $priority = 10, $args = 1 ) { $GLOBALS["post_shield_test_hooks"][] = [ $hook, $callback, $priority ]; return true; }
 			function is_admin() { return false; }
 			function wp_doing_cron() { return false; }
 			function rest_get_url_prefix() { return "wp-json"; }'
@@ -94,7 +95,7 @@ class PostShieldSiteLoaderTest extends TestCase {
 
 		$this->assertArrayNotHasKey( 'post_shield_test_loads', $GLOBALS, 'A page view skips the generator.' );
 		$hooks = array_column( $GLOBALS['post_shield_test_hooks'], 2, 0 );
-		foreach ( [ 'transition_post_status', 'post_updated', 'save_post', 'add_attachment', 'edit_attachment', 'revision_applied', 'revision_published' ] as $hook ) {
+		foreach ( [ 'transition_post_status', 'post_updated', 'save_post', 'add_attachment', 'edit_attachment', 'before_delete_post', 'revision_applied', 'revision_published' ] as $hook ) {
 			$this->assertSame( PHP_INT_MIN, $hooks[ $hook ] ?? null, $hook . ' loads it first, ahead of any listener.' );
 		}
 
@@ -102,6 +103,27 @@ class PostShieldSiteLoaderTest extends TestCase {
 		$callback();
 		$callback();
 		$this->assertSame( 1, $GLOBALS['post_shield_test_loads'], 'Loaded once, on the first write.' );
+	}
+
+	/**
+	 * PublishPress's pre-apply filter loads the write side before the revision
+	 * is written, and passes the revision data through unchanged.
+	 *
+	 * @return void
+	 */
+	public function test_the_revision_filter_loads_the_write_side_and_passes_the_data_through(): void {
+		$this->stub_wordpress();
+		$_SERVER['REQUEST_METHOD'] = 'GET';
+		$_SERVER['REQUEST_URI']    = '/global/about/';
+		require $this->site();
+
+		$filters = array_filter( $GLOBALS['post_shield_test_hooks'], static fn( $hook ) => 'revisionary_apply_revision_data' === $hook[0] );
+		$this->assertCount( 1, $filters );
+		$filter = reset( $filters );
+		$this->assertSame( PHP_INT_MIN, $filter[2] );
+		$data = [ 'post_name' => 'renamed' ];
+		$this->assertSame( $data, ( $filter[1] )( $data ) );
+		$this->assertSame( 1, $GLOBALS['post_shield_test_loads'] );
 	}
 
 	/**

@@ -593,10 +593,14 @@ check( false, gen_needed( '/about-us/?utm_source=x' ), 'generator: a query strin
 check( false, gen_needed( '/about-us/', 'HEAD' ), 'generator: HEAD skips it' );
 check( false, gen_needed( '/wp-login.php' ), 'generator: the login screen skips it' );
 check( true, gen_needed( '/contact/', 'POST' ), 'generator: a front-end POST loads it (a form can create a post)' );
-check( true, gen_needed( '/wp-json/wp/v2/pages/2' ), 'generator: REST by path loads it' );
-check( true, gen_needed( '/wp-json' ), 'generator: the bare REST root loads it' );
-check( true, gen_needed( '/blog/wp-json/wp/v2/posts' ), 'generator: REST under a subdirectory install loads it' );
-check( true, gen_needed( '/?rest_route=/wp/v2/pages' ), 'generator: REST by query loads it' );
+check( false, gen_needed( '/wp-json/wp/v2/pages/2' ), 'generator: a REST read by path skips it (the lazy hooks cover a write)' );
+check( false, gen_needed( '/?rest_route=/wp/v2/pages' ), 'generator: a REST read by query skips it' );
+check( true, gen_needed( '/wp-json/wp/v2/pages/2', 'PUT' ), 'generator: a REST write loads it' );
+check( true, gen_needed( '/wp-json/wp/v2/pages/2?_method=DELETE' ), 'generator: a REST GET that overrides its method loads it' );
+check( true, gen_needed( '/blog/wp-json/wp/v2/posts?_method=POST' ), 'generator: an override under a subdirectory install loads it' );
+check( true, gen_needed( '/?rest_route=/wp/v2/pages/2&_method=DELETE' ), 'generator: an override by query route loads it' );
+check( true, Post404Shield\generator_needed( [ 'REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/wp-json/wp/v2/pages/2', 'HTTP_X_HTTP_METHOD_OVERRIDE' => 'DELETE' ], false, false, false, false, 'wp-json' ), 'generator: the override header loads it' );
+check( false, gen_needed( '/about/?_method=DELETE' ), 'generator: _method outside REST means nothing' );
 check( true, gen_needed( '/robots.txt' ), 'generator: robots.txt loads it (probe Disallow line)' );
 check( true, gen_needed( '/en-au/post-shield-404-probe/?post_shield_bake=abc' ), 'generator: the bake probe loads it' );
 check( false, gen_needed( '/wp-jsonx/' ), 'generator: a lookalike of the REST prefix does not load it' );
@@ -605,7 +609,7 @@ check( true, Post404Shield\generator_needed( [ 'REQUEST_URI' => '/x/' ], true, f
 check( true, Post404Shield\generator_needed( [ 'REQUEST_URI' => '/x/' ], false, true, false, false, 'wp-json' ), 'generator: a cron run loads it' );
 check( true, Post404Shield\generator_needed( [ 'REQUEST_URI' => '/x/' ], false, false, true, false, 'wp-json' ), 'generator: WP-CLI loads it' );
 check( true, Post404Shield\generator_needed( [ 'REQUEST_URI' => '/xmlrpc.php' ], false, false, false, true, 'wp-json' ), 'generator: XML-RPC loads it' );
-check( true, Post404Shield\generator_needed( [ 'REQUEST_URI' => '/api/v1/x' ], false, false, false, false, 'api' ), 'generator: a custom REST prefix is honoured' );
+check( true, Post404Shield\generator_needed( [ 'REQUEST_URI' => '/api/v1/x?_method=PUT' ], false, false, false, false, 'api' ), 'generator: a custom REST prefix is honoured' );
 
 // --------------------------------------------------------------------------------
 

@@ -104,8 +104,11 @@ foreach ( $post_shield_entries as $post_shield_entry_key => $post_shield_entry )
 }
 
 // Shared allowlist builder (no autoloader — this is a standalone mu-plugin).
+// It follows the live artifact: a save in another request while this one
+// runs (a daily rebuild, a queued job, a CLI import) changes what its
+// rebuilds and appends must write.
 require_once POST_SHIELD_PLUGIN_DIR . '/src/php/Library/AllowlistBuilder.php';
-$post_shield_builder = new \Post404Shield\Library\AllowlistBuilder( $post_shield_entries );
+$post_shield_builder = ( new \Post404Shield\Library\AllowlistBuilder( $post_shield_entries ) )->follow_live();
 
 // Mode-switch rebuild seam: ConfigStore::write() rebuilds a type's allowlist
 // synchronously (against the CANDIDATE entries) when its match mode changes,
@@ -178,6 +181,7 @@ add_action(
 // replays that entry's real URLs through the loader's decision; ConfigStore::
 // write() refuses a save that would 404 or redirect any of them. This is what
 // catches a well-formed but WRONG base, which validation cannot.
+require_once POST_SHIELD_PLUGIN_DIR . '/src/php/Function/Language.php';
 require_once POST_SHIELD_PLUGIN_DIR . '/src/php/Library/BasedPreflight.php';
 $post_shield_store->set_coverage_handler(
 	static function ( array $candidate, ?array $current_entries ): array {
@@ -266,7 +270,7 @@ if ( [] === $post_shield_enabled_types ) {
 } else {
 	// Sync controller — appends slugs to allowlists on post changes (real-time).
 	require_once POST_SHIELD_PLUGIN_DIR . '/src/php/Controller/PostShieldSyncController.php';
-	$post_shield_sync_controller = new \Post404Shield\Controller\PostShieldSyncController( $post_shield_builder, $post_shield_enabled_types );
+	$post_shield_sync_controller = new \Post404Shield\Controller\PostShieldSyncController( $post_shield_builder );
 	$post_shield_sync_controller->set_up();
 }
 

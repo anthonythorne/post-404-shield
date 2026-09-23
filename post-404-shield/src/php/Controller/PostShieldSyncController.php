@@ -46,13 +46,6 @@ class PostShieldSyncController {
 	private AllowlistBuilder $builder;
 
 	/**
-	 * Managed, enabled post-type slugs.
-	 *
-	 * @var string[]
-	 */
-	private array $post_types;
-
-	/**
 	 * Posts whose URL changed in this request (slug or parent), recorded on
 	 * post_updated — which fires before save_post — so the save's full-path
 	 * append walks the subtree only when descendants' URLs actually moved.
@@ -94,14 +87,24 @@ class PostShieldSyncController {
 	private array $orphan_media = [];
 
 	/**
-	 * Construct the sync controller for a set of managed post types.
+	 * Construct the sync controller.
 	 *
-	 * @param AllowlistBuilder $builder    Shared builder.
-	 * @param string[]         $post_types Managed, enabled post-type slugs.
+	 * @param AllowlistBuilder $builder Shared builder, following the live artifact.
 	 */
-	public function __construct( AllowlistBuilder $builder, array $post_types ) {
-		$this->builder    = $builder;
-		$this->post_types = $post_types;
+	public function __construct( AllowlistBuilder $builder ) {
+		$this->builder = $builder;
+	}
+
+	/**
+	 * Whether a post type is shielded right now — asked when a hook fires, not
+	 * when the request started, since a save elsewhere can change it.
+	 *
+	 * @param string $post_type Post type.
+	 *
+	 * @return bool
+	 */
+	private function managed( string $post_type ): bool {
+		return isset( $this->builder->allowlist_type_map()[ $post_type ] );
 	}
 
 	/**
@@ -110,10 +113,10 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	public function set_up(): void {
-		foreach ( $this->post_types as $post_type ) {
-			// Fires on any update to a managed post, including a slug rename.
-			add_action( 'save_post_' . $post_type, [ $this, 'handle_saved_post' ], 10, 1 );
-		}
+		// Fires on any update to a post, including a slug rename. Every type is
+		// hooked and filtered when it fires: a type enabled by a save in another
+		// request while this one runs (a long import) is managed from then on.
+		add_action( 'save_post', [ $this, 'handle_saved_post' ], 10, 1 );
 		add_action( 'transition_post_status', [ $this, 'handle_transition_post_status' ], 10, 3 );
 
 		// PublishPress Revisions renames the live post via a direct $wpdb->update()
@@ -129,17 +132,16 @@ class PostShieldSyncController {
 		// the OLD address to root-extras in the same request (S3 — WordPress
 		// 301s old slugs via _wp_old_slug; a pre-boot 404 there breaks real
 		// redirects). Priority 20 on post_updated: after core's
-		// wp_check_for_changed_slugs (12) has stored the meta.
-		if ( $this->builder->has_root_entries() ) {
-			add_action( 'add_attachment', [ $this, 'handle_attachment' ], 10, 1 );
-			add_action( 'edit_attachment', [ $this, 'handle_attachment' ], 10, 1 );
-			// Attach / Detach in the Media Library re-parents with a direct query.
-			add_action( 'wp_media_attach_action', [ $this, 'handle_media_attach' ], 10, 2 );
-			add_action( 'attachment_updated', [ $this, 'handle_attachment_renamed' ], 10, 3 );
-			// Media on a draft is left out of the union (no public page yet);
-			// it joins the instant its post goes live.
-			add_action( 'transition_post_status', [ $this, 'handle_parent_live' ], 10, 3 );
-		}
+		// wp_check_for_changed_slugs (12) has stored the meta. Hooked always,
+		// and each handler checks root mode is on when it fires.
+		add_action( 'add_attachment', [ $this, 'handle_attachment' ], 10, 1 );
+		add_action( 'edit_attachment', [ $this, 'handle_attachment' ], 10, 1 );
+		// Attach / Detach in the Media Library re-parents with a direct query.
+		add_action( 'wp_media_attach_action', [ $this, 'handle_media_attach' ], 10, 2 );
+		add_action( 'attachment_updated', [ $this, 'handle_attachment_renamed' ], 10, 3 );
+		// Media on a draft is left out of the union (no public page yet);
+		// it joins the instant its post goes live.
+		add_action( 'transition_post_status', [ $this, 'handle_parent_live' ], 10, 3 );
 
 		// Children whose parent is deleted move up a level without a hook of
 		// their own, and WPML moves every translation when the original moves
@@ -165,6 +167,9 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	public function handle_attachment( int $post_id ): void {
+		if ( ! $this->builder->has_root_entries() ) {
+			return;
+		}
 		// Exactly the rebuild's lines for it (AllowlistBuilder::attachment_lines()),
 		// which leave out media on a post that is not live yet: it has no page,
 		// and listing it would reveal the unreleased post.
@@ -194,7 +199,7 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	public function handle_parent_live( string $new_status, string $old_status, \WP_Post $post ): void {
-		if ( 'attachment' === $post->post_type ) {
+		if ( 'attachment' === $post->post_type || ! $this->builder->has_root_entries() ) {
 			return;
 		}
 		$live = $this->builder->attachment_parent_statuses();
@@ -232,7 +237,7 @@ class PostShieldSyncController {
 				$this->orphan_media[ $post_id ] = array_map( 'intval', (array) $media );
 			}
 		}
-		if ( ! in_array( $post_type, $this->post_types, true ) || ! is_post_type_hierarchical( $post_type ) ) {
+		if ( ! $this->managed( $post_type ) || ! is_post_type_hierarchical( $post_type ) ) {
 			return;
 		}
 		$children = get_children(
@@ -286,7 +291,7 @@ class PostShieldSyncController {
 			return;
 		}
 		$post_type = get_post_type( $post_id );
-		if ( ! is_string( $post_type ) || ! in_array( $post_type, $this->post_types, true ) || ! is_post_type_hierarchical( $post_type ) ) {
+		if ( ! is_string( $post_type ) || ! $this->managed( $post_type ) || ! is_post_type_hierarchical( $post_type ) ) {
 			return;
 		}
 		$element_type = 'post_' . $post_type;
@@ -371,7 +376,7 @@ class PostShieldSyncController {
 	 */
 	private function remember_old_uris( int $post_id, \WP_Post $after, \WP_Post $before ): void {
 		$type = $after->post_type;
-		if ( '' === $before->post_name || ! in_array( $type, $this->post_types, true ) || ! is_post_type_hierarchical( $type ) ) {
+		if ( '' === $before->post_name || ! $this->managed( $type ) || ! is_post_type_hierarchical( $type ) ) {
 			return;
 		}
 		$new_uri = $this->builder->uris_for( $type, [ $post_id ] )[ $post_id ] ?? '';
@@ -450,7 +455,7 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	private function append_based_old_slug( \WP_Post $post_after, \WP_Post $post_before ): void {
-		if ( ! in_array( $post_after->post_type, $this->post_types, true ) ) {
+		if ( ! $this->managed( $post_after->post_type ) ) {
 			return;
 		}
 		if ( '' === $post_before->post_name || $post_before->post_name === $post_after->post_name ) {
@@ -482,7 +487,7 @@ class PostShieldSyncController {
 			return;
 		}
 		$post_type = get_post_type( $post_id );
-		if ( ! is_string( $post_type ) || ! in_array( $post_type, $this->post_types, true ) ) {
+		if ( ! is_string( $post_type ) || ! $this->managed( $post_type ) ) {
 			return;
 		}
 		$this->fast_append( $post_id, $post_type );
@@ -501,7 +506,7 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	public function handle_transition_post_status( string $new_status, string $old_status, \WP_Post $post ): void {
-		if ( ! in_array( $post->post_type, $this->post_types, true ) || $new_status === $old_status ) {
+		if ( ! $this->managed( $post->post_type ) || $new_status === $old_status ) {
 			return;
 		}
 		$this->fast_append( $post->ID, $post->post_type );
@@ -522,7 +527,7 @@ class PostShieldSyncController {
 	public function handle_revision_applied( $post_id ): void {
 		$post_id   = (int) $post_id;
 		$post_type = get_post_type( $post_id );
-		if ( ! is_string( $post_type ) || ! in_array( $post_type, $this->post_types, true ) ) {
+		if ( ! is_string( $post_type ) || ! $this->managed( $post_type ) ) {
 			return;
 		}
 		// Addresses the revision moved (its slug applied with a direct
@@ -549,12 +554,16 @@ class PostShieldSyncController {
 	 *
 	 * @param mixed $update    Revision data about to be written.
 	 * @param mixed $revision  The revision.
-	 * @param mixed $published The live post.
+	 * @param mixed $published The live post: a raw `wp_posts` row (stdClass),
+	 *                         not a WP_Post — PublishPress reads it with
+	 *                         $wpdb->get_row(). The database still holds the
+	 *                         pre-revision slug and parent at this point.
 	 *
 	 * @return mixed
 	 */
 	public function snapshot_before_revision( $update, $revision = null, $published = null ) {
-		if ( $published instanceof \WP_Post && in_array( $published->post_type, $this->post_types, true ) && is_post_type_hierarchical( $published->post_type ) ) {
+		$published = is_object( $published ) && isset( $published->ID ) ? get_post( (int) $published->ID ) : null;
+		if ( $published instanceof \WP_Post && $this->managed( $published->post_type ) && is_post_type_hierarchical( $published->post_type ) ) {
 			$ids = $this->builder->is_shielding_status( $published->post_type, (string) $published->post_status ) ? [ (int) $published->ID ] : [];
 			foreach ( $this->descendant_statuses( (int) $published->ID, $published->post_type ) as $child_id => $child_status ) {
 				if ( $this->builder->is_shielding_status( $published->post_type, $child_status ) ) {
@@ -590,7 +599,7 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	public function handle_attachment_renamed( int $post_id, \WP_Post $after, \WP_Post $before ): void {
-		if ( '' === $before->post_name || $before->post_name === $after->post_name ) {
+		if ( '' === $before->post_name || $before->post_name === $after->post_name || ! $this->builder->has_root_entries() ) {
 			return;
 		}
 		$lines = [];

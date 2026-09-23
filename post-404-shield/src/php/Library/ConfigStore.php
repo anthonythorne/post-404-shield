@@ -139,7 +139,7 @@ class ConfigStore {
 	 *
 	 * @var int
 	 */
-	private const REDIRECT_DERIVATION_VERSION = 3;
+	private const REDIRECT_DERIVATION_VERSION = 4;
 
 	/**
 	 * Optional rebuild seam for the match-mode-switch ordering (SPEC §3.2c).
@@ -972,7 +972,9 @@ class ConfigStore {
 	 * go on below it (`^/stories/(\d+)/?$`, `/stories/*`): no single slug to
 	 * reserve. A digit-led remainder reserves every digit-led slug; anything
 	 * else is a save warning (derivation_warnings), since the shield would
-	 * answer those addresses before the redirect can.
+	 * answer those addresses before the redirect can. So is a regex source
+	 * that names a shielded base but that no reading here could place — a
+	 * shape the reducers do not know must never fail silently.
 	 *
 	 * @param array<string, mixed> $entries        Candidate entries.
 	 * @param string               $locale_pattern Locale pattern body ('' = none).
@@ -980,35 +982,68 @@ class ConfigStore {
 	 * @return array<string, string[]> Entry key => reserved slugs.
 	 */
 	private function redirects_below_bases( array $entries, string $locale_pattern ): array {
+		$based = [];
+		foreach ( $entries as $key => $settings ) {
+			if ( is_array( $settings ) && ( ! isset( $settings['enabled'] ) || false !== $settings['enabled'] )
+				&& 'allowlist' === ( $settings['mode'] ?? 'allowlist' ) && true !== ( $settings['root'] ?? false )
+			) {
+				$based[ (string) $key ] = array_values( array_filter( (array) ( $settings['url_base'] ?? [] ), 'is_string' ) );
+			}
+		}
+
 		$out = [];
 		foreach ( $this->redirect_sources() as $source ) {
+			$placed = [];
 			foreach ( \Post404Shield\redirect_source_variants( $source['pattern'], $source['regex'], $locale_pattern ) as $variant ) {
-				$reduced = trim( rtrim( strtolower( \Post404Shield\redirect_pattern_base( $variant, $source['regex'] ) ), '*' ), '/' );
-				foreach ( $entries as $key => $settings ) {
-					if ( ! is_array( $settings ) || ( isset( $settings['enabled'] ) && false === $settings['enabled'] )
-						|| 'allowlist' !== ( $settings['mode'] ?? 'allowlist' ) || true === ( $settings['root'] ?? false )
-						|| ! in_array( $reduced, (array) ( $settings['url_base'] ?? [] ), true )
-					) {
+				$consumed = 0;
+				$reduced  = trim( rtrim( strtolower( \Post404Shield\redirect_pattern_base( $variant, $source['regex'], $consumed ) ), '*' ), '/' );
+				foreach ( $based as $key => $bases ) {
+					foreach ( $bases as $base ) {
+						if ( '' !== $reduced && 0 === strpos( $reduced . '/', $base . '/' ) ) {
+							$placed[ $key ] = true; // At or under the base: derived_reserved_slugs() read it.
+						}
+					}
+					if ( ! in_array( $reduced, $bases, true ) ) {
 						continue;
 					}
-					$rest = ltrim( (string) substr( $variant, strlen( $reduced ) ), '/' );
+					// Where the literal run ended in the source itself: an
+					// escape is two bytes of source for one of literal.
+					$rest = ltrim( (string) substr( $variant, $consumed ), '/?' );
 					// Only the base itself (`stories/?$`): nothing below it.
-					if ( 1 === preg_match( '#^(?:\?|\$|\?\$)?$#', $rest ) ) {
+					if ( 1 === preg_match( '#^\$?$#', $rest ) ) {
 						continue;
 					}
 					if ( 1 === preg_match( '#^\(?(?:\?:)?(?:\\\\d|\[0-9\])#', $rest ) ) {
 						foreach ( range( 0, 9 ) as $digit ) {
-							$out[ (string) $key ][] = $digit . '*';
+							$out[ $key ][] = $digit . '*';
 						}
 						continue;
 					}
 					$this->derivation_warnings[] = sprintf(
 						/* translators: 1: entry name, 2: the redirect source, 3: the URL base. */
 						__( '%1$s: the redirect "%2$s" covers addresses under /%3$s/ that cannot be reserved one by one, so the shield answers them before the redirect can. Add the slugs it redirects from to Reserved slugs, or move the redirect to the edge.', 'post-404-shield' ),
-						$this->entry_label( (string) $key, $settings ),
+						$this->entry_label( $key, (array) $entries[ $key ] ),
 						(string) $source['pattern'],
 						$reduced
 					);
+				}
+			}
+			if ( ! $source['regex'] ) {
+				continue;
+			}
+			$text = strtolower( str_replace( '\\/', '/', (string) $source['pattern'] ) );
+			foreach ( $based as $key => $bases ) {
+				foreach ( $bases as $base ) {
+					if ( ! isset( $placed[ $key ] ) && 1 === preg_match( '#(?<![a-z0-9_-])' . preg_quote( $base, '#' ) . '(?![a-z0-9_-])#', $text ) ) {
+						$this->derivation_warnings[] = sprintf(
+							/* translators: 1: entry name, 2: the redirect source, 3: the URL base. */
+							__( '%1$s: the redirect "%2$s" looks like it covers addresses under /%3$s/, but its pattern could not be read, so nothing was reserved for it and the shield may answer those addresses before the redirect can. Add the slugs it redirects from to Reserved slugs, or move the redirect to the edge.', 'post-404-shield' ),
+							$this->entry_label( $key, (array) $entries[ $key ] ),
+							(string) $source['pattern'],
+							$base
+						);
+						break;
+					}
 				}
 			}
 		}
@@ -1658,11 +1693,14 @@ class ConfigStore {
 	 *                                           `expect_revision` => string refuses the save (`stale` => true)
 	 *                                           unless the stored settings still have that current_revision() —
 	 *                                           checked under the lock, so two forms cannot both pass it;
-	 *                                           `fail_open` => true (an automatic switch-off that only disables
-	 *                                           entries) turns validation errors into warnings;
+	 *                                           `fail_open` => true (an automatic write: a switch-off, a
+	 *                                           re-snapshot, the redirect sync) turns the validation errors the
+	 *                                           LIVE artifact already carries into warnings — never a new one,
+	 *                                           and nothing when no artifact is live;
 	 *                                           `persist_keep` => int stores that retention under the lock.
 	 *
-	 * @return array{ok: bool, errors: string[], warnings: string[], stale?: bool}
+	 * @return array{ok: bool, errors: string[], warnings: string[], stale?: bool, retry?: bool} `retry` marks
+	 *         a refusal that says nothing about the config (a busy or lost lock, a failed read).
 	 */
 	public function write( array $config, string $generated_by, array $flags = [] ): array {
 		// Root-pages v2: the floor + derived excluded-bases buckets are
@@ -1675,13 +1713,18 @@ class ConfigStore {
 
 		$validated             = $this->validate( $config );
 		$validated['warnings'] = array_merge( $validated['warnings'], $this->derivation_warnings );
-		// A fail-open write (an automatic switch-off) only disables entries
-		// relative to what is live, whose problems the live artifact already
-		// carries: they must not keep the switch-off from landing. The
-		// runtime invariant below still holds.
+		// A fail-open write is automatic: it disables entries or re-snapshots
+		// what is live. An error the live artifact already carries — a status
+		// whose plugin was switched off — must not keep it from landing, or a
+		// stale snapshot stays live behind it. A NEW error still refuses, and
+		// with no live artifact nothing is tolerated: the shield is off, and
+		// publishing a config the self-heal refused would switch it on broken.
+		// The runtime invariant below still holds.
 		if ( ! empty( $flags['fail_open'] ) && [] !== $validated['errors'] ) {
-			$validated['warnings'] = array_merge( $validated['warnings'], $validated['errors'] );
-			$validated['errors']   = [];
+			$live                  = $this->artifact();
+			$carried               = null === $live ? [] : array_values( array_intersect( $validated['errors'], $this->validate( $live )['errors'] ) );
+			$validated['errors']   = array_values( array_diff( $validated['errors'], $carried ) );
+			$validated['warnings'] = array_merge( $validated['warnings'], $carried );
 		}
 		if ( [] !== $validated['errors'] ) {
 			return [
@@ -1715,6 +1758,7 @@ class ConfigStore {
 					'ok'       => false,
 					'errors'   => [ __( 'Another save is in progress — try again in a moment.', 'post-404-shield' ) ],
 					'warnings' => $validated['warnings'],
+					'retry'    => true,
 				];
 			}
 			$stale = $this->stale_result( $flags );
@@ -1893,6 +1937,7 @@ class ConfigStore {
 					'ok'       => false,
 					'errors'   => [ __( 'Another save took over while this one was running — nothing was saved. Reload the page and check the current settings.', 'post-404-shield' ) ],
 					'warnings' => $validated['warnings'],
+					'retry'    => true,
 				];
 			}
 
@@ -1942,6 +1987,7 @@ class ConfigStore {
 				'ok'       => false,
 				'errors'   => [ __( 'Nothing was saved: a database read failed while checking the change. Try again.', 'post-404-shield' ) . ' (' . $e->getMessage() . ')' ],
 				'warnings' => $validated['warnings'],
+				'retry'    => true,
 			];
 		} finally {
 			if ( null !== $staged && file_exists( $staged ) ) {
@@ -2530,13 +2576,17 @@ class ConfigStore {
 			if ( $candidate === $option && ! $this->snapshot_is_stale( $option ) ) {
 				return false;
 			}
-			// Switching Posts off must land whatever else the stored config gets
-			// wrong; following a moved base is validated as any save is.
-			$flags = [ 'expect_revision' => $this->revision_of( $option ) ];
-			if ( $this->with_current_post_base( $option ) === $option ) {
-				$flags['fail_open'] = true;
-			}
-			$result = $this->write( $candidate, 'auto: config follows the permalink settings — ' . $reason, $flags );
+			// Automatic: an error the live artifact already carries does not
+			// hold it back, a new one does (a moved base still meets the
+			// coverage gate), and with no live artifact nothing is published.
+			$result = $this->write(
+				$candidate,
+				'auto: config follows the permalink settings — ' . $reason,
+				[
+					'expect_revision' => $this->revision_of( $option ),
+					'fail_open'       => true,
+				]
+			);
 			if ( ! $result['ok'] ) {
 				error_log( '[post-404-shield] permalink revalidation (' . $reason . '): could not update the Posts entry: ' . implode( ' | ', $result['errors'] ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			}
@@ -2556,15 +2606,23 @@ class ConfigStore {
 			if ( $candidate === $option && ! $this->snapshot_is_stale( $option ) ) {
 				return false;
 			}
-			$result = $this->write( $candidate, 'auto: root snapshot refreshed — ' . $reason, [ 'expect_revision' => $this->revision_of( $option ) ] );
+			$result = $this->write(
+				$candidate,
+				'auto: root snapshot refreshed — ' . $reason,
+				[
+					'expect_revision' => $this->revision_of( $option ),
+					'fail_open'       => true,
+				]
+			);
 			// A save that landed meanwhile ran every check itself.
 			if ( $result['ok'] || ! empty( $result['stale'] ) ) {
 				return false;
 			}
-			// Only a refusal about root mode itself switches it off. A busy
-			// lock, a failed read or an unrelated error is retried by the
-			// follow-up or the next daily check.
-			if ( empty( $result['root_refused'] ) ) {
+			// A busy lock or a failed read says nothing about the config: the
+			// follow-up or the next daily check tries again. Any other refusal
+			// (the root preflight, the coverage gate, a new error) leaves the
+			// live snapshot stale for good, so root matching goes off.
+			if ( ! empty( $result['retry'] ) ) {
 				error_log( '[post-404-shield] root revalidation (' . $reason . '): the refresh did not land, retried later: ' . implode( ' | ', $result['errors'] ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 				return false;
 			}
@@ -2572,10 +2630,14 @@ class ConfigStore {
 		}
 
 		// Switch root matching off: a write that only disables entries, so it
-		// lands whatever else the stored config gets wrong (fail_open) — and
-		// never over a save that committed after the option was read here.
+		// lands whatever else the stored config gets wrong that is already
+		// live (fail_open) — and never over a save that committed after the
+		// option was read here. The Posts base is left where it was: moving
+		// it is a change the coverage gate may refuse, and a based entry at
+		// its old base only ever passes URLs through. The next revalidation
+		// moves it.
 		$result = $this->write(
-			self::root_disabled( $candidate ),
+			self::root_disabled( $this->with_unservable_post_disabled( $option ) ),
 			'auto: root matching switched off — ' . $reason,
 			[
 				'skip_root_preflight' => true,
