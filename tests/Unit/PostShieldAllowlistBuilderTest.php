@@ -186,6 +186,30 @@ class PostShieldAllowlistBuilderTest extends TestCase {
 	}
 
 	/**
+	 * A batched append writes every valid line in one go, skips invalid ones,
+	 * and leaves a missing file to the rebuild.
+	 *
+	 * @return void
+	 */
+	public function test_append_slugs_batches_and_filters() {
+		$builder = new AllowlistBuilder( [] );
+		$file    = $this->work_dir . '/post-404-shield/page/allowlist.php';
+
+		$this->assertSame( 0, $builder->append_slugs_to_file( $file, [ 'about' ], 'full-path' ), 'No file yet: nothing written.' );
+
+		$builder->write_allowlist_atomically( [ 'about' => true ], $file );
+		$this->assertSame(
+			2,
+			$builder->append_slugs_to_file( $file, [ 'about/team', 'Bad Path', 'about/team/lead', '' ], 'full-path' ),
+			'Two valid lines of four.'
+		);
+		$this->assertSame( [ 'about', 'about/team', 'about/team/lead' ], $this->parse_slugs( (string) file_get_contents( $file ) ) );
+		$this->assertStringContainsString( "\nabout/team/lead\n", (string) file_get_contents( $file ), 'Newline-wrapped for the loader.' );
+
+		$this->assertSame( 0, $builder->append_slugs_to_file( $file, [ 'a/b' ], 'slug' ), 'Slug mode rejects a path.' );
+	}
+
+	/**
 	 * The count reports the slugs the real writer put in the file —
 	 * including zero for an empty list, which a newline count reported as one.
 	 *

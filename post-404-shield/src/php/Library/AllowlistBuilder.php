@@ -397,11 +397,26 @@ class AllowlistBuilder {
 	 * @return bool True when a line was appended.
 	 */
 	public function append_slug( string $post_type, string $slug ): bool {
-		return $this->append_slug_to_file( $this->get_allowlist_file( $post_type ), $slug, $this->match_for( $post_type ) );
+		return 1 === $this->append_slugs( $post_type, [ $slug ] );
 	}
 
 	/**
-	 * Append core, split out so it is unit-testable without wp_upload_dir().
+	 * Append several lines to a type's EXISTING allowlist in one write — a
+	 * subtree re-append after a page move is one locked append, not one per
+	 * descendant.
+	 *
+	 * @param string   $post_type Effective CPT name.
+	 * @param string[] $slugs     Slugs (or, in full-path mode, hierarchical paths).
+	 *
+	 * @return int Lines appended.
+	 */
+	public function append_slugs( string $post_type, array $slugs ): int {
+		return $this->append_slugs_to_file( $this->get_allowlist_file( $post_type ), $slugs, $this->match_for( $post_type ) );
+	}
+
+	/**
+	 * Append core for one line, split out so it is unit-testable without
+	 * wp_upload_dir().
 	 *
 	 * @param string $file       Absolute allowlist path.
 	 * @param string $slug       Slug (or, in full-path mode, hierarchical path) to append.
@@ -410,16 +425,36 @@ class AllowlistBuilder {
 	 * @return bool True when a line was appended.
 	 */
 	public function append_slug_to_file( string $file, string $slug, string $match_mode = 'slug' ): bool {
+		return 1 === $this->append_slugs_to_file( $file, [ $slug ], $match_mode );
+	}
+
+	/**
+	 * Append core: validate every line against the format's charset, then write
+	 * the valid ones in a single locked append. A line that fails the charset
+	 * is skipped, never written. A missing file is left to the rebuild, which
+	 * creates it guarded.
+	 *
+	 * @param string   $file       Absolute allowlist path.
+	 * @param string[] $slugs      Lines to append.
+	 * @param string   $match_mode Allowlist format: `slug` or `full-path`.
+	 *
+	 * @return int Lines appended.
+	 */
+	public function append_slugs_to_file( string $file, array $slugs, string $match_mode = 'slug' ): int {
 		$line_pattern = 'full-path' === $match_mode ? '#^[a-z0-9_-]+(?:/[a-z0-9_-]+)*$#' : '/^[a-z0-9_-]+$/';
-		if ( 1 !== preg_match( $line_pattern, $slug ) ) {
-			return false;
+		$lines        = [];
+		foreach ( $slugs as $slug ) {
+			if ( is_string( $slug ) && 1 === preg_match( $line_pattern, $slug ) ) {
+				$lines[] = $slug;
+			}
 		}
-		if ( ! is_file( $file ) ) {
-			return false;
+		if ( [] === $lines || ! is_file( $file ) ) {
+			return 0;
 		}
-		// The file always ends in "\n", so appending "slug\n" keeps every slug
+		// The file always ends in "\n", so appending "a\nb\n" keeps every slug
 		// newline-wrapped for the loader's "\n{slug}\n" match.
-		return false !== file_put_contents( $file, $slug . "\n", FILE_APPEND | LOCK_EX ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_file_put_contents
+		$written = file_put_contents( $file, implode( "\n", $lines ) . "\n", FILE_APPEND | LOCK_EX ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_file_put_contents
+		return false === $written ? 0 : count( $lines );
 	}
 
 	/**

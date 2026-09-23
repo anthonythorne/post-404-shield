@@ -286,17 +286,17 @@ class PostShieldSyncController {
 			if ( ! is_string( $uri ) || '' === $uri ) {
 				return;
 			}
-			$this->builder->append_slug( $post_type, $uri );
-			foreach ( $this->descendant_ids( $post_id, $post_type ) as $child_id ) {
-				$child_status = get_post_status( $child_id );
-				if ( ! is_string( $child_status ) || ! $this->builder->is_shielding_status( $post_type, $child_status ) ) {
+			$lines = [ $uri ];
+			foreach ( $this->descendant_statuses( $post_id, $post_type ) as $child_id => $child_status ) {
+				if ( ! $this->builder->is_shielding_status( $post_type, $child_status ) ) {
 					continue;
 				}
 				$child_uri = get_page_uri( $child_id );
 				if ( is_string( $child_uri ) && '' !== $child_uri ) {
-					$this->builder->append_slug( $post_type, $child_uri );
+					$lines[] = $child_uri;
 				}
 			}
+			$this->builder->append_slugs( $post_type, $lines );
 			$this->purge_page_cache( $post_id );
 			return;
 		}
@@ -309,40 +309,68 @@ class PostShieldSyncController {
 	}
 
 	/**
-	 * Every descendant ID of a post (breadth-first over post_parent). Raw,
-	 * unfiltered reads so WPML/queries cannot hide translations from the append.
+	 * Every descendant of a post, with its status. Raw, unfiltered reads so
+	 * WPML/queries cannot hide translations from the append.
+	 *
+	 * Runs on save_post, so the query count is bounded rather than growing with
+	 * the subtree: one query answers the common case (a leaf — no children);
+	 * otherwise one read of the type's parent/status map, walked in memory, and
+	 * one cache prime so each descendant's get_page_uri() is served from cache.
+	 * Traversal ignores status on purpose: a draft's published child still has
+	 * its URI changed by a move, so the walk must pass through the draft.
 	 *
 	 * @param int    $post_id   Root post ID.
 	 * @param string $post_type Managed post type.
 	 *
-	 * @return int[]
+	 * @return array<int, string> Descendant ID => post status.
 	 */
-	private function descendant_ids( int $post_id, string $post_type ): array {
+	private function descendant_statuses( int $post_id, string $post_type ): array {
 		global $wpdb;
+
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		$has_child = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT ID FROM {$wpdb->posts} WHERE post_parent = %d AND post_type = %s LIMIT 1",
+				$post_id,
+				$post_type
+			)
+		);
+		if ( null === $has_child ) {
+			return [];
+		}
+
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT ID, post_parent, post_status FROM {$wpdb->posts} WHERE post_type = %s AND post_parent <> 0",
+				$post_type
+			)
+		);
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+
+		$children = [];
+		$status   = [];
+		foreach ( (array) $rows as $row ) {
+			$children[ (int) $row->post_parent ][] = (int) $row->ID;
+			$status[ (int) $row->ID ]              = (string) $row->post_status;
+		}
 
 		$found = [];
 		$queue = [ $post_id ];
 		while ( [] !== $queue ) {
 			$parent = array_shift( $queue );
-			// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
-			$children = $wpdb->get_col(
-				$wpdb->prepare(
-					"SELECT ID FROM {$wpdb->posts} WHERE post_parent = %d AND post_type = %s",
-					$parent,
-					$post_type
-				)
-			);
-			// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
-			foreach ( $children as $child ) {
-				$child = (int) $child;
+			foreach ( $children[ $parent ] ?? [] as $child ) {
 				if ( ! isset( $found[ $child ] ) ) {
-					$found[ $child ] = true;
+					$found[ $child ] = $status[ $child ];
 					$queue[]         = $child;
 				}
 			}
 		}
 
-		return array_map( 'intval', array_keys( $found ) );
+		if ( [] !== $found && function_exists( '_prime_post_caches' ) ) {
+			_prime_post_caches( array_keys( $found ), false, false );
+		}
+
+		return $found;
 	}
 
 	/**
