@@ -149,7 +149,10 @@ echo "FELL-THROUGH";
 	 * @return void
 	 */
 	public function test_non_canonical_paths_go_to_wordpress(): void {
-		foreach ( [ '/global/stories/fake/../real-story/', '/global/stories/fake/%2e%2e/real-story/', '/global/stories/fake\\x/', '/global/stories/./fake/', '//stories/fake-one/' ] as $uri ) {
+		// Each depends on one guard alone: without it, the path is judged and
+		// the fake slug blocked — a 404 a normalising cache would file under the
+		// real story. (`//x/…` parses with host `x` and the path after it.)
+		foreach ( [ '/global/stories/fake/../real-story/', '/global/stories/fake/%2e%2e/real-story/', '/global/stories/fake/..\\real-story/', '//x/global/stories/fake-one/' ] as $uri ) {
 			$result = $this->request( $uri );
 			$this->assertTrue( $result['through'], $uri . ' ' . $result['stderr'] );
 			$this->assertNotSame( 404, $result['code'], $uri );

@@ -96,6 +96,15 @@ class PostShieldSyncController {
 	private array $family = [];
 
 	/**
+	 * Addresses a deleted post's subtree had, or a re-parented post's WPML
+	 * translations' subtrees had, before core or WPML moved them with a
+	 * query no hook sees — compared after the move for the old addresses.
+	 *
+	 * @var array<string, array<int, string>>
+	 */
+	private array $moving = [];
+
+	/**
 	 * Construct the sync controller.
 	 *
 	 * @param AllowlistBuilder $builder Shared builder, following the live artifact.
@@ -167,26 +176,43 @@ class PostShieldSyncController {
 		add_action( 'post_updated', $this->guarded( 'handle_post_updated' ), 20, 3 );
 	}
 	/**
-	 * A hook callback that runs a handler and contains a failed database read:
-	 * the builder's reads throw rather than build from "no rows", which suits a
-	 * rebuild but would turn an optional append into a fatal inside an
-	 * editor's save or a cron publish. The append is skipped (the nightly
-	 * rebuild restores the line); a filter's value passes through unchanged.
+	 * A hook callback that runs a handler and contains a failed database read
+	 * or a mistyped argument: the builder's reads throw rather than build from
+	 * "no rows", which suits a rebuild but would turn an optional append into
+	 * a fatal inside an editor's save or a cron publish. The append is skipped
+	 * (the nightly rebuild restores the line); a filter's value passes through
+	 * unchanged.
 	 *
 	 * @param string $method Handler method name.
 	 *
 	 * @return \Closure
 	 */
 	private function guarded( string $method ): \Closure {
-		return function ( ...$args ) use ( $method ) {
+		$params = ( new \ReflectionMethod( $this, $method ) )->getParameters();
+		return function ( ...$args ) use ( $method, $params ) {
+			// This file is strict_types: coerce scalars to the handler's types
+			// the way WordPress's own hook dispatch would, or a hook that passes
+			// a database row's numeric-string ID (PublishPress does) fatals.
+			foreach ( $params as $index => $param ) {
+				$type = $param->getType();
+				if ( ! array_key_exists( $index, $args ) || ! $type instanceof \ReflectionNamedType || ! $type->isBuiltin() || ! is_scalar( $args[ $index ] ) ) {
+					continue;
+				}
+				if ( 'int' === $type->getName() && is_numeric( $args[ $index ] ) ) {
+					$args[ $index ] = (int) $args[ $index ];
+				} elseif ( 'string' === $type->getName() ) {
+					$args[ $index ] = (string) $args[ $index ];
+				}
+			}
 			try {
 				return $this->$method( ...$args );
-			} catch ( \RuntimeException $e ) {
+			} catch ( \RuntimeException | \TypeError $e ) {
 				error_log( '[post-404-shield] ' . $method . ': ' . $e->getMessage() . ' — skipped; the nightly rebuild restores the list.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 				return $args[0] ?? null;
 			}
 		};
 	}
+
 
 
 	/**
@@ -312,8 +338,80 @@ class PostShieldSyncController {
 			]
 		);
 		if ( [] !== $children ) {
-			$this->orphans[ $post_id ] = [ $post_type, array_map( 'intval', (array) $children ) ];
+			$this->orphans[ $post_id ]            = [ $post_type, array_map( 'intval', (array) $children ) ];
+			$this->moving[ 'delete-' . $post_id ] = $this->subtree_uris( $post_type, $this->orphans[ $post_id ][1] );
 		}
+	}
+
+	/**
+	 * The addresses of some posts and their live descendants, where they were
+	 * served (the statuses a move keeps an old address for).
+	 *
+	 * @param string $type  Post type.
+	 * @param int[]  $roots Post IDs.
+	 *
+	 * @return array<int, string> Post ID => address.
+	 */
+	private function subtree_uris( string $type, array $roots ): array {
+		$ids = [];
+		foreach ( $roots as $root ) {
+			if ( $this->was_served( $type, (string) get_post_status( $root ) ) ) {
+				$ids[] = (int) $root;
+			}
+			foreach ( $this->descendant_statuses( (int) $root, $type ) as $child => $child_status ) {
+				if ( $this->was_served( $type, $child_status ) ) {
+					$ids[] = (int) $child;
+				}
+			}
+		}
+		return [] === $ids ? [] : $this->builder->uris_for( $type, array_values( array_unique( $ids ) ) );
+	}
+
+	/**
+	 * Keep the addresses posts left in a move this controller only saw the
+	 * ends of (see $moving).
+	 *
+	 * @param string $key  The $moving key.
+	 * @param string $type Post type.
+	 *
+	 * @return void
+	 */
+	private function publish_moved( string $key, string $type ): void {
+		$before = $this->moving[ $key ] ?? [];
+		unset( $this->moving[ $key ] );
+		$old = [];
+		foreach ( [] === $before ? [] : $this->builder->uris_for( $type, array_keys( $before ) ) as $id => $uri ) {
+			if ( isset( $before[ $id ] ) && $before[ $id ] !== $uri ) {
+				$old[ $id ] = $before[ $id ];
+			}
+		}
+		if ( [] !== $old ) {
+			$this->publish_old_uris( $type, $old );
+		}
+	}
+
+	/**
+	 * A post's WPML translations (their IDs, the post itself left out).
+	 *
+	 * @param int    $post_id   Post ID.
+	 * @param string $post_type Post type.
+	 *
+	 * @return int[]
+	 */
+	private function translation_ids( int $post_id, string $post_type ): array {
+		$element_type = 'post_' . $post_type;
+		$trid         = apply_filters( 'wpml_element_trid', null, $post_id, $element_type );
+		if ( empty( $trid ) ) {
+			return [];
+		}
+		$ids = [];
+		foreach ( (array) apply_filters( 'wpml_get_element_translations', null, $trid, $element_type ) as $translation ) {
+			$translation_id = (int) ( $translation->element_id ?? 0 );
+			if ( 0 !== $translation_id && $translation_id !== $post_id ) {
+				$ids[] = $translation_id;
+			}
+		}
+		return $ids;
 	}
 
 	/**
@@ -338,6 +436,9 @@ class PostShieldSyncController {
 		foreach ( $children as $child ) {
 			$this->fast_append( $child, $post_type, true );
 		}
+		// WordPress still 301s the addresses they left (its 404 guess finds
+		// them by name), so they are kept like any move's.
+		$this->publish_moved( 'delete-' . $post_id, $post_type );
 	}
 
 	/**
@@ -358,17 +459,11 @@ class PostShieldSyncController {
 		if ( ! is_string( $post_type ) || ! $this->managed( $post_type ) || ! is_post_type_hierarchical( $post_type ) ) {
 			return;
 		}
-		$element_type = 'post_' . $post_type;
-		$trid         = apply_filters( 'wpml_element_trid', null, $post_id, $element_type );
-		if ( empty( $trid ) ) {
-			return;
+		unset( $this->family[ $post_type ] ); // WPML just re-parented them.
+		foreach ( $this->translation_ids( $post_id, $post_type ) as $translation_id ) {
+			$this->fast_append( $translation_id, $post_type, true );
 		}
-		foreach ( (array) apply_filters( 'wpml_get_element_translations', null, $trid, $element_type ) as $translation ) {
-			$translation_id = (int) ( $translation->element_id ?? 0 );
-			if ( 0 !== $translation_id && $translation_id !== $post_id ) {
-				$this->fast_append( $translation_id, $post_type, true );
-			}
-		}
+		$this->publish_moved( 'wpml-' . $post_id, $post_type );
 	}
 
 	/**
@@ -394,6 +489,11 @@ class PostShieldSyncController {
 		}
 		if ( $post_before->post_parent !== $post_after->post_parent ) {
 			$this->reparented[ $post_id ] = true;
+			// WPML moves the translations after save_post: note where their
+			// subtrees are now, to keep the addresses they are about to leave.
+			if ( $this->managed( $post_after->post_type ) && is_post_type_hierarchical( $post_after->post_type ) ) {
+				$this->moving[ 'wpml-' . $post_id ] = $this->subtree_uris( $post_after->post_type, $this->translation_ids( $post_id, $post_after->post_type ) );
+			}
 		}
 		if ( ! $this->builder->is_root_type( $post_after->post_type ) ) {
 			$this->append_based_old_slug( $post_after, $post_before );

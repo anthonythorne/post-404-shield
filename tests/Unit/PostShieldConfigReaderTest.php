@@ -394,8 +394,10 @@ class PostShieldConfigReaderTest extends TestCase {
 	 */
 	public function test_temp_names_end_in_php_and_are_recognised(): void {
 		$tmp = temp_path( '/x/post-404-shield/page/allowlist.php' );
-		$this->assertMatchesRegularExpression( '#^/x/post-404-shield/page/allowlist\.\d+\.tmp\.php$#', $tmp );
+		$this->assertMatchesRegularExpression( '#^/x/post-404-shield/page/allowlist\.\d+\.[0-9a-f]{12}\.tmp\.php$#', $tmp );
+		$this->assertNotSame( $tmp, temp_path( '/x/post-404-shield/page/allowlist.php' ), 'Unique per call, not only per process: containers share PIDs.' );
 		$this->assertTrue( is_temp_file_name( basename( $tmp ) ) );
+		$this->assertTrue( is_temp_file_name( 'allowlist.4242.tmp.php' ), 'The PID-only name is swept too.' );
 		$this->assertTrue( is_temp_file_name( 'config.php.4242.tmp' ), 'The older name is swept too.' );
 		$this->assertFalse( is_temp_file_name( 'allowlist.php' ) );
 		$this->assertFalse( is_temp_file_name( 'config-20260923-101500.php' ), 'A revision is never a temp file.' );

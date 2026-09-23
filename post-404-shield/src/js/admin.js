@@ -1952,7 +1952,9 @@
 				})
 			);
 		}
-		if (statusConfirm) {
+		// Only while the checkbox is on screen: a confirmation must never
+		// outlive the refusal it answered.
+		if (statusConfirm && data.form.offerStatusConfirm) {
 			inputs.push(
 				el(Hidden, {
 					key: 'status-confirm',

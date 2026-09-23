@@ -117,13 +117,13 @@ $post_shield_builder = ( new \Post404Shield\Library\AllowlistBuilder( $post_shie
 $post_shield_store->set_rebuild_handler(
 	static function ( array $post_types, array $entries, bool $root_switching_on = false ): bool {
 		$candidate_builder = new \Post404Shield\Library\AllowlistBuilder( $entries );
-		$ok                = true;
+		$failed            = [];
 		$read_failed       = false;
 		foreach ( $post_types as $rebuild_type ) {
 			try {
 				$candidate_builder->rebuild_type( (string) $rebuild_type );
 			} catch ( \Throwable $e ) {
-				$ok          = false;
+				$failed[]    = (string) $rebuild_type;
 				$read_failed = $read_failed || $e instanceof \RuntimeException;
 				error_log( '[post-404-shield] mode-switch rebuild for ' . $rebuild_type . ' failed: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			}
@@ -137,7 +137,7 @@ $post_shield_store->set_rebuild_handler(
 			try {
 				$candidate_builder->rebuild_root_extras();
 			} catch ( \Throwable $e ) {
-				$ok          = false;
+				$failed[]    = \Post404Shield\Library\AllowlistBuilder::ROOT_EXTRAS_DIR;
 				$read_failed = $read_failed || $e instanceof \RuntimeException;
 				error_log( '[post-404-shield] root-extras rebuild failed: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			}
@@ -147,7 +147,11 @@ $post_shield_store->set_rebuild_handler(
 		if ( $read_failed || [] !== $candidate_builder->failed_reads() ) {
 			throw new \RuntimeException( 'a database read failed while rebuilding ' . implode( ', ', array_merge( array_map( 'strval', $post_types ), $candidate_builder->failed_reads() ) ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- caught by ConfigStore::write(), never printed.
 		}
-		return $ok && [] === $candidate_builder->failed_writes();
+		// The lists that failed to write (their directory names), or true.
+		foreach ( $candidate_builder->failed_writes() as $failed_file ) {
+			$failed[] = basename( dirname( $failed_file ) );
+		}
+		return [] === $failed ? true : array_values( array_unique( $failed ) );
 	}
 );
 
@@ -451,7 +455,10 @@ if ( defined( 'WP_CLI' ) && WP_CLI && class_exists( '\WP_CLI' ) ) {
 					$result = $post_shield_store->write(
 						$option,
 						'wp-cli (config write)',
-						[ 'force_preflight' => ! empty( $assoc_args['force'] ) ]
+						[
+							'force_preflight' => ! empty( $assoc_args['force'] ),
+							'shows_warnings'  => true,
+						]
 					);
 					if ( ! $result['ok'] ) {
 						\WP_CLI::error( implode( ' | ', $result['errors'] ) );
@@ -490,9 +497,12 @@ if ( defined( 'WP_CLI' ) && WP_CLI && class_exists( '\WP_CLI' ) ) {
 							$locale_pattern .= '|' . $default_lang;
 						}
 					}
-					$result = $post_shield_store->write( $post_shield_store->import_legacy( $legacy, $locale_mode, $locale_pattern ), 'wp-cli (import-legacy)' );
+					$result = $post_shield_store->write( $post_shield_store->import_legacy( $legacy, $locale_mode, $locale_pattern ), 'wp-cli (import-legacy)', [ 'shows_warnings' => true ] );
 					if ( ! $result['ok'] ) {
 						\WP_CLI::error( implode( ' | ', $result['errors'] ) );
+					}
+					foreach ( $result['warnings'] as $post_shield_warning ) {
+						\WP_CLI::warning( $post_shield_warning );
 					}
 					\WP_CLI::success( 'Legacy config imported: option + artifact written (locale mode ' . $locale_mode . ').' );
 					return;
@@ -519,9 +529,22 @@ if ( defined( 'WP_CLI' ) && WP_CLI && class_exists( '\WP_CLI' ) ) {
 					if ( '' === $stamp ) {
 						\WP_CLI::error( 'Usage: wp post-shield config restore <stamp>' );
 					}
-					$result = $post_shield_store->restore( $stamp, 'wp-cli (restore ' . $stamp . ')' );
+					// --force, as for `config write`: past a coverage refusal,
+					// a status drop included.
+					$result = $post_shield_store->restore(
+						$stamp,
+						'wp-cli (restore ' . $stamp . ')',
+						[
+							'force_preflight'   => ! empty( $assoc_args['force'] ),
+							'allow_status_drop' => ! empty( $assoc_args['force'] ),
+							'shows_warnings'    => true,
+						]
+					);
 					if ( ! $result['ok'] ) {
 						\WP_CLI::error( implode( ' | ', $result['errors'] ) );
+					}
+					foreach ( $result['warnings'] as $post_shield_warning ) {
+						\WP_CLI::warning( $post_shield_warning );
 					}
 					\WP_CLI::success( 'Revision ' . $stamp . ' restored (the outgoing config was rotated to a new revision).' );
 					return;

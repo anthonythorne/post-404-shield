@@ -279,10 +279,14 @@ class PostShieldAdminController {
 				'persist_keep'      => $keep,
 				'expect_revision'   => $revision,
 				'allow_status_drop' => ! empty( $draft['statusConfirm'] ),
+				'shows_warnings'    => true,
 			]
 		);
 		if ( ! $result['ok'] ) {
+			// Offered only while the refusal is about a dropped status, and then
+			// unticked: a confirmation must never outlive the refusal it was for.
 			$draft['offerStatusConfirm'] = ! empty( $result['status_drop'] );
+			$draft['statusConfirm']      = false;
 			$this->set_notice( $result['errors'], $result['warnings'], false, '', empty( $result['stale'] ) ? $draft : null );
 			$this->redirect_to_page();
 		}
@@ -324,7 +328,32 @@ class PostShieldAdminController {
 		// it opened: a save since then would be reverted unseen.
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
 		$revision = isset( $_POST['ps_revision'] ) ? sanitize_key( wp_unslash( $_POST['ps_revision'] ) ) : '';
-		$result   = $this->store->restore( $stamp, $this->current_user_label(), [ 'expect_revision' => $revision ] );
+		$result   = $this->store->restore(
+			$stamp,
+			$this->current_user_label(),
+			[
+				'expect_revision'   => $revision,
+				'allow_status_drop' => ! empty( $_POST['ps_status_confirm'] ), // phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
+				'shows_warnings'    => true,
+			]
+		);
+		if ( ! $result['ok'] && ! empty( $result['status_drop'] ) ) {
+			// Refused only over a status the revision drops: back to the confirm
+			// screen, which now offers to drop it anyway.
+			$this->set_notice( $result['errors'], $result['warnings'], false );
+			wp_safe_redirect(
+				add_query_arg(
+					[
+						'page'            => self::PAGE_SLUG,
+						'ps_restore'      => rawurlencode( $stamp ),
+						'_wpnonce'        => wp_create_nonce( 'post_shield_restore_confirm' ),
+						'ps_status_offer' => '1',
+					],
+					admin_url( 'options-general.php' )
+				)
+			);
+			exit;
+		}
 		if ( ! $result['ok'] ) {
 			$this->set_notice( $result['errors'], $result['warnings'], false );
 			$this->redirect_to_page();
@@ -362,7 +391,14 @@ class PostShieldAdminController {
 			$current['entries'][ $key ]['enabled'] = false;
 		}
 
-		$result = $this->store->write( $current, $this->current_user_label() . ' (disable shield)', [ 'expect_revision' => $expect ] );
+		$result = $this->store->write(
+			$current,
+			$this->current_user_label() . ' (disable shield)',
+			[
+				'expect_revision' => $expect,
+				'shows_warnings'  => true,
+			] 
+		);
 		if ( ! $result['ok'] ) {
 			$this->set_notice( $result['errors'], $result['warnings'], false );
 			$this->redirect_to_page();
@@ -390,7 +426,14 @@ class PostShieldAdminController {
 					unset( $current['entries'][ $key ] );
 				}
 			}
-			$result = $this->store->write( $current, $this->current_user_label() . ' (discard switched-off root settings)', [ 'expect_revision' => $expect ] );
+			$result = $this->store->write(
+				$current,
+				$this->current_user_label() . ' (discard switched-off root settings)',
+				[
+					'expect_revision' => $expect,
+					'shows_warnings'  => true,
+				] 
+			);
 			if ( ! $result['ok'] ) {
 				$this->set_notice( $result['errors'], $result['warnings'], false );
 				$this->redirect_to_page();
@@ -1896,10 +1939,25 @@ class PostShieldAdminController {
 		$incoming = $this->store->read_revision( $stamp );
 		$current  = $this->store->artifact();
 		$back     = add_query_arg( [ 'page' => self::PAGE_SLUG ], admin_url( 'options-general.php' ) );
+		// Back from a restore refused over a dropped status (the URL carries
+		// the same nonce as the link that opened this screen).
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- the screen's own nonce was verified with ps_restore.
+		$status_offer = ! empty( $_GET['ps_status_offer'] );
+		$refusal      = $status_offer ? $this->pull_notice() : null;
 		?>
 		<div class="wrap post-shield-admin">
 			<h1><?php esc_html_e( 'Restore config revision', 'post-404-shield' ); ?></h1>
 			<hr class="wp-header-end" />
+			<?php if ( is_array( $refusal ) && ! empty( $refusal['errors'] ) ) : ?>
+				<div class="notice notice-error">
+					<p><?php esc_html_e( 'Nothing was restored:', 'post-404-shield' ); ?></p>
+					<ul>
+						<?php foreach ( (array) $refusal['errors'] as $refusal_error ) : ?>
+							<li><?php echo esc_html( (string) $refusal_error ); ?></li>
+						<?php endforeach; ?>
+					</ul>
+				</div>
+			<?php endif; ?>
 			<?php if ( null === $incoming ) : ?>
 				<div class="post-shield-admin-notice post-shield-admin-notice--error"><?php esc_html_e( 'That revision does not exist or is not a valid config.', 'post-404-shield' ); ?></div>
 				<p class="post-shield-admin__actions"><a class="button" href="<?php echo esc_url( $back ); ?>">&larr; <?php esc_html_e( 'Back to Post 404 Shield', 'post-404-shield' ); ?></a></p>
@@ -2007,6 +2065,14 @@ class PostShieldAdminController {
 				<input type="hidden" name="ps_stamp" value="<?php echo esc_attr( $stamp ); ?>" />
 				<input type="hidden" name="ps_revision" value="<?php echo esc_attr( $this->store->current_revision() ); ?>" />
 				<?php wp_nonce_field( 'post_shield_restore' ); ?>
+				<?php if ( $status_offer ) : ?>
+					<div class="post-shield-admin-notice post-shield-admin-notice--warning post-shield-confirm">
+						<label>
+							<input type="checkbox" name="ps_status_confirm" value="1" />
+							<strong><?php esc_html_e( 'Drop the status anyway — its posts listed above get a 404 from the shield.', 'post-404-shield' ); ?></strong>
+						</label>
+					</div>
+				<?php endif; ?>
 				<?php if ( $restore_needs_confirm ) : ?>
 					<div class="post-shield-admin-notice post-shield-admin-notice--warning post-shield-confirm">
 						<label>

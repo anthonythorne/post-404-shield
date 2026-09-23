@@ -207,8 +207,8 @@ function rewrite_pattern_base( string $pattern ): string {
 		if ( '/' === $char ) {
 			// An optional separator not followed by the end anchor (`route/?`)
 			// matches `routes` too: a prefix.
-			$next = $pattern[ $i + 1 ] ?? '';
-			if ( ( '?' === $next || '*' === $next ) && '$' !== ltrim( substr( $pattern, $i + 2 ), '?+' ) && '' !== $out ) {
+			$quantifier = 1 === preg_match( '/\G(?:[?*]|\{0(?:,\d*)?\})/', $pattern, $zero, 0, $i + 1 ) ? $zero[0] : '';
+			if ( '' !== $quantifier && '$' !== ltrim( substr( $pattern, $i + 1 + strlen( $quantifier ) ), '?+' ) && '' !== $out ) {
 				return $out . '*';
 			}
 			break; // First path separator ends the leading segment.
@@ -348,7 +348,8 @@ function redirect_pattern_base( string $source, bool $is_regex, ?int &$consumed 
 			// An optional separator (`old-post/?`, `/*`) not followed by the end
 			// anchor matches `old-post-2019` too: the run is a prefix of its
 			// last segment, not the whole segment.
-			if ( $is_regex && in_array( $char, [ '?', '*' ], true ) && '/' === substr( $out, -1 ) && '$' !== ltrim( substr( $source, $i + 1 ), '?+' ) ) {
+			$optional = in_array( $char, [ '?', '*' ], true ) ? 1 : ( 1 === preg_match( '/\G\{0(?:,\d*)?\}/', $source, $zero, 0, $i ) ? strlen( $zero[0] ) : 0 );
+			if ( $is_regex && $optional > 0 && '/' === substr( $out, -1 ) && '$' !== ltrim( substr( $source, $i + $optional ), '?+' ) ) {
 				$out = substr( $out, 0, -1 );
 				array_pop( $ends );
 				$truncated = '' !== trim( $out, '/' );
@@ -984,7 +985,9 @@ function shield_dir(): string {
  * @return string e.g. `…/allowlist.1234.tmp.php`.
  */
 function temp_path( string $file ): string {
-	return (string) preg_replace( '/\.php$/', '', $file ) . '.' . getmypid() . '.tmp.php';
+	// The PID alone is not enough: containers sharing uploads each number
+	// their processes from 1, and two writers on one temp file corrupt it.
+	return (string) preg_replace( '/\.php$/', '', $file ) . '.' . getmypid() . '.' . bin2hex( random_bytes( 6 ) ) . '.tmp.php';
 }
 
 /**
@@ -996,7 +999,7 @@ function temp_path( string $file ): string {
  * @return bool
  */
 function is_temp_file_name( string $name ): bool {
-	return 1 === preg_match( '/\.\d+\.tmp(?:\.php)?$/', $name );
+	return 1 === preg_match( '/\.\d+(?:\.[0-9a-f]+)?\.tmp(?:\.php)?$/', $name );
 }
 
 /**

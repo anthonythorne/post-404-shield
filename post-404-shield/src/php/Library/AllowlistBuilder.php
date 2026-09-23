@@ -445,9 +445,14 @@ class AllowlistBuilder {
 				continue;
 			}
 			$post_type = (string) ( $settings['post_type'] ?? $key );
-			$statuses  = array_values(
+			// Each entry's own default, as every other reader has it: one that
+			// names no status lists Published, even beside one that names Private.
+			$statuses = array_values(
 				array_filter( (array) ( $settings['post_status'] ?? [] ), 'is_string' )
 			);
+			if ( [] === $statuses ) {
+				$statuses = [ 'publish' ];
+			}
 
 			$map[ $post_type ] = array_values( array_unique( array_merge( $map[ $post_type ] ?? [], $statuses ) ) );
 		}
@@ -1341,7 +1346,7 @@ class AllowlistBuilder {
 	 * @param int[]|null           $ids        Only these attachments; null for any.
 	 * @param array<string, mixed> $window     Optional `after`, `limit`, `order`.
 	 *
-	 * @return object[] Rows with ID, post_name, post_parent, parent_type.
+	 * @return object[] Rows with ID, post_name, post_parent, parent_type, parent_status.
 	 */
 	private function attachment_rows( ?array $parent_ids = null, ?array $ids = null, array $window = [] ): array {
 		global $wpdb;
@@ -1377,7 +1382,7 @@ class AllowlistBuilder {
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$rows = $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT a.ID, a.post_name, a.post_parent, parent.post_type AS parent_type FROM {$wpdb->posts} a
+				"SELECT a.ID, a.post_name, a.post_parent, parent.post_type AS parent_type, parent.post_status AS parent_status FROM {$wpdb->posts} a
 				 LEFT JOIN {$wpdb->posts} parent ON parent.ID = a.post_parent
 				 WHERE a.post_type = 'attachment'
 				   AND a.post_status = 'inherit'
@@ -1402,10 +1407,17 @@ class AllowlistBuilder {
 	 * @return string[]
 	 */
 	private function attachment_rows_lines( array $rows ): array {
+		// The nested line only under a ROOT type's post in a status that type
+		// serves (or private, which root-extras serves staff): a based type's
+		// media page sits under its base, which root matching already passes,
+		// so its line would match nothing and only confirm the parent's slug.
 		$by_type = [];
 		foreach ( $rows as $row ) {
-			if ( null !== $row->parent_type && 0 !== (int) $row->post_parent ) {
-				$by_type[ (string) $row->parent_type ][] = (int) $row->post_parent;
+			$type = (string) ( $row->parent_type ?? '' );
+			if ( '' !== $type && 0 !== (int) $row->post_parent && $this->is_root_type( $type )
+				&& ( $this->is_shielding_status( $type, (string) ( $row->parent_status ?? '' ) ) || 'private' === ( $row->parent_status ?? '' ) )
+			) {
+				$by_type[ $type ][] = (int) $row->post_parent;
 			}
 		}
 		$parent_uris = [];
@@ -1618,12 +1630,25 @@ class AllowlistBuilder {
 	 */
 	public function rebuild_root_extras(): int {
 		$file = $this->get_root_extras_file();
-		$lock = $this->lock( dirname( $file ) );
+		// Streamed WITHOUT the list's lock — a large media library takes longer
+		// than an editor's save can wait — then committed under it: what was
+		// appended to the live list while the stream ran is copied in before
+		// the rename, so no append is lost and none waits more than a moment.
+		clearstatcache( true, $file );
+		$start = is_file( $file ) ? [ (int) filesize( $file ), (int) fileinode( $file ) ] : null;
+		$lock  = null;
 		try {
 			// Streamed straight to the temp file: the union is never held in
 			// memory. A duplicate line (an old slug that is also a media name)
 			// is harmless — the loader matches it once.
-			$count = $this->write_lines_atomically( $this->root_extras_stream(), $file );
+			$count = $this->write_lines_atomically(
+				$this->root_extras_stream(),
+				$file,
+				function ( $handle ) use ( $file, $start, &$lock ): ?int {
+					$lock = $this->lock( dirname( $file ) );
+					return $this->copy_appended( $file, $start, $handle );
+				}
+			);
 			if ( null === $count && $this->stream_read_failed ) {
 				// A failed read, not a failed write: a retry, as rebuild_type() says.
 				$this->failed[ $file ]                       = true;
@@ -1640,6 +1665,40 @@ class AllowlistBuilder {
 		} finally {
 			$this->unlock( $lock );
 		}
+	}
+
+	/**
+	 * Copy onto a list being committed the lines appended to the live one
+	 * since its stream started: the tail past the size it had then, or — when
+	 * another rebuild replaced the file meanwhile — the whole new body.
+	 *
+	 * @param string                  $file   Live list path.
+	 * @param array{0:int,1:int}|null $start  Its size and inode when the stream began, or null.
+	 * @param resource                $handle The temp file being written.
+	 *
+	 * @return int|null Lines copied, or null when a write failed.
+	 */
+	private function copy_appended( string $file, ?array $start, $handle ): ?int {
+		clearstatcache( true, $file );
+		if ( null === $start || ! is_file( $file ) ) {
+			return 0;
+		}
+		$raw = (string) file_get_contents( $file ); // phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
+		if ( (int) fileinode( $file ) === $start[1] ) {
+			$tail = (string) substr( $raw, $start[0] );
+		} else {
+			$tail = (string) substr( $raw, (int) strpos( $raw, "\n" ) + 1 );
+		}
+		$copied = 0;
+		foreach ( explode( "\n", $tail ) as $line ) {
+			if ( 1 === preg_match( '#^[a-z0-9_-]+(?:/[a-z0-9_-]+)*$#', $line ) ) {
+				if ( strlen( $line ) + 1 !== fwrite( $handle, $line . "\n" ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+					return null;
+				}
+				++$copied;
+			}
+		}
+		return $copied;
 	}
 
 	/**
@@ -1881,12 +1940,14 @@ class AllowlistBuilder {
 	 * Write a list from an iterable of lines, atomically, without holding the
 	 * lines in memory. Full-path charset per line, as build_allowlist() applies.
 	 *
-	 * @param iterable $lines Lines (strings).
-	 * @param string   $file  Absolute destination path.
+	 * @param iterable      $lines         Lines (strings).
+	 * @param string        $file          Absolute destination path.
+	 * @param callable|null $before_commit fn( resource $handle ): ?int — writes last lines just
+	 *                                     before the rename (null: a write failed, abort).
 	 *
 	 * @return int|null Lines written, or null on failure (the old file stays).
 	 */
-	private function write_lines_atomically( iterable $lines, string $file ): ?int {
+	private function write_lines_atomically( iterable $lines, string $file, ?callable $before_commit = null ): ?int {
 		$this->stream_read_failed = false;
 		$dir                      = dirname( $file );
 		if ( ! is_dir( $dir ) && ! wp_mkdir_p( $dir ) ) {
@@ -1917,6 +1978,13 @@ class AllowlistBuilder {
 			error_log( '[post-404-shield] rebuild: ' . $e->getMessage() . ' — the previous list stays in place.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			$ok                       = false;
 			$this->stream_read_failed = true;
+		}
+		// Last lines before the rename (root-extras: what was appended to the
+		// live list while this one streamed), under the caller's lock.
+		if ( $ok && null !== $before_commit ) {
+			$added  = $before_commit( $handle );
+			$ok     = null !== $added;
+			$count += (int) $added;
 		}
 		// An empty list is the guard plus an empty line, as the loader expects.
 		if ( $ok && 0 === $count ) {

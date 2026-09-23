@@ -146,14 +146,15 @@ class ConfigStore {
 	 *
 	 * @var int
 	 */
-	private const REDIRECT_DERIVATION_VERSION = 5;
+	private const REDIRECT_DERIVATION_VERSION = 6;
 
 	/**
 	 * Optional rebuild seam for the match-mode-switch ordering (SPEC §3.2c).
-	 * Signature: fn( string[] $post_types, array $entries, bool $root_switching_on = false ): bool
+	 * Signature: fn( string[] $post_types, array $entries, bool $root_switching_on = false ): true|string[]
 	 * — rebuild the named effective CPTs' allowlists against the given
-	 * (candidate) entries; false when a list could not be written, and a
-	 * RuntimeException when a database read failed (a retry, not a refusal).
+	 * (candidate) entries; the names of the lists that could not be written
+	 * when any failed (false names none), and a RuntimeException when a
+	 * database read failed (a retry, not a refusal).
 	 * Injected by the bootstrap; absent in pure unit contexts.
 	 *
 	 * @var callable|null
@@ -175,6 +176,13 @@ class ConfigStore {
 	 * @var string[]
 	 */
 	private array $passes = [];
+
+	/**
+	 * The lists the last pre-swap rebuild could not write, for its refusal.
+	 *
+	 * @var string[]
+	 */
+	private array $rebuild_failures = [];
 
 	/**
 	 * Optional preflight seam (S6, root-pages v2). Signature:
@@ -274,8 +282,8 @@ class ConfigStore {
 	 * Inject the allowlist rebuild handler used for synchronous mode-switch
 	 * rebuilds inside write().
 	 *
-	 * @param callable $handler fn( string[] $post_types, array $entries, bool $root_switching_on ): bool —
-	 *                          false when any list failed to write.
+	 * @param callable $handler fn( string[] $post_types, array $entries, bool $root_switching_on ): true|string[] —
+	 *                          the lists that failed to write, when any did.
 	 *
 	 * @return void
 	 */
@@ -1398,11 +1406,12 @@ class ConfigStore {
 	 * and 404 every child page. Based entries sharing a type likewise share
 	 * one list and must agree on its format.
 	 *
-	 * @param array<string, mixed> $entries Candidate entries.
+	 * @param array<string, mixed> $entries   Candidate entries.
+	 * @param bool                 $root_only Only a based entry sharing a root type.
 	 *
 	 * @return string[] Errors.
 	 */
-	private function shared_type_errors( array $entries ): array {
+	private function shared_type_errors( array $entries, bool $root_only = false ): array {
 		$root_types  = [];
 		$based_types = [];
 		$formats     = [];
@@ -1425,6 +1434,9 @@ class ConfigStore {
 				__( '%s is shielded at the root on the Pages & posts tab, so it cannot also be shielded under a URL base. Switch one of them off.', 'post-404-shield' ),
 				$this->entry_label( (string) $type, [ 'post_type' => (string) $type ] )
 			);
+		}
+		if ( $root_only ) {
+			return $errors;
 		}
 		// Entries sharing a post type share ONE list, so they must agree on its
 		// format — otherwise one of them reads lines in the other's shape.
@@ -1879,6 +1891,10 @@ class ConfigStore {
 	 *                                           re-snapshot, the redirect sync) turns the validation errors the
 	 *                                           LIVE artifact already carries into warnings — never a new one,
 	 *                                           and nothing when no artifact is live;
+	 *                                           `shows_warnings` => true (the caller displays them) clears the
+	 *                                           warnings kept from automatic writes; `keep_warnings` => true
+	 *                                           keeps this one's for the settings screen, as an automatic
+	 *                                           write's are;
 	 *                                           `allow_status_drop` => true lets a save drop a status whose
 	 *                                           posts are live (the settings screen's confirmation);
 	 *                                           `persist_keep` => int stores that retention under the lock.
@@ -1894,7 +1910,16 @@ class ConfigStore {
 		// copy. Skipped in pure unit contexts (no WordPress to derive from).
 		$this->derivation_warnings = [];
 		$this->passes              = [];
-		$redirect_fp               = function_exists( 'get_option' ) ? $this->take_snapshots( $config ) : null;
+		// Before the snapshots, which would make a missing list an empty one:
+		// a document with no entries would publish a shield that shields nothing.
+		if ( ! is_array( $config['entries'] ?? null ) ) {
+			return [
+				'ok'       => false,
+				'errors'   => [ __( 'Config has no entries list.', 'post-404-shield' ) ],
+				'warnings' => [],
+			];
+		}
+		$redirect_fp = function_exists( 'get_option' ) ? $this->take_snapshots( $config ) : null;
 
 		$validated             = $this->validate( $config );
 		$validated['warnings'] = array_merge( $validated['warnings'], $this->derivation_warnings );
@@ -2022,9 +2047,9 @@ class ConfigStore {
 					'ok'       => false,
 					'errors'   => [
 						sprintf(
-							/* translators: %s: comma-separated post type names. */
-							__( 'Nothing was saved: the allowlist for %s could not be written in the new format, so switching would 404 real URLs. Check that the uploads/post-404-shield directory is writable, then save again.', 'post-404-shield' ),
-							implode( ', ', $rebuild_before )
+							/* translators: %s: comma-separated list names (post types, root-extras). */
+							__( 'Nothing was saved: the allowlist for %s could not be written, and the new config needs it first, or real URLs would get a 404. Check that the uploads/post-404-shield directory is writable, then save again.', 'post-404-shield' ),
+							implode( ', ', $this->rebuild_failures )
 						),
 					],
 					'warnings' => $validated['warnings'],
@@ -2159,8 +2184,13 @@ class ConfigStore {
 	 * @return void
 	 */
 	private function record_warnings( array $flags, string $generated_by, array $warnings ): void {
-		if ( empty( $flags['fail_open'] ) ) {
-			delete_option( self::AUTO_WARNINGS_OPTION );
+		// A write whose caller shows its warnings (the settings screen, the
+		// CLI) supersedes the kept ones; an automatic one or a self-heal, which
+		// nobody watches, keeps its own; anything else leaves them be.
+		if ( empty( $flags['fail_open'] ) && empty( $flags['keep_warnings'] ) ) {
+			if ( ! empty( $flags['shows_warnings'] ) ) {
+				delete_option( self::AUTO_WARNINGS_OPTION );
+			}
 			return;
 		}
 		$warnings = array_values( array_diff( $warnings, $this->passes ) );
@@ -2344,7 +2374,15 @@ class ConfigStore {
 				);
 			}
 		}
-		if ( (int) ( $coverage['checked'] ?? 0 ) > 0 ) {
+		// Forced over a wrong base: say so, entry by entry — a "passed" would lie.
+		foreach ( $unclaimed as $entry_key => $home ) {
+			$warnings[] = '' === (string) $home
+				/* translators: %s: entry name. */
+				? sprintf( __( 'Coverage check FAILED but the save was FORCED: none of %s\'s real URLs sit under its URL bases.', 'post-404-shield' ), $name( $entry_key ) )
+				/* translators: 1: entry name, 2: the URL base its posts really use. */
+				: sprintf( __( 'Coverage check FAILED but the save was FORCED: none of %1$s\'s real URLs sit under its URL bases; they live under /%2$s/.', 'post-404-shield' ), $name( $entry_key ), (string) $home );
+		}
+		if ( (int) ( $coverage['checked'] ?? 0 ) > 0 && [] === $unclaimed ) {
 			if ( [] === $breaks ) {
 				/* translators: %d: number of real URLs checked. */
 				$warnings[]     = sprintf( __( 'Coverage check passed — %d real URLs of the changed post types still resolve.', 'post-404-shield' ), (int) $coverage['checked'] );
@@ -2582,7 +2620,10 @@ class ConfigStore {
 		if ( null === $this->rebuild_handler || ( [] === $rebuild_before && ! $root_switching_on ) ) {
 			return true;
 		}
-		return false !== ( $this->rebuild_handler )( $rebuild_before, $config['entries'], $root_switching_on );
+		$result = ( $this->rebuild_handler )( $rebuild_before, $config['entries'], $root_switching_on );
+		// The handler names the lists that failed; a plain false names none.
+		$this->rebuild_failures = is_array( $result ) ? array_map( 'strval', $result ) : ( false === $result ? $rebuild_before : [] );
+		return [] === $this->rebuild_failures;
 	}
 
 	/**
@@ -3102,7 +3143,9 @@ class ConfigStore {
 			/* translators: %s: post type name and slug. */
 			$errors[] = sprintf( __( '%s now lives at the site root but is not shielded there.', 'post-404-shield' ), $this->entry_label( $type, [ 'post_type' => $type ] ) );
 		}
-		return array_merge( $errors, $this->shared_type_errors( $entries ) );
+		// Only the part about root mode: a based entry sharing a root type. Two
+		// based entries disagreeing on their format is a problem of theirs.
+		return array_merge( $errors, $this->shared_type_errors( $entries, true ) );
 	}
 
 	/**
@@ -3273,6 +3316,7 @@ class ConfigStore {
 				[
 					'skip_root_preflight' => true,
 					'expect_revision'     => $this->revision_of( $option ),
+					'keep_warnings'       => true,
 				]
 			);
 			// Stale: a save committed meanwhile, and wrote a valid artifact.
