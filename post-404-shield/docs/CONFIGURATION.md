@@ -479,7 +479,15 @@ support/compatibility/accessories
 ```
 
 **Include a non-standard public status** (e.g. discontinued products): tick
-`discontinued` in the type's *Shielded post statuses*.
+`discontinued` in the type's *Shielded post statuses*. A new row starts with
+every status the type's posts are in that WordPress serves at their address.
+A row whose posts are in a public status it does not tick says so, and so do
+the save and the daily health check: WordPress serves those posts to anyone,
+and the shield answers them with a 404. It is a warning, not a refusal — a
+status registered public but meant to hide pre-launch content (an "embargoed"
+workflow status) would be published by ticking it; register such a status as
+private instead. Dropping a status the entry did list is refused while posts
+are in it.
 
 **Reserve a page that lives under a CPT base**: add the slug to the type's
 *Reserved slugs*, and remember the shield is only half of it — WordPress needs
@@ -539,7 +547,16 @@ night is a no-op.
 
 That means a newly added redirect is picked up **within a day**, not instantly.
 For a redirect that matters immediately, save the settings page (which
-recomputes it there and then) or run `wp post-shield config write`.
+recomputes it there and then) or run `wp post-shield config write`. A redirect
+plugin activated, deactivated or updated — or Rank Math's modules toggled —
+queues the same sync a minute later.
+
+A reader that fails (throws, or its query errors) keeps the slugs the stored
+config derived, and the sync tries again; a site that reads, correctly, as
+having no redirects (all moved to the edge, the module switched off) drops the
+slugs they reserved. Rank Math's *Contains* and *Ends with* redirects match
+anywhere in a URL, so nothing can be reserved for them: a save warns about each
+one that names a shielded base (any, in root mode).
 
 > **This is a safety net, not the preferred fix.** A reserved slug costs a full
 > WordPress boot on every hit, because the request has to reach Rank Math to be

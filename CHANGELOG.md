@@ -133,6 +133,28 @@ Moved out of the sites that used it into its own repository.
 - A blocked-section name PHP reads as a number (`-1`) is refused by name.
 - The pre-boot loader checks every reader and matcher function it calls, so a
   half-deployed release leaves the shield off instead of failing the request.
+- Redirect reads tell a failure from "none": a site with no redirects left drops
+  the slugs they reserved instead of re-saving a revision every day; a redirect
+  plugin changing queues a sync; Rank Math's contains / ends-with redirects warn.
+- An automatic write that would change nothing publishes nothing (no revision).
+- A failed database read during a save's rebuild is reported as one, and an
+  automatic write retries it.
+- Full-path based types list their posts' media pages, and the coverage gate
+  samples them.
+- Root mode: category archives with the base stripped (capture-led literal
+  rules) are excluded, and the root preflight samples term archives and other
+  public types.
+- The coverage gate measures against the live artifact (so a CLI-edited option
+  is gated), samples every status the type's posts are in, names a dropped
+  status, warns about a public status never listed, ignores slugs the loader
+  cannot capture, and finds a hierarchical type's home from the post's URI.
+  New type rows start with the statuses in use; rows warn about unticked ones.
+- Restores carry the confirm screen's revision (a save since is not reverted);
+  a rejected full-path draft keeps the slug entry's depth rule.
+- The Posts base follows a permalink change once the rules are flushed.
+- Old-slug appends mirror core (published only); an append during a rebuild
+  re-checks every line; a save no longer evicts site-wide option caches; a
+  move walks the type's family once.
 
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing
