@@ -30,6 +30,13 @@ class ConfigStore {
 	public const OPTION = 'post_shield_config';
 
 	/**
+	 * Set when root mode was switched off automatically (the site's URL
+	 * structure no longer supports it); shown on the settings screen until an
+	 * operator saves again.
+	 */
+	public const ROOT_OFF_OPTION = 'post_shield_root_switched_off';
+
+	/**
 	 * Option holding the revision-retention count (10–100 in steps of 10).
 	 */
 	public const KEEP_OPTION = 'post_shield_config_keep';
@@ -102,6 +109,14 @@ class ConfigStore {
 	 * Option holding the last root-preflight result (S6), for the status card.
 	 */
 	public const PREFLIGHT_OPTION = 'post_shield_last_preflight';
+
+	/**
+	 * Root-preflight would-blocks an operator accepted with a forced save. A
+	 * later save refuses only on would-blocks NOT in this set, so accepting one
+	 * does not brick every future root-active save (the nightly redirect sync
+	 * included, which cannot force).
+	 */
+	public const PREFLIGHT_ACCEPTED_OPTION = 'post_shield_preflight_accepted';
 
 	/**
 	 * Fingerprint of the redirect sources the derived reserved slugs were last
@@ -919,8 +934,15 @@ class ConfigStore {
 
 	/**
 	 * The full excluded-bases snapshot persisted into the artifact: hardcoded
-	 * floor + live-derived rows + the operator's own rows (validated, deduped
-	 * against the other two buckets).
+	 * floor + live-derived rows + the operator's own rows.
+	 *
+	 * Operator rows are kept exactly as typed (only blanks and repeats within
+	 * the bucket go), even when they duplicate a floor or derived row. The
+	 * operator bucket exists to guard against the derived one changing: drop
+	 * a row because a redirect or rewrite rule happens to derive it today, and
+	 * once that source goes the row is gone for good — the settings screen is
+	 * refilled from the option — and root mode 404s the route. A duplicate is
+	 * harmless to the matcher.
 	 *
 	 * @param array  $operator       Operator-added rows (from the settings textarea).
 	 * @param string $locale_pattern Locale pattern body ('' = none).
@@ -936,17 +958,44 @@ class ConfigStore {
 			if ( ! is_string( $base ) || '' === $base ) {
 				continue;
 			}
-			if ( in_array( $base, $floor, true ) || in_array( $base, $derived, true ) || in_array( $base, $clean, true ) ) {
+			if ( in_array( $base, $clean, true ) ) {
 				continue;
 			}
 			$clean[] = $base;
 		}
 
 		return [
-			'floor'    => $floor,
-			'derived'  => $derived,
-			'operator' => $clean,
+			'floor'     => $floor,
+			'derived'   => $derived,
+			'operator'  => $clean,
+			'endpoints' => $this->rewrite_endpoints(),
 		];
+	}
+
+	/**
+	 * Rewrite endpoint names that apply after a content path — registered with
+	 * add_rewrite_endpoint() on pages or permalinks (AMP, a shop's account
+	 * screens…). WordPress routes `/{path}/{endpoint}[/{value}]/` to the page
+	 * at {path}; the loader strips them like feeds, or root mode would 404 them
+	 * and a based type would read them as a deeper path.
+	 *
+	 * @return string[]
+	 */
+	private function rewrite_endpoints(): array {
+		global $wp_rewrite;
+		$mask = ( defined( 'EP_PAGES' ) ? EP_PAGES : 4096 ) | ( defined( 'EP_PERMALINK' ) ? EP_PERMALINK : 1 );
+		$out  = [];
+		foreach ( (array) ( $wp_rewrite->endpoints ?? [] ) as $endpoint ) {
+			if ( ! is_array( $endpoint ) || ! isset( $endpoint[0], $endpoint[1] ) ) {
+				continue;
+			}
+			$name = (string) $endpoint[1];
+			if ( ( (int) $endpoint[0] & $mask ) && 1 === preg_match( '/^[a-z0-9_-]+$/', $name ) && ! in_array( $name, $out, true ) ) {
+				$out[] = $name;
+			}
+		}
+		sort( $out );
+		return $out;
 	}
 
 	/**
@@ -1309,7 +1358,9 @@ class ConfigStore {
 	 * @param string               $generated_by Display label for the artifact meta (admin-visible).
 	 * @param array<string, mixed> $flags        Optional: `keep` => int applies that retention to this save's
 	 *                                           prune; `force_preflight` => true lets a save land despite
-	 *                                           root-preflight would-blocks (CLI --force for a knowing operator).
+	 *                                           root-preflight would-blocks (CLI --force for a knowing operator);
+	 *                                           `skip_root_preflight` => true skips the URL-walking root
+	 *                                           preflight (the self-heal republishing an already-vetted option).
 	 *
 	 * @return array{ok: bool, errors: string[], warnings: string[]}
 	 */
@@ -1396,14 +1447,22 @@ class ConfigStore {
 			// non-empty would-block list ABORTS the save. `force_preflight` (the CLI
 			// --force) is the knowing-operator override. Runs after the pre-swap
 			// rebuilds so the lists it measures are the lists the loader will read.
-			if ( null !== $this->preflight_handler && $this->has_enabled_root_entries( $config['entries'] ) ) {
+			if ( empty( $flags['skip_root_preflight'] ) && null !== $this->preflight_handler && $this->has_enabled_root_entries( $config['entries'] ) ) {
 				$would_block = ( $this->preflight_handler )( $config );
-				if ( [] !== $would_block && empty( $flags['force_preflight'] ) ) {
+				$accepted    = array_values( array_filter( (array) get_option( self::PREFLIGHT_ACCEPTED_OPTION, [] ), 'is_string' ) );
+				$new_blocks  = array_values( array_diff( $would_block, $accepted ) );
+				// What stays accepted after this save: previously accepted URLs
+				// that still would-block (the rest fixed themselves), plus, on a
+				// forced save, everything it reported.
+				$accepted_after = ! empty( $flags['force_preflight'] )
+					? array_values( array_unique( array_merge( array_intersect( $accepted, $would_block ), $would_block ) ) )
+					: array_values( array_intersect( $accepted, $would_block ) );
+				if ( [] !== $new_blocks && empty( $flags['force_preflight'] ) ) {
 					$block_errors = [
 						/* translators: %d: number of URLs the root preflight would 404. */
-						sprintf( __( 'Root preflight FAILED: %d real URL(s) would be served a pre-boot 404 — nothing was saved.', 'post-404-shield' ), count( $would_block ) ),
+						sprintf( __( 'Root preflight FAILED: %d real URL(s) would be served a pre-boot 404 — nothing was saved.', 'post-404-shield' ), count( $new_blocks ) ),
 					];
-					foreach ( array_slice( $would_block, 0, 10 ) as $blocked_url ) {
+					foreach ( array_slice( $new_blocks, 0, 10 ) as $blocked_url ) {
 						/* translators: %s: a URL the root preflight would 404. */
 						$block_errors[] = sprintf( __( 'Would block: %s', 'post-404-shield' ), $blocked_url );
 					}
@@ -1415,6 +1474,9 @@ class ConfigStore {
 				}
 				if ( [] === $would_block ) {
 					$validated['warnings'][] = __( 'Root preflight passed — no real URL would be blocked.', 'post-404-shield' );
+				} elseif ( [] === $new_blocks ) {
+					/* translators: %d: number of previously accepted would-block URLs. */
+					$validated['warnings'][] = sprintf( __( 'Root preflight passed — %d would-block URL(s) were accepted on an earlier forced save.', 'post-404-shield' ), count( $would_block ) );
 				} else {
 					/* translators: %d: number of URLs the root preflight would 404 (forced save). */
 					$validated['warnings'][] = sprintf( __( 'Root preflight reported %d would-block URL(s) but the save was FORCED.', 'post-404-shield' ), count( $would_block ) );
@@ -1572,6 +1634,9 @@ class ConfigStore {
 
 			// The artifact now carries the derived bucket, so it is now true
 			// that it was built from these redirect sources.
+			if ( isset( $accepted_after ) ) {
+				update_option( self::PREFLIGHT_ACCEPTED_OPTION, $accepted_after, false );
+			}
 			if ( null !== $redirect_fp ) {
 				update_option( self::REDIRECT_FP_OPTION, $redirect_fp, false );
 			}
@@ -1920,15 +1985,75 @@ class ConfigStore {
 	// --- Legacy import -----------------------------------------------------------
 
 	/**
+	 * Switch root mode off when the stored config no longer validates with it
+	 * on — the fail-open answer to a site change nothing else would notice.
+	 *
+	 * Root mode's rules depend on live site state: which types dwell at the
+	 * root is worked out from the permalink structure, and validate() only
+	 * sees it at save time. Change Settings → Permalinks afterwards (say from
+	 * /blog/%postname%/ to /%postname%/) and every post URL leaves its base
+	 * while the artifact still shields the root — each post becomes a fake
+	 * slug and gets a pre-boot 404. So: re-validate the stored option; if it
+	 * fails, try it with every root entry disabled (their settings kept, so
+	 * the operator can re-enable once fixed), and publish that when it
+	 * validates. A config that fails for other reasons is left alone.
+	 *
+	 * Callers: the permalink_structure_changed action and the daily health
+	 * check.
+	 *
+	 * @param string $reason Why it ran, for the log and the notice.
+	 *
+	 * @return bool True when root mode was switched off.
+	 */
+	public function revalidate_root( string $reason ): bool {
+		$option = $this->option();
+		if ( null === $option || ! $this->has_enabled_root_entries( (array) ( $option['entries'] ?? [] ) ) ) {
+			return false;
+		}
+		$errors = $this->validate( $option )['errors'];
+		if ( [] === $errors ) {
+			return false;
+		}
+
+		$off = $option;
+		foreach ( (array) $off['entries'] as $key => $entry ) {
+			if ( is_array( $entry ) && true === ( $entry['root'] ?? false ) ) {
+				$off['entries'][ $key ]['enabled'] = false;
+			}
+		}
+		if ( [] !== $this->validate( $off )['errors'] ) {
+			error_log( '[post-404-shield] root revalidation (' . $reason . '): the config is invalid for reasons other than root mode; left unchanged: ' . implode( ' | ', $errors ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+			return false;
+		}
+
+		$result = $this->write( $off, 'auto: root matching switched off — ' . $reason, [ 'skip_root_preflight' => true ] );
+		if ( ! $result['ok'] ) {
+			error_log( '[post-404-shield] root revalidation (' . $reason . '): could not switch root matching off: ' . implode( ' | ', $result['errors'] ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+			return false;
+		}
+		update_option(
+			self::ROOT_OFF_OPTION,
+			[
+				'at'     => gmdate( 'c' ),
+				'reason' => $reason,
+				'errors' => array_values( array_map( 'strval', $errors ) ),
+			],
+			false
+		);
+		error_log( '[post-404-shield] root matching switched OFF (' . $reason . '): ' . implode( ' | ', $errors ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+		return true;
+	}
+
+	/**
 	 * Repair a missing or broken artifact from the option, or the option from
 	 * the artifact.
 	 *
 	 * - Artifact valid, option missing (a database restored from backup):
 	 *   rehydrate the option from the artifact, never let them fight.
-	 * - Artifact missing or invalid, option valid: regenerate the artifact —
-	 *   root mode with its snapshots refreshed but no preflight (it walks every
-	 *   real URL), otherwise through the full save pipeline, with a one-minute
-	 *   backoff so concurrent requests don't all queue on the lock.
+	 * - Artifact missing or invalid, option valid: regenerate the artifact
+	 *   through the full save pipeline (lock, validation, snapshots) minus root
+	 *   mode's URL-walking preflight, with a one-minute backoff so concurrent
+	 *   requests don't all queue on the lock. Failures are logged.
 	 * - Option present but invalid: logged, nothing written.
 	 * - Nothing anywhere: inert until an operator configures the site.
 	 *
@@ -1953,32 +2078,6 @@ class ConfigStore {
 
 		// 2. Artifact missing or invalid, option valid → regenerate the artifact.
 		if ( null !== $option && \Post404Shield\config_is_valid( $option ) ) {
-			// Root mode: the S6 preflight inside write() walks every real URL —
-			// far too heavy for a request, so it is the one step skipped here.
-			// The two snapshots are NOT skipped: they are cheap, and root mode
-			// depends on them. A staged option predates both, so publishing it
-			// verbatim leaves the loader with no excluded bases (root mode then
-			// never engages) and no derived reserved slugs — the same defect the
-			// based path below fixes by going through write().
-			if ( $this->has_enabled_root_entries( (array) ( $option['entries'] ?? [] ) ) ) {
-				$healed                   = $option;
-				$heal_pattern             = self::locale_pattern_of( $healed );
-				$healed['excluded_bases'] = $this->excluded_bases_snapshot( (array) ( $healed['excluded_bases']['operator'] ?? [] ), $heal_pattern );
-				$healed['entries']        = $this->apply_derived_reserved( (array) ( $healed['entries'] ?? [] ), $heal_pattern );
-				if ( ! \Post404Shield\config_is_valid( $healed ) ) {
-					$healed = $option;
-				}
-				if ( $this->write_artifact( $healed ) ) {
-					// Keep the option in step with what was published, so the two
-					// never disagree about the snapshots.
-					if ( $healed !== $option ) {
-						update_option( self::OPTION, $healed, false );
-					}
-					error_log( '[post-404-shield] self-heal: regenerated the config artifact from the option (root mode: snapshots refreshed, no preflight).' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-				}
-				return;
-			}
-
 			// Claimed BEFORE trying, cleared on success. The first requests after
 			// a deploy arrive together; this keeps them from all piling into
 			// write() and all but one losing the lock. It is kept only on
@@ -1990,13 +2089,16 @@ class ConfigStore {
 			}
 			set_transient( 'post_shield_heal_backoff', 1, MINUTE_IN_SECONDS );
 
-			// The full save pipeline, not a bare file write. The option goes
-			// through validate() (reserved namespaces, overlaps — F10), and the
-			// derived reserved slugs are computed (F15: a staged option predates
-			// them, so a bare write published an artifact without them and the
-			// shielded redirects stayed dead until the nightly sync). The swap is
-			// one rename under the lock.
-			$result = $this->write( $option, 'self-heal (artifact was missing or invalid)' );
+			// The full save pipeline, not a bare file write, for root mode too:
+			// the lock (so a heal can never publish over a save that committed
+			// meanwhile), validate() (reserved namespaces, overlaps, and root
+			// mode's S1 together-rule and permalink checks), the excluded-bases
+			// and derived-reserved snapshots, and the atomic swap. The one step
+			// skipped is root mode's S6 preflight, which walks every real URL —
+			// too heavy for a request; the option being healed already passed it
+			// when it was saved. The coverage gate does not run either: nothing
+			// is changing relative to the stored option.
+			$result = $this->write( $option, 'self-heal (artifact was missing or invalid)', [ 'skip_root_preflight' => true ] );
 			if ( $result['ok'] ) {
 				delete_transient( 'post_shield_heal_backoff' );
 				error_log( '[post-404-shield] self-heal: regenerated the config artifact through the full save pipeline.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log

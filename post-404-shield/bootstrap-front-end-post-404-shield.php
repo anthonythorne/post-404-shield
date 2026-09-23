@@ -88,6 +88,13 @@ define( 'POST_SHIELD_LOADED', true );
 	// dot-free, and root matching passes any segment outside [a-z0-9_-].
 	// Passing early is the fail-open direction, so this can only ever hand
 	// WordPress a request the full decision would also have handed it.
+	// A path starting `//` is read by parse_url() as a HOST (`//careers/x/`
+	// becomes host `careers`, path `/x/`), so every later decision would judge a
+	// different path than the one WordPress serves — WordPress trims the extra
+	// slashes and serves the real page. Hand it straight to WordPress.
+	if ( 0 === strpos( $uri, '//' ) ) {
+		return;
+	}
 	$early_path = parse_url( $uri, PHP_URL_PATH ); // phpcs:ignore WordPress.WP.AlternativeFunctions.parse_url_parse_url -- wp_parse_url() does not exist pre-boot.
 	if ( is_string( $early_path ) ) {
 		$first_segment = explode( '/', ltrim( $early_path, '/' ), 2 )[0];
@@ -385,7 +392,12 @@ define( 'POST_SHIELD_LOADED', true );
 		$raw = file_get_contents( $file ); // phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
 		return false === $raw ? null : $raw;
 	};
-	$decision = \Post404Shield\decide_based( $uri, $path, $types, $read_allowlist, $locale_pattern );
+	// Rewrite endpoints that sit after a content path (AMP, shop account
+	// screens…): the save snapshots them so both stages strip them like feeds.
+	$endpoints = isset( $config['excluded_bases']['endpoints'] ) && is_array( $config['excluded_bases']['endpoints'] )
+		? array_values( array_filter( $config['excluded_bases']['endpoints'], 'is_string' ) )
+		: [];
+	$decision  = \Post404Shield\decide_based( $uri, $path, $types, $read_allowlist, $locale_pattern, $endpoints );
 	if ( null !== $decision ) {
 		$settings    = $types[ $decision['key'] ];
 		$shield_type = $decision['type'];
@@ -533,6 +545,9 @@ define( 'POST_SHIELD_LOADED', true );
 		},
 	];
 
+	foreach ( $candidates as $candidate_index => $candidate ) {
+		$candidates[ $candidate_index ]['endpoints'] = $endpoints;
+	}
 	$decision = \Post404Shield\match_root( $path, $excluded_flat, $candidates, $locale_pattern );
 
 	if ( 'allowed' === $decision['outcome'] ) {

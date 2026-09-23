@@ -158,10 +158,25 @@ function match_blocked_base( string $path, string $url_base, string $locale_patt
  *
  * @param string[] $segments         Path segments, no empties.
  * @param bool     $allow_pagination Strip pagination sub-routes too (default on).
+ * @param string[] $endpoints        Rewrite endpoint names that apply after a
+ *                                   content path (the artifact's
+ *                                   excluded_bases.endpoints).
  *
  * @return string[] Remaining segments (possibly empty — the sub-route alone).
  */
-function strip_trailing_sub_routes( array $segments, bool $allow_pagination = true ): array {
+function strip_trailing_sub_routes( array $segments, bool $allow_pagination = true, array $endpoints = [] ): array {
+	// A rewrite endpoint (add_rewrite_endpoint() on pages/permalinks: AMP,
+	// shop account screens…) sits after a real path and may carry a value
+	// (`/{path}/orders/2/`): everything from it on belongs to WordPress.
+	if ( [] !== $endpoints ) {
+		$total = count( $segments );
+		for ( $k = 1; $k < $total; $k++ ) {
+			if ( in_array( $segments[ $k ], $endpoints, true ) ) {
+				return array_slice( $segments, 0, $k );
+			}
+		}
+	}
+
 	$count = count( $segments );
 	$last  = $segments[ $count - 1 ] ?? '';
 	$prev  = $segments[ $count - 2 ] ?? '';
@@ -171,6 +186,10 @@ function strip_trailing_sub_routes( array $segments, bool $allow_pagination = tr
 	} elseif ( $allow_pagination && 'page' === $prev && 1 === preg_match( '/^\d+$/', $last ) ) {
 		array_splice( $segments, -2 );
 	} elseif ( in_array( $last, [ 'feed', 'embed', 'trackback' ], true ) ) {
+		array_splice( $segments, -1 );
+	} elseif ( $count > 1 && in_array( $last, [ 'rdf', 'rss', 'rss2', 'atom' ], true ) ) {
+		// WordPress routes the bare feed format too: `/{path}/rss2/` is that
+		// path's feed, as `/{path}/feed/rss2/` is.
 		array_splice( $segments, -1 );
 	} elseif ( $allow_pagination && 1 === preg_match( '/^comment-page-\d+$/', $last ) ) {
 		array_splice( $segments, -1 );
@@ -320,11 +339,16 @@ function match_root( string $path, array $excluded_bases, array $entries, string
 		if ( '' === $first_type && '' !== $type ) {
 			$first_type = $type;
 		}
-		$stripped = strip_trailing_sub_routes( $segments, ! isset( $entry['allow_pagination'] ) || false !== $entry['allow_pagination'] );
+		$stripped = strip_trailing_sub_routes( $segments, ! isset( $entry['allow_pagination'] ) || false !== $entry['allow_pagination'], (array) ( $entry['endpoints'] ?? [] ) );
 		if ( [] === $stripped ) {
 			return $pass( $locale ); // The sub-route alone (`/feed/`, `/page/2/`) — WordPress owns it.
 		}
-		if ( is_allowed( implode( '/', $stripped ), $body ) ) {
+		// A caller replaying thousands of paths (the root preflight) may pass
+		// `set`, the same lines as a hash map, so each lookup is O(1) instead
+		// of a scan of the whole body. The loader never does; it reads one path.
+		$line  = implode( '/', $stripped );
+		$found = isset( $entry['set'] ) && is_array( $entry['set'] ) ? isset( $entry['set'][ $line ] ) : is_allowed( $line, $body );
+		if ( $found ) {
 			return [
 				'outcome' => 'allowed',
 				'type'    => $type,
@@ -435,10 +459,11 @@ function prefers_markdown( string $accept ): bool {
  * @param array<string|int, mixed>  $entries        Validated config entries, in config order.
  * @param callable(string): ?string $allowlist      Raw allowlist (guard line + lines) for a type; null when missing or unreadable.
  * @param string                    $locale_pattern Locale pattern body ('' = none).
+ * @param string[]                  $endpoints      Rewrite endpoints stripped like sub-routes.
  *
  * @return array{marker: string, key: string|int, type: string, locale: string, location: string}|null
  */
-function decide_based( string $uri, string $path, array $entries, callable $allowlist, string $locale_pattern ): ?array {
+function decide_based( string $uri, string $path, array $entries, callable $allowlist, string $locale_pattern, array $endpoints = [] ): ?array {
 	foreach ( $entries as $key => $settings ) {
 		if ( ! is_array( $settings ) || ( isset( $settings['enabled'] ) && false === $settings['enabled'] ) ) {
 			continue;
@@ -499,13 +524,21 @@ function decide_based( string $uri, string $path, array $entries, callable $allo
 			}
 
 			$allow_pagination = ! isset( $settings['allow_pagination'] ) || false !== $settings['allow_pagination'];
-			$segments         = strip_trailing_sub_routes( array_merge( [ $match['slug'] ], $match['extra'] ), $allow_pagination );
+			$segments         = strip_trailing_sub_routes( array_merge( [ $match['slug'] ], $match['extra'] ), $allow_pagination, $endpoints );
 			if ( [] === $segments ) {
 				return $decision( 'pass' ); // A sub-route alone (`/{base}/feed/`) — WordPress owns it.
 			}
 
 			// match=full-path: the whole sub-path is exact-matched; no depth policy.
 			if ( 'full-path' === ( $settings['match'] ?? 'slug' ) ) {
+				// The builder only writes `[a-z0-9_-]` segments, so a percent-
+				// encoded (non-ASCII) or mixed-case segment can never be listed —
+				// WordPress judges it, exactly as match_root() does.
+				foreach ( $segments as $segment ) {
+					if ( 1 !== preg_match( '/^[a-z0-9_-]+$/', $segment ) ) {
+						return $decision( 'pass' );
+					}
+				}
 				return is_allowed( implode( '/', $segments ), $raw )
 					? $decision( 'allowed-known-slug' )
 					: $decision( 'blocked-unknown-slug', (string) $match['locale'] );

@@ -31,6 +31,13 @@ namespace Post404Shield\Library;
 final class BasedPreflight {
 
 	/**
+	 * Rewrite endpoints from the candidate's snapshot, stripped like sub-routes.
+	 *
+	 * @var string[]
+	 */
+	private array $endpoints = [];
+
+	/**
 	 * Most-recently published posts sampled per changed entry.
 	 */
 	private const SAMPLE_RECENT = 25;
@@ -162,7 +169,8 @@ final class BasedPreflight {
 	 *         bases claim none of their real URLs (refuse — the base is wrong).
 	 */
 	public function run( array $candidate, array $keys, ?array $current = null ): array {
-		$entries = (array) ( $candidate['entries'] ?? [] );
+		$entries         = (array) ( $candidate['entries'] ?? [] );
+		$this->endpoints = array_values( array_filter( (array) ( $candidate['excluded_bases']['endpoints'] ?? [] ), 'is_string' ) );
 		$pattern = ConfigStore::locale_pattern_of( $candidate );
 		$builder = new AllowlistBuilder( $entries );
 
@@ -277,7 +285,7 @@ final class BasedPreflight {
 	 * @return string The decision marker, or `unclaimed`.
 	 */
 	private function record( string $path, string $key, array $entries, callable $read, string $pattern, array &$breaks, array &$depth ): string {
-		$decision = \Post404Shield\decide_based( $path, $path, $entries, $read, $pattern );
+		$decision = \Post404Shield\decide_based( $path, $path, $entries, $read, $pattern, $this->endpoints );
 		$marker   = null === $decision ? 'unclaimed' : (string) $decision['marker'];
 		$hit      = [
 			'url'    => $path,

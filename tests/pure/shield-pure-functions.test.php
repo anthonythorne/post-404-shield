@@ -62,6 +62,13 @@ check( [ 'a', '2' ], Post404Shield\strip_trailing_sub_routes( [ 'a', '2' ], fals
 check( [ 'a', 'comment-page-3' ], Post404Shield\strip_trailing_sub_routes( [ 'a', 'comment-page-3' ], false ), 'strip off: comment-page kept' );
 check( [ 'a' ], Post404Shield\strip_trailing_sub_routes( [ 'a', 'feed' ], false ), 'strip off: feed still strips' );
 check( [ 'a' ], Post404Shield\strip_trailing_sub_routes( [ 'a', 'embed' ], false ), 'strip off: embed still strips' );
+check( [ 'about', 'team' ], Post404Shield\strip_trailing_sub_routes( [ 'about', 'team', 'rss2' ] ), 'strip: bare feed format (rss2)' );
+check( [ 'about' ], Post404Shield\strip_trailing_sub_routes( [ 'about', 'atom' ] ), 'strip: bare feed format (atom)' );
+check( [ 'rss2' ], Post404Shield\strip_trailing_sub_routes( [ 'rss2' ] ), 'strip: a lone feed-format segment is a slug, kept' );
+check( [ 'my-account' ], Post404Shield\strip_trailing_sub_routes( [ 'my-account', 'orders', '2' ], true, [ 'orders', 'amp' ] ), 'strip: endpoint with a value' );
+check( [ 'about' ], Post404Shield\strip_trailing_sub_routes( [ 'about', 'amp' ], true, [ 'amp' ] ), 'strip: bare endpoint' );
+check( [ 'amp', 'x' ], Post404Shield\strip_trailing_sub_routes( [ 'amp', 'x' ], true, [ 'amp' ] ), 'strip: endpoint name as the FIRST segment is content, kept' );
+check( [ 'about', 'amp' ], Post404Shield\strip_trailing_sub_routes( [ 'about', 'amp' ] ), 'strip: no endpoints configured, nothing stripped' );
 
 // --- excluded_base_is_valid ---------------------------------------------------
 
@@ -108,6 +115,11 @@ check( '', Post404Shield\rewrite_pattern_base( '(.?.+?)(?:/([0-9]+))?/?$' ), 're
 check( '', Post404Shield\rewrite_pattern_base( '' ), 'rewrite: empty pattern' );
 check( 'feed', Post404Shield\rewrite_pattern_base( 'feed/(feed|rdf|rss|rss2|atom)/?$' ), 'rewrite: feed base' );
 check( 'wc-api', Post404Shield\rewrite_pattern_base( 'wc-api/v([1-3]{1})/?$' ), 'rewrite: WooCommerce API endpoint' );
+check( 'event-*', Post404Shield\rewrite_pattern_base( '^event-([0-9]+)/?$' ), 'rewrite: mid-segment cut is a prefix' );
+check( 'event*', Post404Shield\rewrite_pattern_base( 'events?/([^/]+)/?$' ), 'rewrite: optional trailing char dropped, prefix kept' );
+check( 'colo*', Post404Shield\rewrite_pattern_base( 'colou?r/(.+)$' ), 'rewrite: optional inner char dropped' );
+check( 'schema-preview', Post404Shield\rewrite_pattern_base( 'schema-preview(?:/(.*))?/?$' ), 'rewrite: non-capturing group opening with a separator is a boundary' );
+check( 'exact-route', Post404Shield\rewrite_pattern_base( 'exact-route$' ), 'rewrite: end anchor is exact, no prefix' );
 
 // --- redirect_pattern_base (redirect-plugin source reduction) -----------------
 

@@ -163,6 +163,13 @@ class PostShieldDecideBasedTest extends TestCase {
 		$this->assertSame( 'allowed-known-slug', $this->decide( '/intl/guides/parent/child/', $e, $l )['marker'] );
 		$this->assertSame( 'allowed-known-slug', $this->decide( '/intl/guides/parent/child/feed/', $e, $l )['marker'], 'Sub-route of a real page.' );
 		$this->assertSame( 'blocked-unknown-slug', $this->decide( '/intl/guides/parent/zz-fake/', $e, $l )['marker'] );
+
+		// The builder never lists a segment outside [a-z0-9_-], so WordPress
+		// judges it — a translated child's percent-encoded slug, or a
+		// mixed-case link WordPress would redirect to the canonical URL.
+		$this->assertSame( 'pass', $this->decide( '/ja-jp/guides/parent/%E6%97%A5%E6%9C%AC/', $e, $l )['marker'], 'Percent-encoded, upper case.' );
+		$this->assertSame( 'pass', $this->decide( '/ja-jp/guides/parent/%e6%97%a5%e6%9c%ac/', $e, $l )['marker'], 'Percent-encoded, lower case.' );
+		$this->assertSame( 'pass', $this->decide( '/intl/guides/parent/Child/', $e, $l )['marker'], 'Mixed case.' );
 	}
 
 	/**

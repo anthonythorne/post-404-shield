@@ -216,7 +216,28 @@ function rewrite_pattern_base( string $pattern ): string {
 			break;
 		}
 		if ( false !== strpos( $metachars, $char ) ) {
-			break; // An unescaped metacharacter — the literal run is over.
+			// The literal run is over. Two cases must widen rather than narrow
+			// the exclusion (over-excluding is fail-open; under-excluding 404s
+			// a real route), mirroring redirect_pattern_base(). First, a
+			// quantifier that can match zero times (`?`, `*`, `{0,…}`) makes the
+			// character before it optional — `events?/…` must cover /event/12/ —
+			// so drop it. Second, a cut in the MIDDLE of a segment is a prefix
+			// — `event-([0-9]+)` is every `event-…` — so mark it with a trailing
+			// `*`. A group that opens with a separator (`schema-preview(/(.*))?`)
+			// and the end anchor `$` are segment boundaries, not prefixes.
+			if ( in_array( $char, [ '?', '*', '{' ], true ) && '' !== $out ) {
+				$out = substr( $out, 0, -1 );
+			}
+			$boundary = '$' === $char;
+			if ( '(' === $char ) {
+				$rest     = substr( $pattern, $i + 1 );
+				$rest     = 0 === strpos( $rest, '?:' ) ? substr( $rest, 2 ) : $rest;
+				$boundary = '' !== $rest && '/' === $rest[0];
+			}
+			if ( ! $boundary && '' !== $out ) {
+				$out .= '*';
+			}
+			break;
 		}
 		$out .= $char;
 	}
@@ -563,6 +584,17 @@ function config_is_valid( $config ): bool {
 			}
 			foreach ( $excluded[ $bucket ] as $base ) {
 				if ( ! excluded_base_is_valid( $base ) ) {
+					return false;
+				}
+			}
+		}
+		// Optional: rewrite endpoint names, stripped like sub-routes.
+		if ( isset( $excluded['endpoints'] ) ) {
+			if ( ! is_array( $excluded['endpoints'] ) ) {
+				return false;
+			}
+			foreach ( $excluded['endpoints'] as $endpoint ) {
+				if ( ! is_string( $endpoint ) || 1 !== preg_match( '/^[a-z0-9_-]+$/', $endpoint ) ) {
 					return false;
 				}
 			}

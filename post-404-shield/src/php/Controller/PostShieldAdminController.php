@@ -247,6 +247,7 @@ class PostShieldAdminController {
 		$this->store->update_keep( $keep );
 
 		$this->queue_follow_up_jobs( $previous, $candidate );
+		delete_option( \Post404Shield\Library\ConfigStore::ROOT_OFF_OPTION );
 		$this->set_notice( [], $result['warnings'], true, __( 'Config saved — the artifact was regenerated and the shield now runs this configuration.', 'post-404-shield' ) );
 		$this->redirect_to_page();
 	}
@@ -1028,6 +1029,19 @@ class PostShieldAdminController {
 	 */
 	private function notices_state(): array {
 		$notices = [];
+
+		$root_off = get_option( \Post404Shield\Library\ConfigStore::ROOT_OFF_OPTION );
+		if ( is_array( $root_off ) ) {
+			$notices[] = [
+				'status'  => 'warning',
+				'message' => sprintf(
+					/* translators: %s: why root matching was switched off. */
+					__( 'Root matching was switched off automatically because %s: the saved root settings no longer fit the site. They are kept — review them under Pages & posts and save to switch root matching back on.', 'post-404-shield' ),
+					(string) ( $root_off['reason'] ?? '' )
+				),
+				'list'    => array_map( 'strval', (array) ( $root_off['errors'] ?? [] ) ),
+			];
+		}
 		$notice  = get_transient( self::NOTICE_TRANSIENT . get_current_user_id() );
 		if ( is_array( $notice ) ) {
 			delete_transient( self::NOTICE_TRANSIENT . get_current_user_id() );

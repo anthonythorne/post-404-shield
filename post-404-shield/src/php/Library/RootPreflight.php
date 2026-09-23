@@ -31,6 +31,13 @@ namespace Post404Shield\Library;
 class RootPreflight {
 
 	/**
+	 * Rewrite endpoints from the candidate's snapshot (set by run()).
+	 *
+	 * @var string[]
+	 */
+	private array $endpoints = [];
+
+	/**
 	 * Cap on extras lines walked (attachments can number in the thousands; a
 	 * head+tail sample keeps the walk fast while still catching a broken
 	 * union — a missing extras build fails EVERY sampled line, not one).
@@ -55,12 +62,20 @@ class RootPreflight {
 		// Allowlist BODIES per effective CPT, built fresh from the database so
 		// the walk measures what the loader will actually read after the save's
 		// synchronous rebuilds.
+		// Each list also as a hash set: the walk replays every published root
+		// URL, and a substring scan of the whole body per probe made it
+		// quadratic (pages x bytes) inside the save lock. match_root() uses the
+		// set when given one; the loader never passes it.
 		$bodies = [];
+		$sets   = [];
 		foreach ( array_keys( $builder->allowlist_type_map() ) as $post_type ) {
-			$bodies[ $post_type ] = $this->body_from_lines( $builder->lines_for( $post_type ) );
+			$type_lines           = $builder->lines_for( $post_type );
+			$bodies[ $post_type ] = $this->body_from_lines( $type_lines );
+			$sets[ $post_type ]   = array_fill_keys( $type_lines, true );
 		}
 		$extras_lines = $builder->has_root_entries() ? $builder->root_extras_lines() : [];
 		$extras_body  = $this->body_from_lines( $extras_lines );
+		$extras_set   = array_fill_keys( $extras_lines, true );
 
 		// Root candidates, page first (mirrors the loader's ordering).
 		$root_candidates = [];
@@ -76,6 +91,7 @@ class RootPreflight {
 				'type'             => $root_type,
 				'allow_pagination' => ! isset( $settings['allow_pagination'] ) || false !== $settings['allow_pagination'],
 				'body'             => $bodies[ $root_type ] ?? '',
+				'set'              => $sets[ $root_type ] ?? [],
 			];
 		}
 		if ( isset( $root_candidates['page'] ) ) {
@@ -86,7 +102,13 @@ class RootPreflight {
 			'type'             => 'root-extras',
 			'allow_pagination' => true,
 			'body'             => $extras_body,
+			'set'              => $extras_set,
 		];
+		// Endpoints are stripped like sub-routes, exactly as the loader does.
+		$this->endpoints = array_values( array_filter( (array) ( $candidate['excluded_bases']['endpoints'] ?? [] ), 'is_string' ) );
+		foreach ( $match_candidates as $candidate_index => $match_candidate ) {
+			$match_candidates[ $candidate_index ]['endpoints'] = $this->endpoints;
+		}
 
 		// The flattened exclusion list, exactly as the loader assembles it:
 		// snapshot buckets + every configured entry's bases.
@@ -374,7 +396,8 @@ class RootPreflight {
 			static function ( string $type ) use ( $bodies ): ?string {
 				return $bodies[ $type ] ?? null;
 			},
-			$locale_pattern
+			$locale_pattern,
+			$this->endpoints
 		);
 		if ( null !== $based ) {
 			return [

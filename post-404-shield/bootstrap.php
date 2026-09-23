@@ -50,8 +50,9 @@ $post_shield_store  = new \Post404Shield\Library\ConfigStore();
 $post_shield_config = $post_shield_store->artifact();
 
 // Self-heal / rehydrate — ConfigStore::self_heal(). It runs where an operator
-// or the scheduler is anyway: admin_init (admin pages, admin-ajax, admin-post)
-// and the daily health cron, which heals before it reports. Never on a page
+// or the scheduler is anyway: admin_init for a logged-in user (admin pages,
+// their admin-ajax and admin-post) and the daily health cron, which heals
+// before it reports. Never on a page
 // view. Both run after every init registration, which validation needs:
 // custom post types and statuses can register as late as the end of init.
 // The loader already ran fail-open while the artifact was missing; the heal
@@ -59,6 +60,12 @@ $post_shield_config = $post_shield_store->artifact();
 add_action(
 	'admin_init',
 	static function () use ( $post_shield_store ): void {
+		// admin_init also fires for ANONYMOUS admin-ajax and admin-post requests
+		// (front-end plugins dispatch them on page views). The heal belongs to
+		// operators and the scheduler, not to visitor traffic.
+		if ( ! is_user_logged_in() ) {
+			return;
+		}
 		$post_shield_store->self_heal();
 	},
 	20
@@ -124,6 +131,17 @@ $post_shield_store->set_rebuild_handler(
 				error_log( '[post-404-shield] root-extras rebuild failed: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			}
 		}
+	}
+);
+
+// Root mode depends on the permalink structure, which is only checked at save
+// time. When it changes, re-validate and switch root matching off if it no
+// longer holds (ConfigStore::revalidate_root()) — fail-open, never a site of
+// pre-boot 404s.
+add_action(
+	'permalink_structure_changed',
+	static function () use ( $post_shield_store ): void {
+		$post_shield_store->revalidate_root( 'the permalink structure changed' );
 	}
 );
 
