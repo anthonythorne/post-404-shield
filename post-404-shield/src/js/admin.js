@@ -710,10 +710,15 @@
 				'post-404-shield'
 			);
 		} else if (type.unsupportedPost) {
-			summary = __(
-				'The permalink structure has no fixed base, so posts cannot be shielded.',
-				'post-404-shield'
-			);
+			summary = type.enabled
+				? __(
+						'The permalink structure has no fixed base, so posts cannot be shielded. Switch this off to save.',
+						'post-404-shield'
+					)
+				: __(
+						'The permalink structure has no fixed base, so posts cannot be shielded.',
+						'post-404-shield'
+					);
 		} else if (type.derivedBase) {
 			summary = '/' + type.derivedBase + '/';
 		} else {
@@ -738,7 +743,11 @@
 						...MODERN,
 						label: type.label,
 						checked: type.enabled,
-						disabled: type.unsupportedPost,
+						// Blocks switching it ON only. An entry saved before the
+						// permalink structure changed must still be switchable
+						// OFF: the server rejects an enabled unsupported entry,
+						// so a locked-on toggle would make every save fail.
+						disabled: type.unsupportedPost && !type.enabled,
 						onChange: (checked) => onChange({ enabled: checked }),
 					})
 				),
