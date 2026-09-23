@@ -352,7 +352,7 @@ class AllowlistBuilder {
 				 WHERE pm.meta_key = '_wp_old_slug'
 				   AND p.post_type = %s
 				   AND p.post_status IN ($status_placeholders)
-				   AND p.post_parent = 0
+				   {$this->top_level_clause( $post_type, 'p.' )}
 				   AND pm.meta_value <> ''
 				   AND pm.meta_value REGEXP '^[a-z0-9_-]+$'",
 				array_merge( [ $post_type ], $statuses )
@@ -361,6 +361,29 @@ class AllowlistBuilder {
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 
 		return (array) $slugs;
+	}
+
+	/**
+	 * The "top-level posts only" SQL condition for a slug-mode type, or ''.
+	 *
+	 * Only a HIERARCHICAL type's children live at a deeper URL
+	 * (`/{base}/{parent}/{child}/`), where the depth policy governs them by
+	 * their top-level slug. A FLAT type ignores post_parent entirely:
+	 * WordPress serves every post at `/{base}/{slug}/` whatever its parent
+	 * says, so filtering on post_parent there silently drops real posts and the
+	 * shield 404s them. Unknown types keep the filter (the historical shape).
+	 *
+	 * @param string $post_type Effective CPT name.
+	 * @param string $alias     Table alias prefix, e.g. `p.`.
+	 *
+	 * @return string A constant SQL fragment (never input-derived).
+	 */
+	private function top_level_clause( string $post_type, string $alias = '' ): string {
+		$object = function_exists( 'get_post_type_object' ) ? get_post_type_object( $post_type ) : null;
+		if ( null !== $object && ! $object->hierarchical ) {
+			return '';
+		}
+		return 'p.' === $alias ? 'AND p.post_parent = 0' : 'AND post_parent = 0';
 	}
 
 	/**
@@ -480,7 +503,7 @@ class AllowlistBuilder {
 				"SELECT DISTINCT post_name FROM {$wpdb->posts}
 				 WHERE post_type = %s
 				   AND post_status IN ($status_placeholders)
-				   AND post_parent = 0
+				   {$this->top_level_clause( $post_type )}
 				   AND post_name <> ''
 				   AND post_name REGEXP '^[a-z0-9_-]+$'",
 				array_merge( [ $post_type ], $statuses )
