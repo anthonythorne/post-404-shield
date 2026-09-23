@@ -1098,11 +1098,22 @@ class ConfigStore {
 				$warnings[] = sprintf( __( '%1$s: post type "%2$s" is not registered — its allowlist will be empty and the base fails open.', 'post-404-shield' ), $label, $post_type );
 			}
 			if ( isset( $entry['post_status'] ) && is_array( $entry['post_status'] ) && function_exists( 'get_post_stati' ) ) {
+				// An error only for an ENABLED entry. A status can stop being
+				// registered under a site (a workflow plugin switched off), and a
+				// disabled entry must still save — disabling is the remediation,
+				// and the Disable button, restores and the self-heal all write
+				// every entry.
 				$known = get_post_stati();
 				foreach ( $entry['post_status'] as $status ) {
 					if ( ! is_string( $status ) || ! isset( $known[ $status ] ) ) {
-						/* translators: 1: entry key, 2: the status. */
-						$errors[] = sprintf( __( '%1$s: post status "%2$s" does not exist.', 'post-404-shield' ), $label, is_scalar( $status ) ? (string) $status : gettype( $status ) );
+						$shown = is_scalar( $status ) ? (string) $status : gettype( $status );
+						if ( $entry_enabled ) {
+							/* translators: 1: entry key, 2: the status. */
+							$errors[] = sprintf( __( '%1$s: post status "%2$s" does not exist.', 'post-404-shield' ), $label, $shown );
+						} else {
+							/* translators: 1: entry key, 2: the status. */
+							$warnings[] = sprintf( __( '%1$s: post status "%2$s" is not registered; it is ignored while the entry is off.', 'post-404-shield' ), $label, $shown );
+						}
 					}
 				}
 			}

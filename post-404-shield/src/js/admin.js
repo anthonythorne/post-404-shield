@@ -351,28 +351,51 @@
 			el(
 				'div',
 				{ className: 'post-shield-admin__checkbox-grid' },
-				data.statuses.map((status) =>
-					el(CheckboxControl, {
-						...MODERN,
-						key: status.name,
+				data.statuses
+					.map((status) => ({
+						name: status.name,
 						label: status.label,
-						checked: type.statuses.includes(status.name),
-						onChange: (checked) =>
-							onChange({
-								statuses: checked
-									? type.statuses.concat(status.name)
-									: type.statuses.filter(
-											(s) => s !== status.name
-										),
-							}),
-					})
-				)
+					}))
+					// A stored status that is no longer registered (its plugin
+					// switched off) must still be visible, or it is posted on
+					// every save with no way to untick it.
+					.concat(
+						type.statuses
+							.filter(
+								(name) =>
+									!data.statuses.some((s) => s.name === name)
+							)
+							.map((name) => ({
+								name,
+								label: sprintf(
+									/* translators: %s: post status name. */
+									__('%s (not registered)', 'post-404-shield'),
+									name
+								),
+							}))
+					)
+					.map((status) =>
+						el(CheckboxControl, {
+							...MODERN,
+							key: status.name,
+							label: status.label,
+							checked: type.statuses.includes(status.name),
+							onChange: (checked) =>
+								onChange({
+									statuses: checked
+										? type.statuses.concat(status.name)
+										: type.statuses.filter(
+												(s) => s !== status.name
+											),
+								}),
+						})
+					)
 			),
 			el(
 				'p',
 				{ className: 'components-base-control__help' },
 				__(
-					'Posts in these statuses are let through. Usually just Published.',
+					'Tick every status whose posts visitors can open on this site — Published, plus any custom public status such as Discontinued. A post in an unticked status is treated as fake and gets a 404.',
 					'post-404-shield'
 				)
 			)
