@@ -134,7 +134,7 @@ class RootPreflight {
 		// (the entry's reserved slugs), never a root-save blocker.
 		$would_block = [];
 		$warn_block  = [];
-		$urls        = $this->probe_urls( $candidate, $bodies, $root_candidates, $published, $extras_lines, $excluded_flat );
+		$urls        = $this->probe_urls( $candidate, $bodies, $root_candidates, $published, $extras_lines, $excluded_flat, $locale_pattern );
 		foreach ( $urls as $url ) {
 			$decision = $this->decide( $url, $entries, $bodies, $excluded_flat, $match_candidates, $locale_pattern );
 			if ( 0 !== strpos( $decision['marker'], 'blocked' ) ) {
@@ -163,10 +163,11 @@ class RootPreflight {
 	 * @param array<string, string[]> $published       PUBLISHED lines per root type (the corpus source).
 	 * @param string[]                $extras_lines    Root-extras union lines.
 	 * @param string[]                $excluded_flat   Flattened exclusion list.
+	 * @param string                  $locale_pattern  Locale pattern body ('' = none).
 	 *
 	 * @return string[] URL paths.
 	 */
-	private function probe_urls( array $candidate, array $bodies, array $root_candidates, array $published, array $extras_lines, array $excluded_flat ): array {
+	private function probe_urls( array $candidate, array $bodies, array $root_candidates, array $published, array $extras_lines, array $excluded_flat, string $locale_pattern = '' ): array {
 		$urls = [ '/' ];
 
 		// Every PUBLISHED URL of every enabled ROOT type is corpus — sourced
@@ -248,7 +249,80 @@ class RootPreflight {
 			}
 		}
 
-		return array_values( array_unique( $urls ) );
+		$urls = array_values( array_unique( $urls ) );
+
+		// With a locale pattern in force the loader's matchers REQUIRE the
+		// locale segment: an unprefixed path matches nothing and passes. So
+		// probes built bare would all pass and this gate could never abort a
+		// save. Prefix each one with a locale the pattern accepts. One is
+		// enough for correctness — allowlists and exclusions are
+		// locale-agnostic — and a second exercises another branch of the
+		// pattern where the site has one.
+		if ( '' === $locale_pattern ) {
+			return $urls;
+		}
+		$locales = $this->probe_locales( $locale_pattern );
+		if ( [] === $locales ) {
+			return $urls;
+		}
+		$prefixed = [];
+		foreach ( $locales as $locale ) {
+			foreach ( $urls as $url ) {
+				$prefixed[] = '/' . $locale . $url;
+			}
+		}
+		return $prefixed;
+	}
+
+	/**
+	 * Locale segments to prefix probes with: real ones the pattern accepts.
+	 *
+	 * The site's own languages are preferred (the default first), because a
+	 * probe should look like a URL the site actually serves. Literal branches
+	 * of the pattern itself (`global` in `[a-z]{2}-[a-z]{2}|global`) are the
+	 * fallback for a site without WPML. At most two, to keep the walk's cost
+	 * linear in the corpus rather than in the language count.
+	 *
+	 * @param string $locale_pattern Locale pattern body.
+	 *
+	 * @return string[]
+	 */
+	private function probe_locales( string $locale_pattern ): array {
+		$candidates = [];
+		if ( function_exists( 'apply_filters' ) ) {
+			$default = apply_filters( 'wpml_default_language', null );
+			if ( is_string( $default ) ) {
+				$candidates[] = $default;
+			}
+			$active = apply_filters( 'wpml_active_languages', null, [ 'skip_missing' => 0 ] );
+			if ( is_array( $active ) ) {
+				foreach ( array_keys( $active ) as $code ) {
+					$candidates[] = (string) $code;
+				}
+			}
+		}
+		foreach ( explode( '|', $locale_pattern ) as $branch ) {
+			if ( 1 === preg_match( '/^[a-z0-9-]+$/', $branch ) ) {
+				$candidates[] = $branch;
+			}
+		}
+
+		// Compiled the way the matchers compile it; validation already rules
+		// out delimiter breakout (locale_pattern_is_valid()).
+		$regex   = '#^(?:' . $locale_pattern . ')$#';
+		$locales = [];
+		foreach ( $candidates as $candidate ) {
+			if ( '' === $candidate || in_array( $candidate, $locales, true ) ) {
+				continue;
+			}
+			if ( 1 === @preg_match( $regex, $candidate ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- an operator pattern; a bad one must not fatal the save.
+				$locales[] = $candidate;
+			}
+			if ( count( $locales ) >= 2 ) {
+				break;
+			}
+		}
+		return $locales;
 	}
 
 	/**
@@ -320,8 +394,14 @@ class RootPreflight {
 						'stage'  => 'based',
 					];
 				};
-				$reserved = $settings['reserved_allowlist'] ?? [];
-				if ( is_array( $reserved ) && in_array( $match['slug'], $reserved, true ) ) {
+				// Both buckets, wildcard-aware — exactly as the loader checks them.
+				// Reading only the operator bucket, or matching exactly, reports a
+				// reserved derived slug (or a `prefix*` family) as a would-block.
+				$reserved = array_merge(
+					(array) ( $settings['reserved_allowlist'] ?? [] ),
+					(array) ( $settings['reserved_derived'] ?? [] )
+				);
+				if ( [] !== $reserved && \Post404Shield\slug_is_reserved( $match['slug'], $reserved ) ) {
 					return $based( 'allowed-reserved-slug' );
 				}
 				$body = $bodies[ $shield_type ] ?? '';
