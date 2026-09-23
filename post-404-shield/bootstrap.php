@@ -115,7 +115,8 @@ $post_shield_builder = ( new \Post404Shield\Library\AllowlistBuilder( $post_shie
 // ordered around the artifact swap so a full-path artifact never reads a
 // slug-format list. Every save path — admin, restore, CLI — inherits this.
 $post_shield_store->set_rebuild_handler(
-	static function ( array $post_types, array $entries, bool $root_switching_on = false ): bool {
+	// Returns true, or the names of the lists that could not be written.
+	static function ( array $post_types, array $entries, bool $root_switching_on = false ) {
 		$candidate_builder = new \Post404Shield\Library\AllowlistBuilder( $entries );
 		$failed            = [];
 		$read_failed       = false;
@@ -133,7 +134,12 @@ $post_shield_store->set_rebuild_handler(
 		// loader refuses to run root matching without it (fail-open). Built
 		// when root mode is being switched on, or the file is missing; while
 		// root mode stays on, the appends and the nightly rebuild keep it.
-		if ( $candidate_builder->has_root_entries() && ( $root_switching_on || ! is_file( $candidate_builder->get_root_extras_file() ) ) ) {
+		// Also when a root type's list is rebuilt (its statuses widened, say):
+		// root-extras' nested media, old slugs and old addresses follow the
+		// same statuses.
+		if ( $candidate_builder->has_root_entries()
+			&& ( $root_switching_on || ! is_file( $candidate_builder->get_root_extras_file() ) || [] !== array_intersect( array_map( 'strval', $post_types ), $candidate_builder->root_types() ) )
+		) {
 			try {
 				$candidate_builder->rebuild_root_extras();
 			} catch ( \Throwable $e ) {
@@ -236,7 +242,10 @@ $post_shield_store->set_preflight_handler(
 		foreach ( $result['warn_block'] as $post_shield_warn_url ) {
 			error_log( '[post-404-shield] preflight warning: ' . $post_shield_warn_url . ' is blocked by a BASED entry (pre-existing behaviour) — if it is a real/redirecting URL, add its slug to that entry\'s reserved slugs.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 		}
-		return $result['would_block'];
+		return [
+			'would_block' => $result['would_block'],
+			'dropped'     => $result['dropped'],
+		];
 	}
 );
 
@@ -419,7 +428,7 @@ if ( defined( 'WP_CLI' ) && WP_CLI && class_exists( '\WP_CLI' ) ) {
 			}
 			if ( [] !== $result['would_block'] ) {
 				foreach ( $result['would_block'] as $post_shield_blocked_url ) {
-					\WP_CLI::log( 'WOULD BLOCK: ' . $post_shield_blocked_url );
+					\WP_CLI::log( 'WOULD BLOCK: ' . $post_shield_blocked_url . ( isset( $result['dropped'][ $post_shield_blocked_url ] ) ? ' (status "' . $result['dropped'][ $post_shield_blocked_url ] . '" is no longer listed)' : '' ) );
 				}
 				\WP_CLI::error( sprintf( 'Root preflight FAILED: %d of %d real URL(s) would be served a pre-boot 404 by root matching. Investigate before enabling root mode.', count( $result['would_block'] ), $result['checked'] ) );
 			}

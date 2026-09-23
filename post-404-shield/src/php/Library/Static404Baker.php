@@ -460,8 +460,15 @@ class Static404Baker {
 		}
 		$this->harden_directory( $dir );
 
-		$tmp = $file . '.' . getmypid() . '.tmp';
-		if ( false === file_put_contents( $tmp, $html ) ) { // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_file_put_contents
+		// Unique per call, not only per process (containers share PIDs), and
+		// not `.php`: this is HTML, which must never run. A short write — a
+		// full disk — is a failure, never a truncated page renamed into place.
+		$tmp     = $file . '.' . getmypid() . '.' . bin2hex( random_bytes( 6 ) ) . '.tmp';
+		$written = file_put_contents( $tmp, $html ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_file_put_contents
+		if ( false === $written || strlen( $html ) !== $written ) {
+			if ( file_exists( $tmp ) ) {
+				unlink( $tmp ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_unlink
+			}
 			return false;
 		}
 

@@ -368,6 +368,31 @@ class AllowlistBuilder {
 	}
 
 	/**
+	 * Whether a root-extras stream is reading into a list directory right now
+	 * (it holds `.stream` shared for its whole read, without the list lock).
+	 *
+	 * @param string $dir List directory.
+	 *
+	 * @return bool
+	 */
+	private function stream_in_flight( string $dir ): bool {
+		if ( ! is_file( $dir . '/.stream' ) ) {
+			return false;
+		}
+		$handle = fopen( $dir . '/.stream', 'c' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		if ( false === $handle ) {
+			return false;
+		}
+		$would_block = 0;
+		$free        = flock( $handle, LOCK_EX | LOCK_NB, $would_block );
+		if ( $free ) {
+			flock( $handle, LOCK_UN );
+		}
+		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		return ! $free && 1 === $would_block;
+	}
+
+	/**
 	 * Whether a writer holds a list directory's lock right now (a rebuild).
 	 *
 	 * @param string $dir List directory.
@@ -1025,8 +1050,13 @@ class AllowlistBuilder {
 		// The rebuild probe comes first: a rebuild that takes the lock after it
 		// reads the database after this post's write, and one that finished
 		// before it left the file unlisted() then reads.
+		// A root-extras stream (no list lock while it reads) is in flight too:
+		// its read may predate this post, and what the old file lists says
+		// nothing about the new one — every line goes to the live list, whose
+		// tail the stream's commit carries over.
 		$candidates = array_values( array_unique( $lines ) );
-		$in_flight  = $this->rebuild_in_flight( dirname( $file ) );
+		$streaming  = $this->stream_in_flight( dirname( $file ) );
+		$in_flight  = $streaming || $this->rebuild_in_flight( dirname( $file ) );
 		$lines      = self::unlisted( $candidates, $file );
 		if ( [] === $lines && ! $in_flight ) {
 			return 0;
@@ -1039,7 +1069,9 @@ class AllowlistBuilder {
 		}
 		$lock = $this->lock( dirname( $file ) );
 		try {
-			$lines = self::unlisted( $lines, $file );
+			if ( ! $streaming ) {
+				$lines = self::unlisted( $lines, $file );
+			}
 			if ( [] === $lines ) {
 				return 0;
 			}
@@ -1520,7 +1552,7 @@ class AllowlistBuilder {
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$rows = (array) $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT a.ID, pm.meta_value AS post_name, a.post_parent, parent.post_type AS parent_type
+				"SELECT a.ID, pm.meta_value AS post_name, a.post_parent, parent.post_type AS parent_type, parent.post_status AS parent_status
 				 FROM {$wpdb->postmeta} pm
 				 INNER JOIN {$wpdb->posts} a ON a.ID = pm.post_id
 				 LEFT JOIN {$wpdb->posts} parent ON parent.ID = a.post_parent
@@ -1635,8 +1667,12 @@ class AllowlistBuilder {
 		// appended to the live list while the stream ran is copied in before
 		// the rename, so no append is lost and none waits more than a moment.
 		clearstatcache( true, $file );
-		$start = is_file( $file ) ? [ (int) filesize( $file ), (int) fileinode( $file ) ] : null;
-		$lock  = null;
+		$start  = is_file( $file ) ? [ (int) filesize( $file ), (int) fileinode( $file ) ] : null;
+		$lock   = null;
+		$stream = is_dir( dirname( $file ) ) ? fopen( dirname( $file ) . '/.stream', 'c' ) : false; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		if ( false !== $stream ) {
+			flock( $stream, LOCK_SH ); // Appends see the read in flight (stream_in_flight()).
+		}
 		try {
 			// Streamed straight to the temp file: the union is never held in
 			// memory. A duplicate line (an old slug that is also a media name)
@@ -1664,6 +1700,10 @@ class AllowlistBuilder {
 			return $count;
 		} finally {
 			$this->unlock( $lock );
+			if ( false !== $stream ) {
+				flock( $stream, LOCK_UN );
+				fclose( $stream ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+			}
 		}
 	}
 
@@ -1867,9 +1907,9 @@ class AllowlistBuilder {
 
 	/**
 	 * Delete a single type's allowlist directory. Conservative: only ever removes
-	 * files this plugin writes (the allowlist, the hardening index, and any crash
-	 * temp files), then rmdir — which no-ops if anything unexpected remains, so an
-	 * unrelated file is never destroyed.
+	 * files this plugin writes (the allowlist, the hardening index, the lock
+	 * files and any crash temp files), then rmdir — which no-ops if anything
+	 * unexpected remains, so an unrelated file is never destroyed.
 	 *
 	 * @param string $dir Absolute per-type directory to remove.
 	 *
@@ -1881,7 +1921,7 @@ class AllowlistBuilder {
 			return;
 		}
 		foreach ( $entries as $entry ) {
-			if ( 'allowlist.php' === $entry || 'index.php' === $entry || '.lock' === $entry || \Post404Shield\is_temp_file_name( $entry ) ) {
+			if ( in_array( $entry, [ 'allowlist.php', 'index.php', '.lock', '.stream' ], true ) || \Post404Shield\is_temp_file_name( $entry ) ) {
 				$path = trailingslashit( $dir ) . $entry;
 				if ( is_file( $path ) ) {
 					unlink( $path ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_unlink

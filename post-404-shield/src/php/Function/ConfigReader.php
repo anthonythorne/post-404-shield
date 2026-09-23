@@ -530,7 +530,8 @@ function redirect_leading_locale( string $source, callable $is_locale, array $sa
 		$rest    = substr( $source, strlen( $prefix ) );
 
 		// The core: the prefix without its wrapping groups and slashes, split
-		// into alternatives — each must be a locale by itself.
+		// into alternatives — each must be a locale by itself, its own slash
+		// aside (`(?:xx-xx/|global/)?`).
 		$core = $prefix;
 		for ( $depth = 0; $depth < 8; $depth++ ) {
 			$single = 1 === preg_match( '#^\((?:\?:)?(.*)\)\??$#s', $core, $group ) && 1 === count( regex_atoms( $core ) );
@@ -539,7 +540,10 @@ function redirect_leading_locale( string $source, callable $is_locale, array $sa
 			}
 			$core = (string) preg_replace( '#^/|/\??$#', '', $group[1] );
 		}
-		$alternatives = regex_alternatives( $core );
+		$alternatives = array_map(
+			static fn( string $alternative ): string => (string) preg_replace( '#^/|/\??$#', '', $alternative ),
+			regex_alternatives( $core )
+		);
 		if ( count( $alternatives ) !== count( array_filter( $alternatives, $is_one_locale ) ) ) {
 			continue;
 		}

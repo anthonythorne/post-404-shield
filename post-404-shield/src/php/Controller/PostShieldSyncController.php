@@ -80,6 +80,16 @@ class PostShieldSyncController {
 	private array $orphans = [];
 
 	/**
+	 * The WPML translations of a deleted post's children, keyed by the deleted
+	 * post's ID, with the addresses their subtrees had: WPML moves them to
+	 * match the children with a direct query on delete_post — or, for a bulk
+	 * delete, at shutdown — that fires no post hook either.
+	 *
+	 * @var array<int, array{0: string, 1: int[], 2: array<int, string>}>
+	 */
+	private array $orphan_translations = [];
+
+	/**
 	 * Media of a post being deleted, keyed by its ID (root mode only).
 	 *
 	 * @var array<int, int[]>
@@ -283,10 +293,20 @@ class PostShieldSyncController {
 		if ( 'attachment' === $post->post_type ) {
 			return;
 		}
-		// Root-extras lists the media of posts in any served status.
-		$live = $this->builder->attachment_parent_statuses();
-		if ( $this->builder->has_root_entries() && in_array( $new_status, $live, true ) && ! in_array( $old_status, $live, true ) ) {
-			$this->builder->append_root_extras( $this->builder->attachment_lines( [ (int) $post->ID ] ) );
+		// Root-extras: under a root type's post, its media nest when the post
+		// is in a status that type serves (or private) — the same test the
+		// rebuild applies; any other post's media are listed bare, in any
+		// served status.
+		if ( $this->builder->has_root_entries() ) {
+			$root_type = $this->builder->is_root_type( $post->post_type );
+			$listed    = function ( string $status ) use ( $post, $root_type ): bool {
+				return $root_type
+					? $this->builder->is_shielding_status( $post->post_type, $status ) || 'private' === $status
+					: in_array( $status, $this->builder->attachment_parent_statuses(), true );
+			};
+			if ( $listed( $new_status ) && ! $listed( $old_status ) ) {
+				$this->builder->append_root_extras( $this->builder->attachment_lines( [ (int) $post->ID ] ) );
+			}
 		}
 		// A full-path type's own list, the media of posts in ITS statuses: a
 		// private post published is live to it, though not to root-extras.
@@ -340,6 +360,16 @@ class PostShieldSyncController {
 		if ( [] !== $children ) {
 			$this->orphans[ $post_id ]            = [ $post_type, array_map( 'intval', (array) $children ) ];
 			$this->moving[ 'delete-' . $post_id ] = $this->subtree_uris( $post_type, $this->orphans[ $post_id ][1] );
+			$translations                         = [];
+			foreach ( $this->orphans[ $post_id ][1] as $child ) {
+				foreach ( $this->translation_ids( $child, $post_type ) as $translation_id ) {
+					$translations[] = $translation_id;
+				}
+			}
+			if ( [] !== $translations ) {
+				$translations                          = array_values( array_unique( $translations ) );
+				$this->orphan_translations[ $post_id ] = [ $post_type, $translations, $this->subtree_uris( $post_type, $translations ) ];
+			}
 		}
 	}
 
@@ -439,6 +469,57 @@ class PostShieldSyncController {
 		// WordPress still 301s the addresses they left (its 404 guess finds
 		// them by name), so they are kept like any move's.
 		$this->publish_moved( 'delete-' . $post_id, $post_type );
+
+		// Their translations, which WPML has moved by now — unless this is a
+		// bulk delete, whose sync WPML defers to shutdown: then once more there.
+		if ( isset( $this->orphan_translations[ $post_id ] ) ) {
+			$this->append_moved_translations( $post_id );
+			if ( ! has_action( 'shutdown', [ $this, 'handle_deferred_translation_moves' ] ) ) {
+				add_action( 'shutdown', [ $this, 'handle_deferred_translation_moves' ], 20 );
+			}
+		}
+	}
+
+	/**
+	 * The translations of a deleted post's children: append each one's
+	 * address now (and its subtree), and keep every address they left.
+	 *
+	 * @param int $post_id Deleted post ID.
+	 *
+	 * @return void
+	 */
+	private function append_moved_translations( int $post_id ): void {
+		[ $post_type, $translations, $before ] = $this->orphan_translations[ $post_id ];
+		$this->family                          = [];
+		foreach ( $translations as $translation_id ) {
+			$this->fast_append( $translation_id, $post_type, true );
+		}
+		$old = [];
+		foreach ( [] === $before ? [] : $this->builder->uris_for( $post_type, array_keys( $before ) ) as $id => $uri ) {
+			if ( isset( $before[ $id ] ) && $before[ $id ] !== $uri ) {
+				$old[ $id ] = $before[ $id ];
+			}
+		}
+		if ( [] !== $old ) {
+			$this->publish_old_uris( $post_type, $old );
+		}
+	}
+
+	/**
+	 * After WPML's deferred shutdown sync (a bulk delete, priority 10): the
+	 * translations it moved there.
+	 *
+	 * @return void
+	 */
+	public function handle_deferred_translation_moves(): void {
+		foreach ( array_keys( $this->orphan_translations ) as $post_id ) {
+			try {
+				$this->append_moved_translations( (int) $post_id );
+			} catch ( \RuntimeException | \TypeError $e ) {
+				error_log( '[post-404-shield] handle_deferred_translation_moves: ' . $e->getMessage() . ' — skipped; the nightly rebuild restores the list.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+			}
+			unset( $this->orphan_translations[ $post_id ] );
+		}
 	}
 
 	/**

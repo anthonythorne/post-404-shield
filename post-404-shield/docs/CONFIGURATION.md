@@ -58,7 +58,15 @@ server-side, re-required every off→on transition) and runs the **root
 preflight** automatically (S6): every real URL is walked through the would-be
 loader decision, and a non-empty would-block list **aborts the save**.
 **Disable shield** writes an artifact with every entry disabled — still a
-validated, revisioned save.
+validated, revisioned save. On a root-mode site the Pages & posts settings are
+**kept** while it is off, as an automatic switch-off keeps them: switching one
+post type back on does not delete them. Save the Pages & posts tab to switch
+root matching back on, or use **Discard the kept root settings** on its notice.
+
+A based row switched **off with its URL bases cleared** is the delete gesture:
+the save removes the entry, its reserved slugs and cache times included (the
+row's badge says *Off — removed when you save*). A row switched off with its
+bases in place keeps everything.
 
 CLI equivalents: `wp post-shield config export | write | import-legacy <file> |
 revisions | restore <stamp>` (plus the existing `rebuild` / `bake-404`), and
@@ -487,8 +495,9 @@ each is ticked on purpose — the save warns when one is newly listed. A row
 whose posts are in a public status it does not tick says so, and so do the
 save and the daily health check: the shield answers those posts with a 404,
 which is right only if the site hides them. Dropping a status the entry did
-list is refused while posts are in it; the settings screen then offers to
-drop it anyway (CLI: `--force`).
+list is refused while posts are in it — on a based row and on a Pages & posts
+row alike; the settings and restore screens then offer to drop it anyway
+(CLI: `--force`).
 
 **Reserve a page that lives under a CPT base**: add the slug to the type's
 *Reserved slugs*, and remember the shield is only half of it — WordPress needs
@@ -534,9 +543,18 @@ redirect plugin can answer.
 - Regex sources are read the way their authors write them: `\/` is a slash, a
   top-level `^a/?$|^b/?$` is two sources, and a leading locale is stripped in
   any form — literal, class (`[a-z]{2}-[a-z]{2}/`), group, optional group
-  (`(?:…/)?`, `(?:/…)?`), nested — when each of its alternatives is a locale.
-  A regex source that names a shielded base but that none of this can place
-  gets a save warning rather than silently reserving nothing.
+  (`(?:…/)?`, `(?:/…)?`, `(?:xx-xx/|global/)?`), nested — when each of its
+  alternatives is a locale.
+  Each reading of a regex source (each top-level branch, each expanded group)
+  is judged on its own: one that names a shielded base — or the base's first
+  segment followed by a group or class, `products/(cameras|lenses)` — but that
+  none of this can place gets a save warning rather than silently reserving
+  nothing.
+- A **blocked section** answers its base and everything under it before any
+  reserved slug is looked at, so nothing can let a redirect under it through.
+  A save warns about every redirect at or under a blocked section's base (and
+  every regex one that may reach it), naming the block: narrow or remove the
+  block, or move the redirect to the edge.
 
 ### How it stays current
 

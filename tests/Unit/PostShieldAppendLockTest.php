@@ -4,7 +4,8 @@
  * another process: the append must wait for a rebuild that holds the list's
  * lock, then check every line against the file that rebuild renamed in — an
  * append checked only against the old file is lost when the rename replaces
- * it, and its post gets a pre-boot 404 until the next rebuild.
+ * it, and its post gets a pre-boot 404 until the next rebuild. The same holds
+ * for a root-extras stream, which reads without the lock.
  *
  * @package Post404Shield\Tests
  */
@@ -90,6 +91,55 @@ class PostShieldAppendLockTest extends TestCase {
 		$this->assertContains( 'new-b', $lines );
 		$this->assertContains( 'old-a', $lines, 'A line only the old file listed is re-checked against the new one.' );
 		$this->assertContains( 'kept', $lines );
+	}
+
+	/**
+	 * An append during a root-extras stream (which reads without the list
+	 * lock) writes every line to the live list — the one the old file already
+	 * listed too — and the stream's commit carries that tail over. Deduped
+	 * against the old file, a line the stream's read left out would be lost.
+	 *
+	 * @return void
+	 */
+	public function test_an_append_during_a_stream_reaches_the_committed_list(): void {
+		$file = $this->dir . '/allowlist.php';
+		file_put_contents( $file, "<?php exit;\nabout/photo\n" );
+		clearstatcache( true, $file );
+		$start = [ (int) filesize( $file ), (int) fileinode( $file ) ];
+
+		// The stream: hold `.stream` shared, as rebuild_root_extras() does.
+		$stream = proc_open(
+			[
+				PHP_BINARY,
+				'-r',
+				'$h = fopen( $argv[1] . "/.stream", "c" ); flock( $h, LOCK_SH ); echo "STREAMING\n"; fflush( STDOUT ); fgets( STDIN ); flock( $h, LOCK_UN );',
+				$this->dir,
+			],
+			[
+				0 => [ 'pipe', 'r' ],
+				1 => [ 'pipe', 'w' ],
+			],
+			$pipes
+		);
+		$this->assertSame( "STREAMING\n", fgets( $pipes[1] ), 'The stream is in flight.' );
+
+		$builder  = new AllowlistBuilder( [] );
+		$appended = $builder->append_slugs_to_file( $file, [ 'about/photo' ], 'full-path' );
+		fwrite( $pipes[0], "done\n" );
+		proc_close( $stream );
+		$this->assertSame( 1, $appended, 'Written although the old file lists it.' );
+
+		// The commit: the stream's own read left the line out; the tail brings it.
+		$handle = fopen( $this->dir . '/commit.tmp', 'w+' );
+		$copy   = new \ReflectionMethod( AllowlistBuilder::class, 'copy_appended' );
+		$copy->setAccessible( true );
+		$this->assertSame( 1, $copy->invoke( $builder, $file, $start, $handle ) );
+		rewind( $handle );
+		$this->assertSame( "about/photo\n", stream_get_contents( $handle ) );
+		fclose( $handle );
+
+		// With the stream gone, the same append is a no-op again.
+		$this->assertSame( 0, $builder->append_slugs_to_file( $file, [ 'about/photo' ], 'full-path' ) );
 	}
 
 	/**

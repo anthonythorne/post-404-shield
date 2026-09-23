@@ -209,4 +209,125 @@ class PostShieldDerivedReservedTest extends TestCase {
 		$this->assertStringContainsString( 'looks like it covers addresses under /news/', $warnings );
 		$this->assertStringContainsString( 'matches addresses that contain it', $warnings );
 	}
+
+	/**
+	 * The save's warnings, after deriving for these entries.
+	 *
+	 * @param ConfigStore                         $store   Store.
+	 * @param array<string, array<string, mixed>> $entries Entries.
+	 *
+	 * @return array{0: array<string, mixed>, 1: string} The entries, and the warnings joined.
+	 */
+	private function derive_with( ConfigStore $store, array $entries ): array {
+		$entries  = $store->apply_derived_reserved( $entries, self::PATTERN );
+		$warnings = implode( "\n", (array) ( new \ReflectionProperty( ConfigStore::class, 'derivation_warnings' ) )->getValue( $store ) );
+		return [ $entries, $warnings ];
+	}
+
+	/**
+	 * A locale group whose every branch carries its own slash is still the
+	 * locale, and the group after it is expanded.
+	 *
+	 * @return void
+	 */
+	public function test_a_locale_group_with_a_slash_per_branch_is_stripped(): void {
+		$this->routes( [] );
+		[ $entries ] = $this->derive_with(
+			$this->store(
+				[
+					[
+						'pattern' => '^(?:[a-z]{2}-[a-z]{2}/|global/)?products/(cameras|lenses)/x-t3/?$',
+						'regex'   => true,
+					],
+				]
+			),
+			[ 'camera' => [ 'url_base' => [ 'products/cameras' ] ] ]
+		);
+		$this->assertSame( [ 'x-t3' ], $entries['camera']['reserved_derived'] ?? [] );
+	}
+
+	/**
+	 * Each reading of a source is judged on its own: a placed branch does not
+	 * hide an unreadable one.
+	 *
+	 * @return void
+	 */
+	public function test_an_unreadable_branch_warns_beside_a_placed_one(): void {
+		$this->routes( [] );
+		[ $entries, $warnings ] = $this->derive_with(
+			$this->store(
+				[
+					[
+						'pattern' => '^global/stories/old-a/?$|^.*/stories/old-c/?$',
+						'regex'   => true,
+					],
+				]
+			),
+			[ 'story' => [ 'url_base' => [ 'stories' ] ] ]
+		);
+		$this->assertSame( [ 'old-a' ], $entries['story']['reserved_derived'] ?? [] );
+		$this->assertStringContainsString( 'looks like it covers addresses under /stories/', $warnings );
+	}
+
+	/**
+	 * A redirect at or under a blocked section is answered by the block
+	 * first: the save says so, for exact, regex and contains redirects alike.
+	 *
+	 * @return void
+	 */
+	public function test_a_redirect_under_a_blocked_section_warns(): void {
+		$this->routes( [] );
+		$block = [
+			'x-photographers' => [
+				'mode'     => 'block',
+				'url_base' => [ 'x-photographers' ],
+			],
+		];
+		foreach ( [
+			[ '/global/x-photographers/jane-doe', false, 'is at or under /x-photographers/' ],
+			[ '^(?:[a-z]{2}-[a-z]{2}|global)/x-photographers/(.+)$', true, 'is at or under /x-photographers/' ],
+			[ '^.*/x-photographers/jane/?$', true, 'may cover addresses under /x-photographers/' ],
+		] as [ $pattern, $regex, $expected ] ) {
+			[ , $warnings ] = $this->derive_with(
+				$this->store(
+					[
+						[
+							'pattern' => $pattern,
+							'regex'   => $regex,
+						],
+					]
+				),
+				$block
+			);
+			$this->assertStringContainsString( 'Blocked section x-photographers: the redirect "' . $pattern . '" ' . $expected, $warnings, $pattern );
+		}
+
+		[ , $warnings ] = $this->derive_with(
+			$this->store(
+				[],
+				[
+					[
+						'pattern'    => 'x-photographers/jane',
+						'comparison' => 'contains',
+					],
+				]
+			),
+			$block
+		);
+		$this->assertStringContainsString( 'matches addresses that contain it', $warnings );
+
+		// A redirect elsewhere says nothing about the block.
+		[ , $warnings ] = $this->derive_with(
+			$this->store(
+				[
+					[
+						'pattern' => '/global/photographers/jane-doe',
+						'regex'   => false,
+					],
+				]
+			),
+			$block
+		);
+		$this->assertStringNotContainsString( 'Blocked section', $warnings );
+	}
 }

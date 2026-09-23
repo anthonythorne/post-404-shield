@@ -884,8 +884,15 @@
 					// Two root exceptions the server keeps or explains: settings
 					// kept while root matching is switched off automatically, and
 					// a based entry left behind when the type moved to the root.
+					// A based row switched off with its URL bases cleared is the
+					// delete gesture: the server removes it too.
 					!type.enabled && type.hasEntry
-						? (type.root && !type.rootKept) || type.removing
+						? (type.root && !type.rootKept) ||
+							type.removing ||
+							(!type.root &&
+								!type.derivedBase &&
+								!type.unsupportedPost &&
+								splitLines(type.urlBase).length === 0)
 							? el(
 									Badge,
 									{ tone: 'warning' },

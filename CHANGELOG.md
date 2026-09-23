@@ -198,6 +198,28 @@ Moved out of the sites that used it into its own repository.
   re-parented post, keep the addresses they left.
 - Tests: the failed-read path (child processes), the hook guard, loader cases
   that each depend on one guard.
+- A rebuild handler's failure fails every list the pre-swap rebuild was for —
+  root-extras too when it is the only one — and a bug in a rebuild refuses the
+  save, before or after the swap, without a fatal. The 404 baker's temp file is
+  unique per call and a short write is a failure.
+- A root-extras stream holds `.stream` shared while it reads, so an append made
+  meanwhile writes every line to the live list for the commit to carry over.
+- Derivation version 7: a locale group whose every branch carries its own slash
+  (`(?:xx-xx/|global/)?`) is stripped. Each reading of a regex source is judged
+  on its own, and a base's first segment followed by a group or class counts
+  as naming it. A redirect at or under a blocked section is a save warning.
+- A root status dropped while posts are in it can be confirmed on the settings
+  and restore screens, as a based one can; the CLI names the status.
+- Disable shield keeps the root settings, as an automatic switch-off does; a
+  switched-off row whose bases are cleared says the save removes it.
+- Media of a post moving into a root type's served statuses, and the old-slug
+  lines of media under full-path parents, follow the parent's status; a root
+  type's rebuild from the Maintenance tab rebuilds root-extras too.
+- WPML translations of a deleted parent's children keep their addresses: they
+  are appended after WPML moves them, and again after a bulk delete's deferred
+  sync at shutdown.
+- Tests: the pre-swap rebuild contract, an append during a stream (two
+  processes), the redirect shapes above.
 
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing

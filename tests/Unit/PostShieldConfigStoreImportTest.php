@@ -190,6 +190,7 @@ class PostShieldConfigStoreImportTest extends TestCase {
 			4 => '0bc27ca5d83125a18dd4731b02b502f6', // Round 5: escaped slashes, top-level alternation, any locale form.
 			5 => '9c9ff4bbfaebc567185879c94028faf9', // Round 7: an optional separator not end-anchored is a prefix.
 			6 => '3618dea9c8694af6e1f668175dcf2e2c', // Round 8: a zero-or-more brace quantifier on the separator.
+			7 => '7cc01b5eff7c64768b3970df0702259d', // Round 9: a locale group whose every branch carries its own slash.
 		];
 		$pattern = '[a-z]{2}-[a-z]{2}|global';
 		$table   = [
@@ -227,6 +228,8 @@ class PostShieldConfigStoreImportTest extends TestCase {
 			// Version 6: `{0,1}` / `{0,}` on the separator, the same as `?` / `*`.
 			[ '^/global/news/old-post/{0,1}', true, [ 'news/old-post*' ] ],
 			[ '^/global/news/old-post/{0,}$', true, [ 'news/old-post' ] ],
+			// Version 7: a locale group whose every branch carries its own slash.
+			[ '^(?:[a-z]{2}-[a-z]{2}/|global/)?products/(cameras|lenses)/x-t3/?$', true, [ 'products/cameras/x-t3', 'products/lenses/x-t3' ] ],
 		];
 		$out = [];
 		foreach ( $table as [ $source, $regex, $expected ] ) {

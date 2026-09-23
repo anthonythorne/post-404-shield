@@ -146,15 +146,15 @@ class ConfigStore {
 	 *
 	 * @var int
 	 */
-	private const REDIRECT_DERIVATION_VERSION = 6;
+	private const REDIRECT_DERIVATION_VERSION = 7;
 
 	/**
 	 * Optional rebuild seam for the match-mode-switch ordering (SPEC §3.2c).
 	 * Signature: fn( string[] $post_types, array $entries, bool $root_switching_on = false ): true|string[]
 	 * — rebuild the named effective CPTs' allowlists against the given
-	 * (candidate) entries; the names of the lists that could not be written
-	 * when any failed (false names none), and a RuntimeException when a
-	 * database read failed (a retry, not a refusal).
+	 * (candidate) entries; true when all were written, else the names of the
+	 * lists that could not be (any other value fails them all), and a
+	 * RuntimeException when a database read failed (a retry, not a refusal).
 	 * Injected by the bootstrap; absent in pure unit contexts.
 	 *
 	 * @var callable|null
@@ -186,9 +186,11 @@ class ConfigStore {
 
 	/**
 	 * Optional preflight seam (S6, root-pages v2). Signature:
-	 * fn( array $candidate ): string[] — walk real URLs through the would-be
-	 * loader decision against the CANDIDATE config and return every URL that
-	 * would 404 (empty = safe). Injected by the bootstrap; absent in pure unit
+	 * fn( array $candidate ): array{would_block: string[], dropped: array<string, string>}
+	 * — walk real URLs through the would-be loader decision against the
+	 * CANDIDATE config and return every URL that would 404 (empty = safe), and
+	 * which of them a status the save drops explains (URL => status); a plain
+	 * list of URLs is read as would-blocks. Injected by the bootstrap; absent in pure unit
 	 * contexts. write() runs it on any save that leaves root mode ACTIVE and
 	 * aborts the save when it reports would-blocks (unless forced).
 	 *
@@ -258,7 +260,7 @@ class ConfigStore {
 	/**
 	 * Inject the root-preflight handler used by write()'s S6 gate.
 	 *
-	 * @param callable $handler fn( array $candidate ): string[] would-block URLs.
+	 * @param callable $handler fn( array $candidate ): array{would_block: string[], dropped: array<string, string>}.
 	 *
 	 * @return void
 	 */
@@ -1051,8 +1053,10 @@ class ConfigStore {
 	 * reserve. A digit-led remainder reserves every digit-led slug; anything
 	 * else is a save warning (derivation_warnings), since the shield would
 	 * answer those addresses before the redirect can. So is a regex source
-	 * that names a shielded base but that no reading here could place — a
-	 * shape the reducers do not know must never fail silently.
+	 * (each of its readings on its own) that names a shielded base but that no
+	 * reading here could place — a shape the reducers do not know must never
+	 * fail silently — and any redirect at or under a blocked section, which
+	 * answers before any reserved slug is looked at.
 	 *
 	 * @param array<string, mixed> $entries        Candidate entries.
 	 * @param string               $locale_pattern Locale pattern body ('' = none).
@@ -1060,21 +1064,18 @@ class ConfigStore {
 	 * @return array<string, string[]> Entry key => reserved slugs.
 	 */
 	private function redirects_below_bases( array $entries, string $locale_pattern ): array {
-		$based = [];
-		foreach ( $entries as $key => $settings ) {
-			if ( is_array( $settings ) && ( ! isset( $settings['enabled'] ) || false !== $settings['enabled'] )
-				&& 'allowlist' === ( $settings['mode'] ?? 'allowlist' ) && true !== ( $settings['root'] ?? false )
-			) {
-				$based[ (string) $key ] = array_values( array_filter( (array) ( $settings['url_base'] ?? [] ), 'is_string' ) );
-			}
-		}
+		$based   = $this->enabled_bases( $entries, 'allowlist' );
+		$blocked = $this->enabled_bases( $entries, 'block' );
 
 		$out = [];
 		foreach ( $this->redirect_sources() as $source ) {
-			$placed = [];
+			// A regex not anchored at the start matches anywhere in the path.
+			$anchored = ! $source['regex'] || 0 === strpos( ltrim( (string) $source['pattern'] ), '^' );
 			foreach ( \Post404Shield\redirect_source_variants( $source['pattern'], $source['regex'], $locale_pattern ) as $variant ) {
+				$placed   = [];
 				$consumed = 0;
 				$reduced  = trim( rtrim( strtolower( \Post404Shield\redirect_pattern_base( $variant, $source['regex'], $consumed ) ), '*' ), '/' );
+				$goes_on  = '' !== trim( (string) substr( $variant, $consumed ), '/?$' );
 				foreach ( $based as $key => $bases ) {
 					foreach ( $bases as $base ) {
 						if ( '' !== $reduced && 0 === strpos( $reduced . '/', $base . '/' ) ) {
@@ -1083,9 +1084,7 @@ class ConfigStore {
 						// The literal stops ABOVE a multi-segment base and the
 						// pattern goes on (`^products/([^/]+)/x-t3`): it may cover
 						// addresses under the base that nothing can reserve.
-						if ( '' !== $reduced && $reduced !== $base && 0 === strpos( $base . '/', $reduced . '/' ) && ! isset( $placed[ $key ] )
-							&& '' !== trim( (string) substr( $variant, $consumed ), '/?$' )
-						) {
+						if ( '' !== $reduced && $reduced !== $base && 0 === strpos( $base . '/', $reduced . '/' ) && ! isset( $placed[ $key ] ) && $goes_on ) {
 							$placed[ $key ]              = true;
 							$this->derivation_warnings[] = sprintf(
 								/* translators: 1: entry name, 2: the redirect source, 3: the URL base. */
@@ -1120,34 +1119,10 @@ class ConfigStore {
 						$reduced
 					);
 				}
-			}
-			if ( ! $source['regex'] ) {
-				continue;
-			}
-			$text = strtolower( str_replace( '\\/', '/', (string) $source['pattern'] ) );
-			// A regex not anchored at the start matches anywhere in the path, so
-			// naming any trailing run of a base's segments (`compatibility/cameras`
-			// for support/compatibility/cameras) is enough to cover it.
-			$anchored = 0 === strpos( ltrim( (string) $source['pattern'] ), '^' );
-			foreach ( $based as $key => $bases ) {
-				foreach ( $bases as $base ) {
-					$segments = explode( '/', $base );
-					$runs     = $anchored ? [ $base ] : array_map( static fn( int $from ): string => implode( '/', array_slice( $segments, $from ) ), array_keys( $segments ) );
-					$named    = false;
-					foreach ( $runs as $run ) {
-						$named = $named || 1 === preg_match( '#(?<![a-z0-9_-])' . preg_quote( $run, '#' ) . '(?![a-z0-9_-])#', $text );
-					}
-					if ( ! isset( $placed[ $key ] ) && $named ) {
-						$this->derivation_warnings[] = sprintf(
-							/* translators: 1: entry name, 2: the redirect source, 3: the URL base. */
-							__( '%1$s: the redirect "%2$s" looks like it covers addresses under /%3$s/, but its pattern could not be read, so nothing was reserved for it and the shield may answer those addresses before the redirect can. Add the slugs it redirects from to Reserved slugs, or move the redirect to the edge.', 'post-404-shield' ),
-							$this->entry_label( $key, (array) $entries[ $key ] ),
-							(string) $source['pattern'],
-							$base
-						);
-						break;
-					}
+				if ( $source['regex'] ) {
+					$this->warn_unread_redirect( $source, $variant, $anchored, $placed, $based, $entries );
 				}
+				$this->warn_blocked_redirect( $source, $variant, $reduced, $goes_on, $anchored, $blocked );
 			}
 		}
 		// Contains / ends-with redirects match anywhere in a URL: nothing can
@@ -1161,7 +1136,7 @@ class ConfigStore {
 		foreach ( $this->unmappable_redirects as $source ) {
 			$text  = strtolower( (string) $source['pattern'] );
 			$named = '';
-			foreach ( $based as $bases ) {
+			foreach ( array_merge( array_values( $based ), array_values( $blocked ) ) as $bases ) {
 				foreach ( $bases as $base ) {
 					if ( '' === $named && 1 === preg_match( '#(?<![a-z0-9_-])' . preg_quote( $base, '#' ) . '(?![a-z0-9_-])#', $text ) ) {
 						$named = $base;
@@ -1182,6 +1157,126 @@ class ConfigStore {
 		}
 		$this->derivation_warnings = array_values( array_unique( $this->derivation_warnings ) );
 		return $out;
+	}
+
+	/**
+	 * The URL bases of the enabled based entries in one mode, per entry.
+	 *
+	 * @param array<string, mixed> $entries Candidate entries.
+	 * @param string               $mode    'allowlist' or 'block'.
+	 *
+	 * @return array<string, string[]>
+	 */
+	private function enabled_bases( array $entries, string $mode ): array {
+		$out = [];
+		foreach ( $entries as $key => $settings ) {
+			if ( is_array( $settings ) && ( ! isset( $settings['enabled'] ) || false !== $settings['enabled'] )
+				&& ( $settings['mode'] ?? 'allowlist' ) === $mode && true !== ( $settings['root'] ?? false )
+			) {
+				$out[ (string) $key ] = array_values( array_filter( (array) ( $settings['url_base'] ?? [] ), 'is_string' ) );
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Whether a regex reading names a base: the base itself (or, unanchored,
+	 * any trailing run of its segments — `compatibility/cameras` for
+	 * support/compatibility/cameras — which is enough to cover it), or its
+	 * first segment followed by a group or class (`products/(cameras|lenses)`,
+	 * `products/[a-z]+`), which may stand for the rest of it.
+	 *
+	 * @param string $variant  One reading of the source, locale-free.
+	 * @param string $base     URL base.
+	 * @param bool   $anchored Whether the source is anchored at the start.
+	 *
+	 * @return bool
+	 */
+	private function redirect_names_base( string $variant, string $base, bool $anchored ): bool {
+		$text     = strtolower( $variant );
+		$segments = explode( '/', $base );
+		$runs     = $anchored ? [ $base ] : array_map( static fn( int $from ): string => implode( '/', array_slice( $segments, $from ) ), array_keys( $segments ) );
+		foreach ( $runs as $run ) {
+			if ( 1 === preg_match( '#(?<![a-z0-9_-])' . preg_quote( $run, '#' ) . '(?![a-z0-9_-])#', $text ) ) {
+				return true;
+			}
+		}
+		return count( $segments ) > 1 && 1 === preg_match( '#(?<![a-z0-9_-])' . preg_quote( $segments[0], '#' ) . '/[(\[]#', $text );
+	}
+
+	/**
+	 * Warn about one reading of a regex redirect that names a shielded base
+	 * but that no reading placed: nothing was reserved for it.
+	 *
+	 * @param array{pattern: string, regex: bool} $source   The redirect.
+	 * @param string                              $variant  One reading of it, locale-free.
+	 * @param bool                                $anchored Whether it is anchored at the start.
+	 * @param array<string, bool>                 $placed   Entries this reading was placed under.
+	 * @param array<string, string[]>             $based    Enabled shielded bases, per entry.
+	 * @param array<string, mixed>                $entries  Candidate entries.
+	 *
+	 * @return void
+	 */
+	private function warn_unread_redirect( array $source, string $variant, bool $anchored, array $placed, array $based, array $entries ): void {
+		foreach ( $based as $key => $bases ) {
+			if ( isset( $placed[ $key ] ) ) {
+				continue;
+			}
+			foreach ( $bases as $base ) {
+				if ( $this->redirect_names_base( $variant, $base, $anchored ) ) {
+					$this->derivation_warnings[] = sprintf(
+						/* translators: 1: entry name, 2: the redirect source, 3: the URL base. */
+						__( '%1$s: the redirect "%2$s" looks like it covers addresses under /%3$s/, but its pattern could not be read, so nothing was reserved for it and the shield may answer those addresses before the redirect can. Add the slugs it redirects from to Reserved slugs, or move the redirect to the edge.', 'post-404-shield' ),
+						$this->entry_label( $key, (array) $entries[ $key ] ),
+						(string) $source['pattern'],
+						$base
+					);
+					break;
+				}
+			}
+		}
+	}
+
+	/**
+	 * Warn about a redirect at or under a blocked section: the block answers
+	 * the bare base and everything under it before any reserved slug is
+	 * looked at, so nothing can let the redirect's 301 through.
+	 *
+	 * @param array{pattern: string, regex: bool} $source   The redirect.
+	 * @param string                              $variant  One reading of it, locale-free.
+	 * @param string                              $reduced  Its literal part.
+	 * @param bool                                $goes_on  Whether the pattern goes on past the literal part.
+	 * @param bool                                $anchored Whether it is anchored at the start.
+	 * @param array<string, string[]>             $blocked  Enabled blocked sections' bases, per entry.
+	 *
+	 * @return void
+	 */
+	private function warn_blocked_redirect( array $source, string $variant, string $reduced, bool $goes_on, bool $anchored, array $blocked ): void {
+		foreach ( $blocked as $key => $bases ) {
+			foreach ( $bases as $base ) {
+				if ( '' !== $reduced && 0 === strpos( $reduced . '/', $base . '/' ) ) {
+					$this->derivation_warnings[] = sprintf(
+						/* translators: 1: blocked section name, 2: the redirect source, 3: the URL base. */
+						__( 'Blocked section %1$s: the redirect "%2$s" is at or under /%3$s/, so the shield answers it with a 404 before the redirect can. Narrow or remove the block, or move the redirect to the edge.', 'post-404-shield' ),
+						$key,
+						(string) $source['pattern'],
+						$base
+					);
+					return;
+				}
+				$above = '' !== $reduced && 0 === strpos( $base . '/', $reduced . '/' ) && $goes_on;
+				if ( $above || ( $source['regex'] && $this->redirect_names_base( $variant, $base, $anchored ) ) ) {
+					$this->derivation_warnings[] = sprintf(
+						/* translators: 1: blocked section name, 2: the redirect source, 3: the URL base. */
+						__( 'Blocked section %1$s: the redirect "%2$s" may cover addresses under /%3$s/, and the shield answers those with a 404 before the redirect can. Narrow or remove the block, or move the redirect to the edge.', 'post-404-shield' ),
+						$key,
+						(string) $source['pattern'],
+						$base
+					);
+					return;
+				}
+			}
+		}
 	}
 
 	/**
@@ -2160,7 +2255,7 @@ class ConfigStore {
 			if ( null !== $this->rebuild_handler && ( [] !== $rebuild_before || $root_switching_on ) ) {
 				( $this->rebuild_handler )( $rebuild_before, $config['entries'], $root_switching_on );
 			}
-		} catch ( \RuntimeException $e ) {
+		} catch ( \Throwable $e ) {
 			error_log( '[post-404-shield] post-save rebuild: ' . $e->getMessage() . '; the previous lists stay until the nightly rebuild.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 		}
 
@@ -2258,6 +2353,7 @@ class ConfigStore {
 		// Dropping a status whose posts are live is refused unless confirmed
 		// (the settings screen's checkbox, or CLI --force): a status a site
 		// uses to hide content may be one the operator means to drop.
+		$dropped = [];
 		if ( ! empty( $flags['allow_status_drop'] ) && [] !== $breaks ) {
 			$dropped = array_values( array_filter( $breaks, static fn( $b ) => isset( $b['status'] ) ) );
 			$breaks  = array_values( array_filter( $breaks, static fn( $b ) => ! isset( $b['status'] ) ) );
@@ -2382,7 +2478,7 @@ class ConfigStore {
 				/* translators: 1: entry name, 2: the URL base its posts really use. */
 				: sprintf( __( 'Coverage check FAILED but the save was FORCED: none of %1$s\'s real URLs sit under its URL bases; they live under /%2$s/.', 'post-404-shield' ), $name( $entry_key ), (string) $home );
 		}
-		if ( (int) ( $coverage['checked'] ?? 0 ) > 0 && [] === $unclaimed ) {
+		if ( (int) ( $coverage['checked'] ?? 0 ) > 0 && [] === $unclaimed && [] === $dropped ) {
 			if ( [] === $breaks ) {
 				/* translators: %d: number of real URLs checked. */
 				$warnings[]     = sprintf( __( 'Coverage check passed — %d real URLs of the changed post types still resolve.', 'post-404-shield' ), (int) $coverage['checked'] );
@@ -2458,9 +2554,25 @@ class ConfigStore {
 	 * @return array<string, mixed>|null The refusal, or null.
 	 */
 	private function root_preflight_gate( array $config, array $flags, array &$warnings, ?array &$accepted_after ): ?array {
-		$would_block = ( $this->preflight_handler )( $config );
-		$accepted    = array_values( array_filter( (array) get_option( self::PREFLIGHT_ACCEPTED_OPTION, [] ), 'is_string' ) );
-		$new_blocks  = array_values( array_diff( $would_block, $accepted ) );
+		$result      = (array) ( $this->preflight_handler )( $config );
+		$would_block = array_values( array_filter( (array) ( $result['would_block'] ?? ( isset( $result['dropped'] ) ? [] : $result ) ), 'is_string' ) );
+		$dropped     = array_filter( (array) ( $result['dropped'] ?? [] ), 'is_string' );
+		$confirmed   = [];
+		// A status dropped as confirmed (the settings screen's checkbox, a
+		// restore's, CLI --force): its posts' 404s are what the save is for.
+		if ( ! empty( $flags['allow_status_drop'] ) && [] !== $dropped ) {
+			$confirmed   = array_intersect( $would_block, array_keys( $dropped ) );
+			$would_block = array_values( array_diff( $would_block, $confirmed ) );
+			if ( [] !== $confirmed ) {
+				$warnings[] = sprintf(
+					/* translators: %d: number of real URLs. */
+					_n( 'Dropped a status as confirmed: %d real URL checked now gets a 404.', 'Dropped a status as confirmed: %d real URLs checked now get a 404.', count( $confirmed ), 'post-404-shield' ),
+					count( $confirmed )
+				);
+			}
+		}
+		$accepted   = array_values( array_filter( (array) get_option( self::PREFLIGHT_ACCEPTED_OPTION, [] ), 'is_string' ) );
+		$new_blocks = array_values( array_diff( $would_block, $accepted ) );
 		// What stays accepted after this save: previously accepted URLs
 		// that still would-block (the rest fixed themselves), plus, on a
 		// forced save, everything it reported.
@@ -2473,15 +2585,23 @@ class ConfigStore {
 				sprintf( __( 'Root preflight FAILED: %d real URL(s) would be served a pre-boot 404 — nothing was saved.', 'post-404-shield' ), count( $new_blocks ) ),
 			];
 			foreach ( array_slice( $new_blocks, 0, 10 ) as $blocked_url ) {
-				/* translators: %s: a URL the root preflight would 404. */
-				$block_errors[] = sprintf( __( 'Would block: %s', 'post-404-shield' ), $blocked_url );
+				$block_errors[] = isset( $dropped[ $blocked_url ] )
+					/* translators: 1: a URL the root preflight would 404, 2: post status. */
+					? sprintf( __( 'Would block: %1$s (status "%2$s" is not listed)', 'post-404-shield' ), $blocked_url, $dropped[ $blocked_url ] )
+					/* translators: %s: a URL the root preflight would 404. */
+					: sprintf( __( 'Would block: %s', 'post-404-shield' ), $blocked_url );
 			}
 			return [
 				'ok'           => false,
 				'root_refused' => true,
 				'errors'       => $block_errors,
 				'warnings'     => $warnings,
+				// Refused only over dropped statuses: the screen offers to confirm.
+				'status_drop'  => [] === array_diff( $new_blocks, array_keys( $dropped ) ),
 			];
+		}
+		if ( [] === $would_block && [] !== $confirmed ) {
+			return null; // Not a pass: the confirmed drop's 404s are said above.
 		}
 		if ( [] === $would_block ) {
 			$warnings[]     = __( 'Root preflight passed — no real URL would be blocked.', 'post-404-shield' );
@@ -2612,6 +2732,8 @@ class ConfigStore {
 	 * @param array<string, mixed> $config         Candidate document.
 	 *
 	 * @return bool False when a list failed to write.
+	 *
+	 * @throws \RuntimeException When a database read failed (write() refuses with a retry).
 	 */
 	private function rebuild_before_swap( array $rebuild_before, array $config ): bool {
 		$live              = $this->artifact();
@@ -2620,9 +2742,24 @@ class ConfigStore {
 		if ( null === $this->rebuild_handler || ( [] === $rebuild_before && ! $root_switching_on ) ) {
 			return true;
 		}
-		$result = ( $this->rebuild_handler )( $rebuild_before, $config['entries'], $root_switching_on );
-		// The handler names the lists that failed; a plain false names none.
-		$this->rebuild_failures = is_array( $result ) ? array_map( 'strval', $result ) : ( false === $result ? $rebuild_before : [] );
+		try {
+			$result = ( $this->rebuild_handler )( $rebuild_before, $config['entries'], $root_switching_on );
+		} catch ( \RuntimeException $e ) {
+			throw $e; // A failed read: write() refuses with a retry.
+		} catch ( \Throwable $e ) {
+			// A bug in a rebuild must refuse the save, never fatal it.
+			error_log( '[post-404-shield] pre-swap rebuild failed: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+			$result = false;
+		}
+		// The handler names the lists that failed; a plain false (or a bug)
+		// fails every list this rebuild was for — root-extras too, when it is
+		// the only one.
+		$asked = array_merge( $rebuild_before, $root_switching_on ? [ 'root-extras' ] : [] );
+		if ( is_array( $result ) ) {
+			$this->rebuild_failures = array_map( 'strval', $result );
+		} else {
+			$this->rebuild_failures = true === $result ? [] : $asked;
+		}
 		return [] === $this->rebuild_failures;
 	}
 

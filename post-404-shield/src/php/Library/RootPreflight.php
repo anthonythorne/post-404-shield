@@ -68,16 +68,7 @@ class RootPreflight {
 	 * @return array<string, string[]> Effective CPT => statuses.
 	 */
 	private function corpus_statuses( array $entries ): array {
-		// What is LIVE, as the based gate measures: an option edited over
-		// WP-CLI and published with `config write` equals the candidate, so
-		// only the artifact still knows the statuses it is about to drop.
-		$live = function_exists( '\Post404Shield\read_config' ) && function_exists( '\Post404Shield\shield_dir' )
-			? \Post404Shield\read_config( \Post404Shield\shield_dir() . '/config.php' )
-			: null;
-		if ( null === $live && function_exists( 'get_option' ) ) {
-			$live = get_option( ConfigStore::OPTION, null );
-		}
-		$sources = [ $entries, is_array( $live['entries'] ?? null ) ? $live['entries'] : [] ];
+		$sources = [ $entries, $this->live_entries() ];
 		$out     = [];
 		foreach ( $sources as $source ) {
 			foreach ( $source as $key => $settings ) {
@@ -94,6 +85,81 @@ class RootPreflight {
 			}
 		}
 		return array_map( 'array_keys', $out );
+	}
+
+	/**
+	 * The LIVE entries, as the based gate measures them: an option edited
+	 * over WP-CLI and published with `config write` equals the candidate, so
+	 * only the artifact still knows the statuses it is about to drop.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private function live_entries(): array {
+		$live = function_exists( '\Post404Shield\read_config' ) && function_exists( '\Post404Shield\shield_dir' )
+			? \Post404Shield\read_config( \Post404Shield\shield_dir() . '/config.php' )
+			: null;
+		if ( null === $live && function_exists( 'get_option' ) ) {
+			$live = get_option( ConfigStore::OPTION, null );
+		}
+		return is_array( $live['entries'] ?? null ) ? $live['entries'] : [];
+	}
+
+	/**
+	 * The lines of posts that are served only because the LIVE config lists
+	 * their status for a root type and the candidate no longer does: a
+	 * would-block URL among them is a dropped status, which the operator can
+	 * confirm, not a broken config.
+	 *
+	 * @param AllowlistBuilder                   $builder         Candidate builder.
+	 * @param array<string, mixed>               $entries         Candidate entries.
+	 * @param array<string, array<string, bool>> $sets      Candidate lines per effective CPT, as sets.
+	 *
+	 * @return array<string, string> Line => the dropped status.
+	 */
+	private function dropped_status_lines( AllowlistBuilder $builder, array $entries, array $sets ): array {
+		$listed = static function ( array $source ): array {
+			$out = [];
+			foreach ( $source as $key => $settings ) {
+				if ( is_array( $settings ) && true === ( $settings['root'] ?? false ) && ( ! isset( $settings['enabled'] ) || false !== $settings['enabled'] ) ) {
+					$type         = (string) ( $settings['post_type'] ?? $key );
+					$out[ $type ] = array_merge( $out[ $type ] ?? [ 'publish' ], array_map( 'strval', (array) ( $settings['post_status'] ?? [] ) ) );
+				}
+			}
+			return $out;
+		};
+		$now    = $listed( $entries );
+		$lines  = [];
+		foreach ( $listed( $this->live_entries() ) as $type => $was ) {
+			if ( ! isset( $now[ $type ] ) ) {
+				continue; // The type left root mode: not a status drop.
+			}
+			foreach ( array_diff( array_unique( $was ), $now[ $type ] ) as $status ) {
+				foreach ( $builder->lines_for( (string) $type, [ (string) $status ] ) as $line ) {
+					if ( ! isset( $sets[ $type ][ $line ] ) ) {
+						$lines[ $line ] = (string) $status;
+					}
+				}
+			}
+		}
+		return $lines;
+	}
+
+	/**
+	 * The allowlist line a probed URL stands for: its path without the
+	 * locale, the trailing slash or a pagination tail.
+	 *
+	 * @param string $url            URL path.
+	 * @param string $locale_pattern Locale pattern body ('' = none).
+	 *
+	 * @return string
+	 */
+	private function line_of( string $url, string $locale_pattern ): string {
+		$path = trim( $url, '/' );
+		if ( '' !== $locale_pattern ) {
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- an engine error on a config-supplied pattern must read as "no locale".
+			$path = (string) @preg_replace( '#^(?:' . $locale_pattern . ')(?:/|$)#', '', $path );
+		}
+		return (string) preg_replace( '#/page/\d+$#', '', $path );
 	}
 
 	/**
@@ -233,7 +299,7 @@ class RootPreflight {
 	 * @param array<string, mixed> $candidate Candidate config document (entries
 	 *                                        + excluded_bases snapshot present).
 	 *
-	 * @return array{checked: int, would_block: string[], warn_block: string[]}
+	 * @return array{checked: int, would_block: string[], warn_block: string[], dropped: array<string, string>} `dropped`: the would-blocks a dropped status explains, URL => status.
 	 */
 	public function run( array $candidate ): array {
 		$entries = (array) ( $candidate['entries'] ?? [] );
@@ -355,10 +421,21 @@ class RootPreflight {
 			}
 		}
 
+		// Which would-blocks are a status this save drops (see dropped_status_lines()).
+		$dropped       = [];
+		$dropped_lines = [] === $would_block ? [] : $this->dropped_status_lines( $builder, $entries, $sets );
+		foreach ( $would_block as $url ) {
+			$line = $this->line_of( $url, $locale_pattern );
+			if ( isset( $dropped_lines[ $line ] ) ) {
+				$dropped[ $url ] = $dropped_lines[ $line ];
+			}
+		}
+
 		return [
 			'checked'     => count( $urls ),
 			'would_block' => $would_block,
 			'warn_block'  => $warn_block,
+			'dropped'     => $dropped,
 		];
 	}
 
