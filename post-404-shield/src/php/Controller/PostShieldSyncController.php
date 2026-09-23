@@ -383,9 +383,21 @@ class PostShieldSyncController {
 	 * @return array<int, string> Post ID => address.
 	 */
 	private function subtree_uris( string $type, array $roots ): array {
+		global $wpdb;
+		// Straight from the table, not get_post_status(): loading the posts
+		// into the object cache here, before core moves them, leaves WPML
+		// reading their old parent at delete_post, and it then skips moving
+		// their translations to match.
+		$statuses = [];
+		if ( [] !== $roots ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare -- one placeholder per ID.
+			foreach ( (array) $wpdb->get_results( $wpdb->prepare( "SELECT ID, post_status FROM {$wpdb->posts} WHERE ID IN (" . implode( ', ', array_fill( 0, count( $roots ), '%d' ) ) . ')', array_map( 'intval', $roots ) ) ) as $row ) {
+				$statuses[ (int) $row->ID ] = (string) $row->post_status;
+			}
+		}
 		$ids = [];
 		foreach ( $roots as $root ) {
-			if ( $this->was_served( $type, (string) get_post_status( $root ) ) ) {
+			if ( $this->was_served( $type, $statuses[ (int) $root ] ?? '' ) ) {
 				$ids[] = (int) $root;
 			}
 			foreach ( $this->descendant_statuses( (int) $root, $type ) as $child => $child_status ) {

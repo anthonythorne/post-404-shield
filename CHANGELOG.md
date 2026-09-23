@@ -217,7 +217,9 @@ Moved out of the sites that used it into its own repository.
   type's rebuild from the Maintenance tab rebuilds root-extras too.
 - WPML translations of a deleted parent's children keep their addresses: they
   are appended after WPML moves them, and again after a bulk delete's deferred
-  sync at shutdown.
+  sync at shutdown. The delete-time snapshot reads statuses straight from the
+  table: loading the children into the object cache there left WPML reading
+  their old parent, so it skipped moving their translations at all.
 - Tests: the pre-swap rebuild contract, an append during a stream (two
   processes), the redirect shapes above.
 
