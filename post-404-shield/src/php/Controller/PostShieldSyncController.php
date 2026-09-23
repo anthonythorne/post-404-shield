@@ -6,9 +6,9 @@
  *   1. Instant protection (this controller) — when a managed post goes live, its
  *      slug is APPENDED to the allowlist file synchronously, in the same request:
  *      on publish, scheduled auto-publish, slug rename, or a PublishPress revision
- *      that renames the live post. The append is a pure O_APPEND (it never reads
- *      the file), so concurrent publishes — including many translations sharing a
- *      slug — cannot race; the only cost is a duplicate line.
+ *      that renames the live post. The append skips lines already listed and
+ *      writes under the list's lock, so concurrent publishes — including many
+ *      translations sharing a slug — and a rebuild in flight cannot lose it.
  *   2. Authoritative cleanup (PostShieldCronController) — a DAILY full rebuild
  *      reads the DB and rewrites each file deduped, dropping stale slugs
  *      (unpublish / trash / delete / the old slug after a rename).
@@ -53,6 +53,15 @@ class PostShieldSyncController {
 	private array $post_types;
 
 	/**
+	 * Posts whose URL changed in this request (slug or parent), recorded on
+	 * post_updated — which fires before save_post — so the save's full-path
+	 * append walks the subtree only when descendants' URLs actually moved.
+	 *
+	 * @var array<int, true>
+	 */
+	private array $moved = [];
+
+	/**
 	 * Construct the sync controller for a set of managed post types.
 	 *
 	 * @param AllowlistBuilder $builder    Shared builder.
@@ -91,6 +100,9 @@ class PostShieldSyncController {
 		if ( $this->builder->has_root_entries() ) {
 			add_action( 'add_attachment', [ $this, 'handle_attachment' ], 10, 1 );
 			add_action( 'edit_attachment', [ $this, 'handle_attachment' ], 10, 1 );
+			// Media on a draft is left out of the union (no public page yet);
+			// it joins the instant its post goes live.
+			add_action( 'transition_post_status', [ $this, 'handle_parent_live' ], 10, 3 );
 		}
 
 		// Every managed type, root or based: core stores the outgoing slug in
@@ -110,6 +122,17 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	public function handle_attachment( int $post_id ): void {
+		// Same rule as the rebuild (AllowlistBuilder::attachment_lines()): media
+		// on a post that is not live yet has no page, so listing it would
+		// reveal the unreleased post. A parent that no longer exists counts as
+		// unattached, as it does in core.
+		$parent = (int) get_post_field( 'post_parent', $post_id );
+		if ( $parent > 0 ) {
+			$parent_status = get_post_status( $parent );
+			if ( false !== $parent_status && ! in_array( $parent_status, $this->builder->attachment_parent_statuses(), true ) ) {
+				return;
+			}
+		}
 		$slug = get_post_field( 'post_name', $post_id );
 		$uri  = get_page_uri( $post_id );
 		if ( is_string( $uri ) && '' !== $uri ) {
@@ -118,6 +141,27 @@ class PostShieldSyncController {
 		if ( is_string( $slug ) && '' !== $slug && $slug !== $uri ) {
 			$this->builder->append_root_extra( $slug );
 		}
+	}
+
+	/**
+	 * A post went live: append its media to the root-extras union, which leaves
+	 * out media whose post is not live yet.
+	 *
+	 * @param string   $new_status New post status.
+	 * @param string   $old_status Old post status.
+	 * @param \WP_Post $post       Post being transitioned.
+	 *
+	 * @return void
+	 */
+	public function handle_parent_live( string $new_status, string $old_status, \WP_Post $post ): void {
+		if ( 'attachment' === $post->post_type ) {
+			return;
+		}
+		$live = $this->builder->attachment_parent_statuses();
+		if ( ! in_array( $new_status, $live, true ) || in_array( $old_status, $live, true ) ) {
+			return;
+		}
+		$this->builder->append_root_extras( $this->builder->attachment_lines( (int) $post->ID ) );
 	}
 
 	/**
@@ -134,6 +178,9 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	public function handle_post_updated( int $post_id, \WP_Post $post_after, \WP_Post $post_before ): void {
+		if ( $post_before->post_name !== $post_after->post_name || $post_before->post_parent !== $post_after->post_parent ) {
+			$this->moved[ $post_id ] = true;
+		}
 		if ( ! $this->builder->is_root_type( $post_after->post_type ) ) {
 			$this->append_based_old_slug( $post_after, $post_before );
 			return;
@@ -151,15 +198,15 @@ class PostShieldSyncController {
 		$this->builder->append_root_extra( $old_slug );
 
 		// Old parent context: the address the post lived at before this save.
-		if ( $post_before->post_parent > 0 ) {
+		if ( $post_before->post_parent > 0 && is_post_type_hierarchical( $post_after->post_type ) ) {
 			$old_parent_uri = get_page_uri( $post_before->post_parent );
 			if ( is_string( $old_parent_uri ) && '' !== $old_parent_uri ) {
 				$this->builder->append_root_extra( $old_parent_uri . '/' . $old_slug );
 			}
 		}
 		// Current parent context (renamed in place under the same parent).
-		$uri = get_page_uri( $post_id );
-		if ( is_string( $uri ) && false !== strpos( $uri, '/' ) ) {
+		$uri = $this->builder->uris_for( $post_after->post_type, [ $post_id ] )[ $post_id ] ?? '';
+		if ( false !== strpos( $uri, '/' ) ) {
 			$this->builder->append_root_extra( substr( $uri, 0, (int) strrpos( $uri, '/' ) ) . '/' . $old_slug );
 		}
 	}
@@ -237,9 +284,10 @@ class PostShieldSyncController {
 
 	/**
 	 * PublishPress Revisions applied/published a revision to a managed post. It can
-	 * rename the live post via a direct DB write that never fires save_post — but
-	 * it cleans the post cache before firing these actions, so the current
-	 * (possibly renamed) slug reads back correctly here. Append it instantly. Both
+	 * rename the live post via a direct DB write that never fires save_post or
+	 * post_updated — but it cleans the post cache before firing these actions, so
+	 * the current (possibly renamed) slug reads back correctly here. Append it
+	 * instantly, treating it as moved since no before/after is available. Both
 	 * actions pass the live post ID first.
 	 *
 	 * @param int $post_id Published/updated live post ID.
@@ -252,55 +300,58 @@ class PostShieldSyncController {
 		if ( ! is_string( $post_type ) || ! in_array( $post_type, $this->post_types, true ) ) {
 			return;
 		}
-		$this->fast_append( $post_id, $post_type );
+		$this->fast_append( $post_id, $post_type, true );
 	}
 
 	/**
-	 * Append the post's current slug if it is in a shielding status, so a just-live
-	 * or just-renamed post is protected in the same request. Pure append (no
-	 * read-modify-write), so concurrent publishes — including translations sharing
-	 * a slug — cannot race; a duplicate line is the only cost, and the daily
-	 * rebuild compacts it. A non-shielding status (draft/trash) appends nothing;
-	 * removal is the daily rebuild's job. Every caller fires after the post cache
-	 * is refreshed, so the slug reads back correctly.
+	 * Append the post's current slug if it is in a shielding status, so a
+	 * just-live or just-renamed post is protected in the same request. Lines
+	 * already listed are skipped, so a content-only edit writes nothing; the
+	 * daily rebuild compacts anything else. A non-shielding status (draft/
+	 * trash) appends nothing for the post itself; removal is the daily
+	 * rebuild's job. Every caller fires after the post cache is refreshed, so
+	 * the slug reads back correctly.
 	 *
 	 * @param int    $post_id   Post ID.
 	 * @param string $post_type Managed post type.
+	 * @param bool   $moved     The post's URL may have changed without a
+	 *                          post_updated (a PublishPress revision).
 	 *
 	 * @return void
 	 */
-	private function fast_append( int $post_id, string $post_type ): void {
+	private function fast_append( int $post_id, string $post_type, bool $moved = false ): void {
 		$status = get_post_status( $post_id );
-		if ( ! is_string( $status ) || ! $this->builder->is_shielding_status( $post_type, $status ) ) {
-			return;
-		}
+		$live   = is_string( $status ) && $this->builder->is_shielding_status( $post_type, $status );
 
 		// full-path entries store the whole hierarchical sub-path, not the slug —
 		// and a slug/parent change on a page changes EVERY descendant's URI, so
-		// the whole affected subtree is re-appended in the same request (guard a
-		// of the full-path fail-closed set; children must not 404 until the
-		// nightly rebuild). Appends are pure O_APPEND — duplicates are harmless
-		// and the daily rebuild compacts them.
+		// the affected subtree is re-appended in the same request (guard a of
+		// the full-path fail-closed set; children must not 404 until the
+		// nightly rebuild). Only on a move: a content edit changes no URL. The
+		// walk runs even when the moved post itself is a draft or private —
+		// WordPress still serves its published children at the new path.
 		if ( 'full-path' === $this->builder->match_for( $post_type ) ) {
-			$uri = get_page_uri( $post_id );
-			if ( ! is_string( $uri ) || '' === $uri ) {
+			$ids = $live ? [ $post_id ] : [];
+			if ( ( $moved || isset( $this->moved[ $post_id ] ) ) && is_post_type_hierarchical( $post_type ) ) {
+				foreach ( $this->descendant_statuses( $post_id, $post_type ) as $child_id => $child_status ) {
+					if ( $this->builder->is_shielding_status( $post_type, $child_status ) ) {
+						$ids[] = $child_id;
+					}
+				}
+			}
+			if ( [] === $ids ) {
 				return;
 			}
-			$lines = [ $uri ];
-			foreach ( $this->descendant_statuses( $post_id, $post_type ) as $child_id => $child_status ) {
-				if ( ! $this->builder->is_shielding_status( $post_type, $child_status ) ) {
-					continue;
-				}
-				$child_uri = get_page_uri( $child_id );
-				if ( is_string( $child_uri ) && '' !== $child_uri ) {
-					$lines[] = $child_uri;
-				}
+			$this->builder->append_slugs( $post_type, array_values( $this->builder->uris_for( $post_type, $ids ) ) );
+			if ( $live ) {
+				$this->purge_page_cache( $post_id );
 			}
-			$this->builder->append_slugs( $post_type, $lines );
-			$this->purge_page_cache( $post_id );
 			return;
 		}
 
+		if ( ! $live ) {
+			return;
+		}
 		$slug = get_post_field( 'post_name', $post_id );
 		if ( is_string( $slug ) && '' !== $slug ) {
 			$this->builder->append_slug( $post_type, $slug );
@@ -314,8 +365,7 @@ class PostShieldSyncController {
 	 *
 	 * Runs on save_post, so the query count is bounded rather than growing with
 	 * the subtree: one query answers the common case (a leaf — no children);
-	 * otherwise one read of the type's parent/status map, walked in memory, and
-	 * one cache prime so each descendant's get_page_uri() is served from cache.
+	 * otherwise one read of the type's parent/status map, walked in memory.
 	 * Traversal ignores status on purpose: a draft's published child still has
 	 * its URI changed by a move, so the walk must pass through the draft.
 	 *
@@ -364,10 +414,6 @@ class PostShieldSyncController {
 					$queue[]         = $child;
 				}
 			}
-		}
-
-		if ( [] !== $found && function_exists( '_prime_post_caches' ) ) {
-			_prime_post_caches( array_keys( $found ), false, false );
 		}
 
 		return $found;

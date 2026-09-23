@@ -23,11 +23,25 @@ namespace Post404Shield\Library;
 class AllowlistBuilder {
 
 	/**
-	 * Managed post types, keyed by CPT name (from config/allowed-post-types.php).
+	 * Seconds a writer waits for a list directory's lock before going ahead.
+	 */
+	private const LOCK_WAIT = 20;
+
+	/**
+	 * Config entries, keyed by entry key (the artifact's or a candidate's).
 	 *
 	 * @var array<string, array<string, mixed>>
 	 */
 	private array $config;
+
+	/**
+	 * Allowlist files this builder failed to write, keyed by path. A caller
+	 * that must not proceed over a stale list (the pre-swap rebuild in
+	 * ConfigStore::write()) reads it through failed_writes().
+	 *
+	 * @var array<string, true>
+	 */
+	private array $failed = [];
 
 	/**
 	 * Construct the builder for a set of managed post types.
@@ -107,12 +121,122 @@ class AllowlistBuilder {
 			error_log( '[post-404-shield] rebuild: post type "' . $post_type . '" is NOT registered — its allowlist will be empty and that base fails open. Fix the entry\'s post type on Settings → Post 404 Shield.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 		}
 
-		$match    = $this->match_for( $post_type );
-		$statuses = $this->post_statuses_for( $post_type );
+		$match = $this->match_for( $post_type );
+		$file  = $this->get_allowlist_file( $post_type );
 
-		$allow = $this->build_allowlist( $this->raw_lines( $post_type, $match, $statuses ), $match );
-		$this->write_allowlist_atomically( $allow, $this->get_allowlist_file( $post_type ) );
-		return count( $allow );
+		// Held from before the SELECT until after the rename, so an instant
+		// append (a publish in another request) either lands before the read
+		// or waits for the new file — never onto the inode the rename replaces.
+		$lock = $this->lock( dirname( $file ) );
+		try {
+			// A builder made before a concurrent save — the daily cron's, or a
+			// queued job's — can hold a stale match mode. Writing a SLUG list
+			// for a type the live artifact now serves FULL-PATH would 404 every
+			// nested real URL; that is the one unsafe direction (a slug artifact
+			// reading a full-path list still matches every top-level slug). The
+			// save that switched the mode rebuilt the list itself.
+			if ( 'slug' === $match && 'full-path' === $this->live_match_for( $post_type ) ) {
+				error_log( '[post-404-shield] rebuild: skipped "' . $post_type . '" — this rebuild started before a save switched it to full-path, which rebuilt it already.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+				return 0;
+			}
+
+			$statuses = $this->post_statuses_for( $post_type );
+			$allow    = $this->build_allowlist( $this->raw_lines( $post_type, $match, $statuses ), $match );
+			$this->write_or_record( $allow, $file, $post_type );
+			return count( $allow );
+		} finally {
+			$this->unlock( $lock );
+		}
+	}
+
+	/**
+	 * Allowlist files that failed to write in this builder's lifetime. The
+	 * previous file stays in place for each one.
+	 *
+	 * @return string[] Absolute paths.
+	 */
+	public function failed_writes(): array {
+		return array_keys( $this->failed );
+	}
+
+	/**
+	 * Write a list, logging and recording a failure rather than dropping it.
+	 *
+	 * @param array<string, true> $allow Membership map.
+	 * @param string              $file  Absolute destination path.
+	 * @param string              $label Type (or union) name for the log line.
+	 *
+	 * @return void
+	 */
+	private function write_or_record( array $allow, string $file, string $label ): void {
+		if ( $this->write_allowlist_atomically( $allow, $file ) ) {
+			unset( $this->failed[ $file ] );
+			return;
+		}
+		$this->failed[ $file ] = true;
+		error_log( '[post-404-shield] rebuild: could not write the allowlist for "' . $label . '" (' . $file . ') — the previous list stays in place.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+	}
+
+	/**
+	 * The format the LIVE artifact serves a type in, or '' when there is no
+	 * valid artifact (nothing reads the list yet) or the reader is not loaded.
+	 *
+	 * @param string $post_type Effective CPT name.
+	 *
+	 * @return string `slug`, `full-path` or ''.
+	 */
+	private function live_match_for( string $post_type ): string {
+		if ( ! function_exists( '\Post404Shield\read_config' ) || ! function_exists( '\Post404Shield\shield_dir' ) ) {
+			return '';
+		}
+		$live = \Post404Shield\read_config( \Post404Shield\shield_dir() . '/config.php' );
+		if ( null === $live ) {
+			return '';
+		}
+		return ( new self( (array) $live['entries'] ) )->match_for( $post_type );
+	}
+
+	/**
+	 * Take a list directory's writer lock: shared by rebuilds and instant
+	 * appends so the two never interleave. Bounded — after the wait it goes
+	 * ahead unlocked (the old race, never a hung editor save) — and a
+	 * filesystem without flock() simply proceeds unlocked.
+	 *
+	 * @param string $dir List directory.
+	 *
+	 * @return resource|null Lock handle, or null when not held.
+	 */
+	private function lock( string $dir ) {
+		if ( ! is_dir( $dir ) ) {
+			return null; // First build: nothing to append to yet.
+		}
+		$handle = fopen( $dir . '/.lock', 'c' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		if ( false === $handle ) {
+			return null;
+		}
+		$deadline = microtime( true ) + self::LOCK_WAIT;
+		do {
+			if ( flock( $handle, LOCK_EX | LOCK_NB ) ) {
+				return $handle;
+			}
+			usleep( 50000 );
+		} while ( microtime( true ) < $deadline );
+		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		return null;
+	}
+
+	/**
+	 * Release a lock taken by lock().
+	 *
+	 * @param resource|null $handle Lock handle.
+	 *
+	 * @return void
+	 */
+	private function unlock( $handle ): void {
+		if ( is_resource( $handle ) ) {
+			flock( $handle, LOCK_UN );
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		}
 	}
 
 	/**
@@ -374,8 +498,7 @@ class AllowlistBuilder {
 	 * @return string A constant SQL fragment (never input-derived).
 	 */
 	private function top_level_clause( string $post_type, string $alias = '' ): string {
-		$object = function_exists( 'get_post_type_object' ) ? get_post_type_object( $post_type ) : null;
-		if ( null !== $object && ! $object->hierarchical ) {
+		if ( ! $this->is_hierarchical( $post_type ) ) {
 			return '';
 		}
 		return 'p.' === $alias ? 'AND p.post_parent = 0' : 'AND post_parent = 0';
@@ -469,10 +592,32 @@ class AllowlistBuilder {
 		if ( [] === $lines || ! is_file( $file ) ) {
 			return 0;
 		}
-		// The file always ends in "\n", so appending "a\nb\n" keeps every slug
-		// newline-wrapped for the loader's "\n{slug}\n" match.
-		$written = file_put_contents( $file, implode( "\n", $lines ) . "\n", FILE_APPEND | LOCK_EX ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_file_put_contents
-		return false === $written ? 0 : count( $lines );
+		$lock = $this->lock( dirname( $file ) );
+		try {
+			// Skip lines already listed: a content-only edit re-saves a post
+			// many times a day, and each duplicate is bytes the loader scans on
+			// every request until the nightly compaction.
+			$raw = file_get_contents( $file ); // phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
+			if ( is_string( $raw ) ) {
+				$lines = array_values(
+					array_filter(
+						array_unique( $lines ),
+						static function ( string $line ) use ( $raw ): bool {
+							return false === strpos( $raw, "\n" . $line . "\n" );
+						}
+					)
+				);
+			}
+			if ( [] === $lines ) {
+				return 0;
+			}
+			// The file always ends in "\n", so appending "a\nb\n" keeps every slug
+			// newline-wrapped for the loader's "\n{slug}\n" match.
+			$written = file_put_contents( $file, implode( "\n", $lines ) . "\n", FILE_APPEND | LOCK_EX ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_file_put_contents
+			return false === $written ? 0 : count( $lines );
+		} finally {
+			$this->unlock( $lock );
+		}
 	}
 
 	/**
@@ -511,11 +656,17 @@ class AllowlistBuilder {
 
 	/**
 	 * Fetch every FULL hierarchical sub-path for a post type in the given
-	 * statuses — the `match: full-path` data source. IDs come from a direct SQL
-	 * read (ANY parent, unlike the top-level slug query); each ID's path is then
-	 * resolved via get_page_uri(), which walks post_parent on raw post data —
-	 * unfiltered by WPML, so every translation's real path lands in the shared
-	 * allowlist regardless of the current admin/cron language.
+	 * statuses — the `match: full-path` data source. Rows come from one direct
+	 * SQL read (ANY parent, unlike the top-level slug query) and each path is
+	 * built in memory by resolve_uris() — unfiltered by WPML, so every
+	 * translation's real path lands in the shared allowlist regardless of the
+	 * current admin/cron language.
+	 *
+	 * A NON-hierarchical type's URL ignores post_parent (WordPress serves it at
+	 * `/{base}/{slug}/`, or `/{slug}/` for `post` under `/%postname%/`), so its
+	 * line is the bare post_name even when a stray post_parent is set —
+	 * get_page_uri() would prefix the parent and list an address WordPress
+	 * never serves.
 	 *
 	 * @param string   $post_type CPT name.
 	 * @param string[] $statuses  Post statuses to include (already validated).
@@ -528,9 +679,9 @@ class AllowlistBuilder {
 		$status_placeholders = implode( ', ', array_fill( 0, count( $statuses ), '%s' ) );
 
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-		$ids = $wpdb->get_col(
+		$rows = $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT ID FROM {$wpdb->posts}
+				"SELECT ID, post_name, post_parent FROM {$wpdb->posts}
 				 WHERE post_type = %s
 				   AND post_status IN ($status_placeholders)
 				   AND post_name <> ''",
@@ -539,15 +690,154 @@ class AllowlistBuilder {
 		);
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 
-		$paths = [];
-		foreach ( $ids as $id ) {
-			$uri = get_page_uri( (int) $id );
-			if ( is_string( $uri ) && '' !== $uri ) {
-				$paths[] = $uri;
+		if ( ! $this->is_hierarchical( $post_type ) ) {
+			return array_map(
+				static function ( $row ): string {
+					return (string) $row->post_name;
+				},
+				(array) $rows
+			);
+		}
+		return array_values( $this->resolve_uris( (array) $rows ) );
+	}
+
+	/**
+	 * URL paths of specific posts of one type, derived exactly as the rebuild
+	 * derives them (fetch_paths()), so an instant append and the nightly
+	 * rebuild always write the same line for the same post.
+	 *
+	 * @param string $post_type Effective CPT name.
+	 * @param int[]  $ids       Post IDs.
+	 *
+	 * @return array<int, string> ID => path; posts without a slug are omitted.
+	 */
+	public function uris_for( string $post_type, array $ids ): array {
+		$rows = $this->fetch_nodes( $ids );
+		$rows = array_filter(
+			$rows,
+			static function ( array $node ): bool {
+				return '' !== $node[0];
 			}
+		);
+		if ( ! $this->is_hierarchical( $post_type ) ) {
+			return array_map(
+				static function ( array $node ): string {
+					return $node[0];
+				},
+				$rows
+			);
+		}
+		$objects = [];
+		foreach ( $rows as $id => $node ) {
+			$objects[] = (object) [
+				'ID'          => $id,
+				'post_name'   => $node[0],
+				'post_parent' => $node[1],
+			];
+		}
+		return $this->resolve_uris( $objects );
+	}
+
+	/**
+	 * Whether a type's URLs nest under their parents. An unregistered type is
+	 * treated as hierarchical — the historical get_page_uri() behaviour.
+	 *
+	 * @param string $post_type Effective CPT name.
+	 *
+	 * @return bool
+	 */
+	private function is_hierarchical( string $post_type ): bool {
+		$object = function_exists( 'get_post_type_object' ) ? get_post_type_object( $post_type ) : null;
+		return null === $object || (bool) $object->hierarchical;
+	}
+
+	/**
+	 * Build each row's URI in memory — the same walk as get_page_uri():
+	 * prepend every ancestor's post_name up the post_parent chain, skip an
+	 * ancestor with no slug, stop at a missing post or a cycle.
+	 *
+	 * The core helper goes through get_post(), which on a cold cache runs one
+	 * `SELECT *` (post_content included) per row and keeps each WP_Post in the
+	 * object cache — a full-path or root-extras build over a large site is
+	 * then tens of thousands of queries and can exhaust memory. Here the rows
+	 * are already loaded and ancestors outside them are fetched in batches of
+	 * three columns.
+	 *
+	 * @param object[] $rows Rows with `ID`, `post_name`, `post_parent`.
+	 *
+	 * @return array<int, string> ID => URI.
+	 */
+	private function resolve_uris( array $rows ): array {
+		$nodes = [];
+		foreach ( $rows as $row ) {
+			$nodes[ (int) $row->ID ] = [ (string) $row->post_name, (int) $row->post_parent ];
 		}
 
-		return $paths;
+		// Load every ancestor that is not a row itself, one level per pass.
+		$missing = [];
+		foreach ( $nodes as $node ) {
+			if ( 0 !== $node[1] && ! isset( $nodes[ $node[1] ] ) ) {
+				$missing[ $node[1] ] = true;
+			}
+		}
+		while ( [] !== $missing ) {
+			$found = $this->fetch_nodes( array_keys( $missing ) );
+			$next  = [];
+			foreach ( array_keys( $missing ) as $id ) {
+				// A parent that no longer exists ends its chain, as in core.
+				$nodes[ $id ] = $found[ $id ] ?? null;
+				if ( null !== $nodes[ $id ] && 0 !== $nodes[ $id ][1] && ! array_key_exists( $nodes[ $id ][1], $nodes ) ) {
+					$next[ $nodes[ $id ][1] ] = true;
+				}
+			}
+			$missing = $next;
+		}
+
+		$uris = [];
+		foreach ( $rows as $row ) {
+			$id     = (int) $row->ID;
+			$uri    = (string) $row->post_name;
+			$seen   = [ $id => true ];
+			$parent = (int) $row->post_parent;
+			while ( 0 !== $parent && ! isset( $seen[ $parent ] ) && null !== ( $nodes[ $parent ] ?? null ) ) {
+				$seen[ $parent ] = true;
+				if ( '' !== $nodes[ $parent ][0] ) {
+					$uri = $nodes[ $parent ][0] . '/' . $uri;
+				}
+				$parent = $nodes[ $parent ][1];
+			}
+			$uris[ $id ] = $uri;
+		}
+		return $uris;
+	}
+
+	/**
+	 * Slug and parent (`post_name`, `post_parent`) of the given posts, any
+	 * type or status.
+	 *
+	 * @param int[] $ids Post IDs.
+	 *
+	 * @return array<int, array{0: string, 1: int}> ID => [post_name, post_parent].
+	 */
+	private function fetch_nodes( array $ids ): array {
+		global $wpdb;
+
+		$nodes = [];
+		foreach ( array_chunk( array_values( array_unique( array_map( 'intval', $ids ) ) ), 1000 ) as $chunk ) {
+			$placeholders = implode( ', ', array_fill( 0, count( $chunk ), '%d' ) );
+			// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			$rows = $wpdb->get_results(
+				$wpdb->prepare(
+					"SELECT ID, post_name, post_parent FROM {$wpdb->posts} WHERE ID IN ($placeholders)",
+					$chunk
+				)
+			);
+			// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			foreach ( (array) $rows as $row ) {
+				$nodes[ (int) $row->ID ] = [ (string) $row->post_name, (int) $row->post_parent ];
+			}
+		}
+		return $nodes;
 	}
 
 	/**
@@ -561,31 +851,65 @@ class AllowlistBuilder {
 	 * symmetric with the root matcher, whose charset guard passes those
 	 * requests to WordPress anyway (fail-open both sides).
 	 *
+	 * Only attachments whose page WordPress can serve: unattached (or the
+	 * parent is gone — core then treats it as unattached), or attached to a
+	 * post in one of attachment_parent_statuses(). An attachment on a draft or
+	 * scheduled post has no public page, and listing it would let an anonymous
+	 * request confirm the unreleased post's media exists (allowed vs blocked).
+	 * The sync controller appends a post's media when the post goes live.
+	 *
+	 * @param int|null $parent_id Only this parent's attachments; null for all.
+	 *
 	 * @return string[] Attachment URI + slug lines (unvalidated).
 	 */
-	private function fetch_attachment_lines(): array {
+	public function attachment_lines( ?int $parent_id = null ): array {
 		global $wpdb;
 
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		$statuses     = $this->attachment_parent_statuses();
+		$placeholders = implode( ', ', array_fill( 0, count( $statuses ), '%s' ) );
+		$args         = $statuses;
+		$only_parent  = '';
+		if ( null !== $parent_id ) {
+			$only_parent = 'AND a.post_parent = %d';
+			$args[]      = $parent_id;
+		}
+
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$rows = $wpdb->get_results(
-			"SELECT ID, post_name FROM {$wpdb->posts}
-			 WHERE post_type = 'attachment'
-			   AND post_status = 'inherit'
-			   AND post_name <> ''"
+			$wpdb->prepare(
+				"SELECT a.ID, a.post_name, a.post_parent FROM {$wpdb->posts} a
+				 LEFT JOIN {$wpdb->posts} parent ON parent.ID = a.post_parent
+				 WHERE a.post_type = 'attachment'
+				   AND a.post_status = 'inherit'
+				   AND a.post_name <> ''
+				   AND ( a.post_parent = 0 OR parent.ID IS NULL OR parent.post_status IN ($placeholders) )
+				   $only_parent",
+				$args
+			)
 		);
-		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 
 		$lines = [];
+		$uris  = $this->resolve_uris( (array) $rows );
 		foreach ( (array) $rows as $row ) {
-			$uri = get_page_uri( (int) $row->ID );
-			if ( is_string( $uri ) && '' !== $uri ) {
-				$lines[] = $uri;
-			}
-			if ( is_string( $row->post_name ) && $row->post_name !== $uri ) {
-				$lines[] = $row->post_name;
+			$uri     = $uris[ (int) $row->ID ];
+			$lines[] = $uri;
+			if ( (string) $row->post_name !== $uri ) {
+				$lines[] = (string) $row->post_name;
 			}
 		}
 		return $lines;
+	}
+
+	/**
+	 * Parent statuses whose attachments have a page WordPress serves: every
+	 * public status (an `inherit` attachment takes its parent's), plus private
+	 * for the logged-in users who can read the parent.
+	 *
+	 * @return string[]
+	 */
+	public function attachment_parent_statuses(): array {
+		return array_values( array_unique( array_merge( array_values( get_post_stati( [ 'public' => true ] ) ), [ 'private' ] ) ) );
 	}
 
 	/**
@@ -610,7 +934,7 @@ class AllowlistBuilder {
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$rows = $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT pm.meta_value AS old_slug, p.ID, p.post_type, p.post_status
+				"SELECT pm.meta_value AS old_slug, p.ID, p.post_name, p.post_parent, p.post_type, p.post_status
 				 FROM {$wpdb->postmeta} pm
 				 INNER JOIN {$wpdb->posts} p ON p.ID = pm.post_id
 				 WHERE pm.meta_key = '_wp_old_slug'
@@ -620,7 +944,8 @@ class AllowlistBuilder {
 		);
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 
-		$lines = [];
+		$lines  = [];
+		$nested = [];
 		foreach ( (array) $rows as $row ) {
 			if ( ! is_string( $row->old_slug ) || '' === $row->old_slug ) {
 				continue;
@@ -629,8 +954,15 @@ class AllowlistBuilder {
 				continue;
 			}
 			$lines[] = $row->old_slug;
-			$uri     = get_page_uri( (int) $row->ID );
-			if ( is_string( $uri ) && false !== strpos( $uri, '/' ) ) {
+			// Only a hierarchical type's address carries its parent path.
+			if ( 0 !== (int) $row->post_parent && $this->is_hierarchical( (string) $row->post_type ) ) {
+				$nested[] = $row;
+			}
+		}
+		$uris = $this->resolve_uris( $nested );
+		foreach ( $nested as $row ) {
+			$uri = $uris[ (int) $row->ID ];
+			if ( false !== strpos( $uri, '/' ) ) {
 				$lines[] = substr( $uri, 0, (int) strrpos( $uri, '/' ) ) . '/' . $row->old_slug;
 			}
 		}
@@ -638,13 +970,17 @@ class AllowlistBuilder {
 	}
 
 	/**
-	 * URIs of root-type posts in NON-shielded, human-managed statuses (drafts,
-	 * pending, private, future). These are not public content, but their URLs
-	 * belong to WordPress, not the shield: a logged-in editor viewing a
-	 * private page (or a pretty-permalink preview) must reach WordPress, which
-	 * enforces access itself — an anonymous visitor still gets WordPress's own
-	 * 404. Including them also closes the publish-before-visit hazard: a
-	 * scheduled/draft slug can never be edge-cached as a shield 404.
+	 * URIs of root-type PRIVATE posts: not public, but a logged-in user with
+	 * the capability opens them at their pretty URL, so the request must reach
+	 * WordPress, which enforces access itself (an anonymous visitor still gets
+	 * WordPress's own 404).
+	 *
+	 * Drafts, pending and scheduled posts are deliberately left out. WordPress
+	 * never serves them at their pretty URL (previews are query-string links),
+	 * so passing them gains nothing — and listing them let an anonymous request
+	 * confirm an unreleased slug exists (allowed vs blocked, different body and
+	 * timing). Publishing appends the slug instantly, and a shield 404 for a
+	 * publishable slug carries only a short edge TTL.
 	 *
 	 * @param string[] $root_types Effective CPTs of the enabled root entries.
 	 *
@@ -653,7 +989,7 @@ class AllowlistBuilder {
 	private function fetch_unpublished_lines( array $root_types ): array {
 		$lines = [];
 		foreach ( $root_types as $root_type ) {
-			foreach ( $this->fetch_paths( $root_type, [ 'draft', 'pending', 'private', 'future' ] ) as $uri ) {
+			foreach ( $this->fetch_paths( $root_type, [ 'private' ] ) as $uri ) {
 				$lines[] = $uri;
 			}
 		}
@@ -670,7 +1006,7 @@ class AllowlistBuilder {
 	public function root_extras_lines(): array {
 		$root_types = $this->root_types();
 		$lines      = array_merge(
-			$this->fetch_attachment_lines(),
+			$this->attachment_lines(),
 			$this->fetch_old_slug_lines( $root_types ),
 			$this->fetch_unpublished_lines( $root_types )
 		);
@@ -685,9 +1021,15 @@ class AllowlistBuilder {
 	 * @return int Lines written.
 	 */
 	public function rebuild_root_extras(): int {
-		$allow = array_fill_keys( $this->root_extras_lines(), true );
-		$this->write_allowlist_atomically( $allow, $this->get_root_extras_file() );
-		return count( $allow );
+		$file = $this->get_root_extras_file();
+		$lock = $this->lock( dirname( $file ) );
+		try {
+			$allow = array_fill_keys( $this->root_extras_lines(), true );
+			$this->write_or_record( $allow, $file, 'root-extras' );
+			return count( $allow );
+		} finally {
+			$this->unlock( $lock );
+		}
 	}
 
 	/**
@@ -700,7 +1042,18 @@ class AllowlistBuilder {
 	 * @return bool True when a line was appended.
 	 */
 	public function append_root_extra( string $line ): bool {
-		return $this->append_slug_to_file( $this->get_root_extras_file(), $line, 'full-path' );
+		return 1 === $this->append_root_extras( [ $line ] );
+	}
+
+	/**
+	 * Instant-append several lines to the root-extras union in one write.
+	 *
+	 * @param string[] $lines URI or slug lines to append.
+	 *
+	 * @return int Lines appended.
+	 */
+	public function append_root_extras( array $lines ): int {
+		return $this->append_slugs_to_file( $this->get_root_extras_file(), $lines, 'full-path' );
 	}
 
 	/**
@@ -849,7 +1202,7 @@ class AllowlistBuilder {
 			return;
 		}
 		foreach ( $entries as $entry ) {
-			if ( 'allowlist.php' === $entry || 'index.php' === $entry || str_ends_with( $entry, '.tmp' ) ) {
+			if ( 'allowlist.php' === $entry || 'index.php' === $entry || '.lock' === $entry || \Post404Shield\is_temp_file_name( $entry ) ) {
 				$path = trailingslashit( $dir ) . $entry;
 				if ( is_file( $path ) ) {
 					unlink( $path ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_unlink
@@ -886,19 +1239,18 @@ class AllowlistBuilder {
 			. implode( "\n", array_keys( $allow ) ) . "\n";
 
 		// Named temp file in the SAME directory so rename() is an atomic,
-		// same-filesystem swap. Written via file_put_contents (not tempnam, which
-		// forces 0600) so umask gives the reader-readable perms the loader needs.
-		$tmp = $file . '.' . getmypid() . '.tmp';
+		// same-filesystem swap. Ends in `.php` so a leftover from a killed
+		// process runs the guard line instead of being served as plain text.
+		// Written via file_put_contents (not tempnam, which forces 0600) so
+		// umask gives the reader-readable perms the loader needs.
+		$tmp     = \Post404Shield\temp_path( $file );
 		$written = file_put_contents( $tmp, $content ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_file_put_contents
 		// Short writes are not errors (see ConfigStore::write_artifact) — a
 		// truncated allowlist silently 404s every slug past the cut.
-		if ( false === $written || strlen( $content ) !== $written ) {
-			unlink( $tmp ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_unlink
-			return false;
-		}
-
-		if ( ! rename( $tmp, $file ) ) { // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_rename
-			unlink( $tmp ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_unlink
+		if ( false === $written || strlen( $content ) !== $written || ! rename( $tmp, $file ) ) { // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_rename
+			if ( file_exists( $tmp ) ) {
+				unlink( $tmp ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_unlink
+			}
 			return false;
 		}
 

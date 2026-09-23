@@ -133,7 +133,19 @@ define( 'POST_SHIELD_LOADED', true );
 	// Most requests are not, and they exit without acting either way — so
 	// deferring the validation changes no outcome, only what it costs.
 	$config_file = $allowlist_dir . '/config.php';
-	$config      = \Post404Shield\read_config_document( $config_file );
+	$config_raw  = is_readable( $config_file ) ? file_get_contents( $config_file ) : false; // phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
+	if ( ! is_string( $config_raw ) ) {
+		return;
+	}
+	// The guard line's pre-filter answers "is this shield business?" without
+	// decoding the document — most requests are not. An artifact from before
+	// it existed is decoded and filtered as it always was, below. (A reader
+	// from an older release has neither function: same path.)
+	$prefilter = function_exists( 'Post404Shield\\config_prefilter' ) ? \Post404Shield\config_prefilter( $config_raw ) : null;
+	if ( null !== $prefilter && ! \Post404Shield\prefilter_matches( $prefilter, $uri ) ) {
+		return;
+	}
+	$config = \Post404Shield\read_config_document( $config_file, $config_raw );
 	if ( null === $config || ! \Post404Shield\config_shape_is_valid( $config ) ) {
 		return;
 	}
@@ -168,31 +180,33 @@ define( 'POST_SHIELD_LOADED', true );
 		$root_entries = [ 'page' => $root_entries['page'] ] + $root_entries;
 	}
 
-	// Cheap pre-filter: exit before any parse_url/require unless the URI mentions
-	// an enabled managed base — or the bake probe path, which is always shield
-	// business regardless of entries. A mode=block base matches without the
-	// trailing slash so the bare base itself (`/de-de/old-section`) is caught too.
-	// With a root entry enabled there is nothing to pre-filter on — every URI
-	// is potentially the catch-all's business.
-	$relevant = [] !== $root_entries || false !== strpos( $uri, 'post-shield-404-probe' );
-	foreach ( $types as $settings ) {
-		if ( $relevant ) {
-			break;
-		}
-		if ( isset( $settings['enabled'] ) && false === $settings['enabled'] ) {
-			continue;
-		}
-		$is_block = 'block' === ( $settings['mode'] ?? 'allowlist' );
-		foreach ( (array) ( $settings['url_base'] ?? [] ) as $base ) {
-			$needle = '/' . $base . ( $is_block ? '' : '/' );
-			if ( false !== strpos( $uri, $needle ) ) {
-				$relevant = true;
+	// Cheap pre-filter for an artifact without one on its guard line: exit
+	// before any parse_url/require unless the URI mentions an enabled managed
+	// base — or the bake probe path, which is always shield business. A
+	// mode=block base matches without the trailing slash so the bare base itself
+	// (`/de-de/old-section`) is caught too. With a root entry enabled there is
+	// nothing to pre-filter on — every URI is potentially the catch-all's.
+	if ( null === $prefilter ) {
+		$relevant = [] !== $root_entries || false !== strpos( $uri, 'post-shield-404-probe' );
+		foreach ( $types as $settings ) {
+			if ( $relevant ) {
 				break;
 			}
+			if ( isset( $settings['enabled'] ) && false === $settings['enabled'] ) {
+				continue;
+			}
+			$is_block = 'block' === ( $settings['mode'] ?? 'allowlist' );
+			foreach ( (array) ( $settings['url_base'] ?? [] ) as $base ) {
+				$needle = '/' . $base . ( $is_block ? '' : '/' );
+				if ( false !== strpos( $uri, $needle ) ) {
+					$relevant = true;
+					break;
+				}
+			}
 		}
-	}
-	if ( ! $relevant ) {
-		return;
+		if ( ! $relevant ) {
+			return;
+		}
 	}
 
 	// Shield business: validate the whole document before acting on any of

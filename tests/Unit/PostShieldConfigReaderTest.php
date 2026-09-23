@@ -23,6 +23,11 @@ use function Post404Shield\locale_pattern_is_valid;
 use function Post404Shield\url_base_is_valid;
 use function Post404Shield\read_config_document;
 use function Post404Shield\read_config_validated_in_memory;
+use function Post404Shield\temp_path;
+use function Post404Shield\is_temp_file_name;
+use function Post404Shield\prefilter_for;
+use function Post404Shield\config_prefilter;
+use function Post404Shield\prefilter_matches;
 
 require_once __DIR__ . '/../../post-404-shield/src/php/Function/ConfigReader.php';
 
@@ -379,5 +384,63 @@ class PostShieldConfigReaderTest extends TestCase {
 		$config            = $this->valid_config();
 		$config['entries'] = [];
 		$this->assertTrue( config_is_valid( $config ) );
+	}
+
+	/**
+	 * A temp file keeps a `.php` ending, so a leftover runs its guard line
+	 * over HTTP; the sweep recognises both that and the older name.
+	 *
+	 * @return void
+	 */
+	public function test_temp_names_end_in_php_and_are_recognised(): void {
+		$tmp = temp_path( '/x/post-404-shield/page/allowlist.php' );
+		$this->assertMatchesRegularExpression( '#^/x/post-404-shield/page/allowlist\.\d+\.tmp\.php$#', $tmp );
+		$this->assertTrue( is_temp_file_name( basename( $tmp ) ) );
+		$this->assertTrue( is_temp_file_name( 'config.php.4242.tmp' ), 'The older name is swept too.' );
+		$this->assertFalse( is_temp_file_name( 'allowlist.php' ) );
+		$this->assertFalse( is_temp_file_name( 'config-20260923-101500.php' ), 'A revision is never a temp file.' );
+		$this->assertFalse( is_temp_file_name( 'index.php' ) );
+	}
+
+	/**
+	 * The guard-line pre-filter round-trips, decides relevance the way the
+	 * loader's own loop does, and leaves the document readable.
+	 *
+	 * @return void
+	 */
+	public function test_guard_line_prefilter(): void {
+		$config    = $this->valid_config();
+		$prefilter = prefilter_for( $config );
+		$this->assertSame(
+			[
+				'root'    => false,
+				'needles' => [ '/stories/', '/old-section' ],
+			],
+			$prefilter
+		);
+
+		$this->write( $config, '<?php exit; __halt_compiler(); // guard prefilter:' . json_encode( $prefilter, JSON_UNESCAPED_SLASHES ) );
+		$raw = (string) file_get_contents( $this->file );
+		$this->assertSame( $prefilter, config_prefilter( $raw ) );
+		$this->assertNotNull( read_config( $this->file ), 'The document after the guard line still reads.' );
+
+		$this->assertTrue( prefilter_matches( $prefilter, '/global/stories/x/' ) );
+		$this->assertTrue( prefilter_matches( $prefilter, '/de-de/old-section' ), 'A blocked base matches bare.' );
+		$this->assertTrue( prefilter_matches( $prefilter, '/en-au/post-shield-404-probe/' ), 'The probe is always shield business.' );
+		$this->assertFalse( prefilter_matches( $prefilter, '/global/stories' ), 'An allowlist base needs its slash.' );
+		$this->assertFalse( prefilter_matches( $prefilter, '/global/about/' ) );
+
+		$config['entries']['page'] = [
+			'enabled'   => true,
+			'mode'      => 'allowlist',
+			'post_type' => 'page',
+			'root'      => true,
+			'url_base'  => [],
+		];
+		$this->assertTrue( prefilter_matches( prefilter_for( $config ), '/global/about/' ), 'Root mode: everything.' );
+
+		$this->assertNull( config_prefilter( "<?php exit; // guard\n{}" ), 'An older artifact has none.' );
+		$this->assertNull( config_prefilter( '<?php exit; // guard prefilter:{"root":"yes","needles":[]}' ), 'Malformed: decode as before.' );
+		$this->assertNull( config_prefilter( '<?php exit; // guard prefilter:{"root":false,"needles":[""]}' ) );
 	}
 }

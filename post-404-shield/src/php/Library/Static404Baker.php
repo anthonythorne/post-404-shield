@@ -270,6 +270,12 @@ class Static404Baker {
 				$this->last_reason = 'probe captured a wp_die() error page';
 				continue;
 			}
+			// The shield refused the token and served its own baked copy: saving
+			// that would re-save the stale page forever and report success.
+			if ( 'blocked-probe-path' === wp_remote_retrieve_header( $response, 'x-post-shield' ) ) {
+				$this->last_reason = 'the shield rejected the probe token (blocked-probe-path) — probe-token.php unreadable, or a stale copy on another server';
+				continue;
+			}
 
 			return $this->write_atomically(
 				self::sanitize_markup( $body, $this->probe_token() ),
@@ -391,10 +397,13 @@ class Static404Baker {
 		if ( ! file_exists( $index ) ) {
 			file_put_contents( $index, "<?php\n// Silence is golden.\n" ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_file_put_contents
 		}
-		$tmp = $file . '.' . getmypid() . '.tmp';
+		$tmp = \Post404Shield\temp_path( $file );
 		// `__halt_compiler();` so PHP stops parsing at the guard (see ConfigStore::stage_artifact()).
 		if ( false !== file_put_contents( $tmp, "<?php exit; __halt_compiler(); // post-404-shield probe token — do not edit.\n" . $token . "\n" ) ) { // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_file_put_contents
 			rename( $tmp, $file ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_rename
+		}
+		if ( file_exists( $tmp ) ) {
+			unlink( $tmp ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_unlink
 		}
 
 		return $token;

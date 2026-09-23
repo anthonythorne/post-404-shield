@@ -19,6 +19,7 @@ use Post404Shield\Library\Static404Baker;
 
 // Require ONLY the class file: it declares the class with no top-level side
 // effects, and sanitize_markup() is a pure static.
+require_once __DIR__ . '/../../post-404-shield/src/php/Function/ConfigReader.php';
 require_once __DIR__ . '/../../post-404-shield/src/php/Library/Static404Baker.php';
 
 /**

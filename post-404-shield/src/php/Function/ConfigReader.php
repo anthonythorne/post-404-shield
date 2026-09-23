@@ -701,6 +701,32 @@ function shield_dir(): string {
 }
 
 /**
+ * Temp-file path for an atomic write of a generated file: the same directory
+ * (so rename() is an atomic swap), unique per process, and ending in `.php`,
+ * so a leftover from a killed process runs its `<?php exit;` guard when
+ * requested over HTTP instead of being served as plain text.
+ *
+ * @param string $file Destination path, e.g. `…/allowlist.php`.
+ *
+ * @return string e.g. `…/allowlist.1234.tmp.php`.
+ */
+function temp_path( string $file ): string {
+	return (string) preg_replace( '/\.php$/', '', $file ) . '.' . getmypid() . '.tmp.php';
+}
+
+/**
+ * Whether a base name is a temp file from temp_path() — or the older
+ * `<name>.php.<pid>.tmp` shape, so leftovers from before are swept too.
+ *
+ * @param string $name Base name.
+ *
+ * @return bool
+ */
+function is_temp_file_name( string $name ): bool {
+	return 1 === preg_match( '/\.\d+\.tmp(?:\.php)?$/', $name );
+}
+
+/**
  * Per-request memo slot for one artifact path.
  *
  * Holds the raw bytes last read, their decoded document and, once computed,
@@ -741,14 +767,17 @@ function &config_memo_slot( string $file ): array {
  * Callers that act on the document MUST validate it: use read_config(), or
  * config_shape_is_valid() for the loader's pre-filter only.
  *
- * @param string $file Absolute path to the artifact.
+ * @param string      $file Absolute path to the artifact.
+ * @param string|null $raw  Its bytes, when the caller has just read them.
  *
  * @return array<string, mixed>|null The decoded document, or null.
  */
-function read_config_document( string $file ): ?array {
+function read_config_document( string $file, ?string $raw = null ): ?array {
 	$slot = &config_memo_slot( $file );
 
-	$raw = is_readable( $file ) ? file_get_contents( $file ) : false; // phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
+	if ( null === $raw ) {
+		$raw = is_readable( $file ) ? file_get_contents( $file ) : false; // phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
+	}
 	if ( false === $raw ) {
 		$slot = [
 			'raw'      => null,
@@ -775,6 +804,96 @@ function read_config_document( string $file ): ?array {
 		'valid'    => null,
 	];
 	return $document;
+}
+
+/**
+ * The loader's pre-filter for a config: whether root mode is on (every URI is
+ * then shield business), and the URI substrings that make a request shield
+ * business otherwise — `/{base}/` per enabled allowlist base, `/{base}` per
+ * blocked one (so the bare base itself is caught). The writer stores it on
+ * the artifact's guard line; the loader recomputes it from an artifact that
+ * predates that.
+ *
+ * @param array<string, mixed> $config Config document.
+ *
+ * @return array{root: bool, needles: string[]}
+ */
+function prefilter_for( array $config ): array {
+	$root    = false;
+	$needles = [];
+	foreach ( (array) ( $config['entries'] ?? [] ) as $settings ) {
+		if ( ! is_array( $settings ) || ( isset( $settings['enabled'] ) && false === $settings['enabled'] ) ) {
+			continue;
+		}
+		$is_block = 'block' === ( $settings['mode'] ?? 'allowlist' );
+		if ( ! $is_block && true === ( $settings['root'] ?? false ) ) {
+			$root = true;
+		}
+		foreach ( (array) ( $settings['url_base'] ?? [] ) as $base ) {
+			if ( is_string( $base ) && '' !== $base ) {
+				$needles[] = '/' . $base . ( $is_block ? '' : '/' );
+			}
+		}
+	}
+	return [
+		'root'    => $root,
+		'needles' => array_values( array_unique( $needles ) ),
+	];
+}
+
+/**
+ * The pre-filter stored on an artifact's guard line (` prefilter:{json}` after
+ * `__halt_compiler();`, where PHP never parses), or null when the line carries
+ * none or it is malformed — the caller then decodes the document as before.
+ * It is written in the same atomic write as the document, so it cannot be
+ * stale; and a wrong one could only send a request to WordPress (fail-open)
+ * or through the full check.
+ *
+ * @param string $raw The artifact's bytes.
+ *
+ * @return array{root: bool, needles: string[]}|null
+ */
+function config_prefilter( string $raw ): ?array {
+	$newline = strpos( $raw, "\n" );
+	$line    = false === $newline ? $raw : substr( $raw, 0, $newline );
+	$at      = strpos( $line, ' prefilter:' );
+	if ( false === $at ) {
+		return null;
+	}
+	$decoded = json_decode( substr( $line, $at + strlen( ' prefilter:' ) ), true );
+	if ( ! is_array( $decoded ) || ! is_bool( $decoded['root'] ?? null ) || ! is_array( $decoded['needles'] ?? null ) ) {
+		return null;
+	}
+	foreach ( $decoded['needles'] as $needle ) {
+		if ( ! is_string( $needle ) || '' === $needle ) {
+			return null;
+		}
+	}
+	return [
+		'root'    => $decoded['root'],
+		'needles' => $decoded['needles'],
+	];
+}
+
+/**
+ * Whether a request URI is shield business under a pre-filter: root mode, the
+ * bake probe path (always the shield's), or a URI containing a needle.
+ *
+ * @param array{root: bool, needles: string[]} $prefilter From prefilter_for() or config_prefilter().
+ * @param string                               $uri       Request URI.
+ *
+ * @return bool
+ */
+function prefilter_matches( array $prefilter, string $uri ): bool {
+	if ( $prefilter['root'] || false !== strpos( $uri, 'post-shield-404-probe' ) ) {
+		return true;
+	}
+	foreach ( $prefilter['needles'] as $needle ) {
+		if ( false !== strpos( $uri, $needle ) ) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /**

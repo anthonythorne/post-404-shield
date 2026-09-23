@@ -200,11 +200,35 @@ class PostShieldAdminController {
 		check_admin_referer( 'post_shield_save_config' );
 		$this->require_capability();
 
-		$previous             = $this->current_document();
+		$previous = $this->current_document();
+
+		// A form opened before another save (a second tab, another admin, a
+		// restore or CLI write) must not silently replace it: the form carries
+		// every row, so its stale copy would delete what was added since and
+		// revert what was changed. Its edits are not kept — they were made
+		// against settings that no longer exist.
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
+		$revision = isset( $_POST['ps_revision'] ) ? sanitize_key( wp_unslash( $_POST['ps_revision'] ) ) : '';
+		if ( $revision !== $this->form_revision( $previous ) ) {
+			$this->set_notice(
+				[ __( 'The settings changed after this page was opened — another save, a restore or a CLI write. This page now shows the current settings; make your change again.', 'post-404-shield' ) ],
+				[],
+				false
+			);
+			$this->redirect_to_page();
+		}
+
 		$this->request_errors = [];
 		$candidate            = $this->config_from_request();
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
+		$draft = [
+			'document'    => $candidate,
+			'keep'        => isset( $_POST['ps_keep'] ) ? (string) (int) $_POST['ps_keep'] : (string) ConfigStore::DEFAULT_KEEP,
+			'rootConfirm' => ! empty( $_POST['ps_root_confirm'] ), // phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
+			'revision'    => $revision,
+		];
 		if ( [] !== $this->request_errors ) {
-			$this->set_notice( $this->request_errors, [], false );
+			$this->set_notice( $this->request_errors, [], false, '', $draft );
 			$this->redirect_to_page();
 		}
 
@@ -215,7 +239,7 @@ class PostShieldAdminController {
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
 		$keep = isset( $_POST['ps_keep'] ) ? (int) $_POST['ps_keep'] : ConfigStore::DEFAULT_KEEP;
 		if ( ! $this->store->keep_is_valid( $keep ) ) {
-			$this->set_notice( [ __( 'Retention must be between 10 and 100 in steps of 10.', 'post-404-shield' ) ], [], false );
+			$this->set_notice( [ __( 'Retention must be between 10 and 100 in steps of 10.', 'post-404-shield' ) ], [], false, '', $draft );
 			$this->redirect_to_page();
 		}
 
@@ -232,14 +256,16 @@ class PostShieldAdminController {
 					__( 'Enabling root matching needs the acknowledgement ticked (on the Pages & posts tab): root matching makes the shield decide EVERY URL not owned by a base or exclusion. All root content types must be enabled together; attachments and old slugs are included automatically; core and plugin routes pass via the excluded-bases list. A URL not covered by any of these will be served a 404 without WordPress loading. Nothing was saved.', 'post-404-shield' ),
 				],
 				[],
-				false
+				false,
+				'',
+				$draft
 			);
 			$this->redirect_to_page();
 		}
 
 		$result = $this->store->write( $candidate, $this->current_user_label(), [ 'keep' => $keep ] );
 		if ( ! $result['ok'] ) {
-			$this->set_notice( $result['errors'], $result['warnings'], false );
+			$this->set_notice( $result['errors'], $result['warnings'], false, '', $draft );
 			$this->redirect_to_page();
 		}
 
@@ -382,9 +408,10 @@ class PostShieldAdminController {
 			// cannot see it: by then only the block entry remains. Refuse here.
 			if ( isset( $new_entries[ $label ] ) ) {
 				$this->request_errors[] = sprintf(
-					/* translators: %s: the blocked-base label that collides. */
-					__( 'Blocked base "%s" uses the same name as another entry. Rename it — a blocked base would otherwise replace that entry and 404 every real URL at its base.', 'post-404-shield' ),
-					$label
+					/* translators: 1: the blocked-base label that collides, 2: the entry it collides with. */
+					__( 'Blocked base "%1$s" uses the same internal name as %2$s. Rename the blocked base — it would otherwise replace that entry and 404 every real URL at its base.', 'post-404-shield' ),
+					$label,
+					$this->store->entry_label( $label, (array) $new_entries[ $label ] )
 				);
 				continue;
 			}
@@ -479,6 +506,16 @@ class PostShieldAdminController {
 				continue;
 			}
 
+			// Posts under a permalink structure the shield cannot model: the row
+			// has no base field and can only be switched off, so keep the stored
+			// entry — its reserved slugs, statuses and cache times — as the
+			// "settings kept" badge promises, until the structure is supported
+			// again. Switching it on is refused by validation.
+			if ( 'post' === $cpt && ! $post_info['supported'] && $has_old ) {
+				$new_entries[ $key ] = array_merge( (array) ( $entries[ $key ] ?? [] ), [ 'enabled' => $enabled ] );
+				continue;
+			}
+
 			// The built-in post type under a static base (/blog/%postname%/):
 			// the base is DERIVED, never taken from the form.
 			$entry_bases = 'post' === $cpt && $post_info['supported'] && '' !== $post_info['base']
@@ -489,38 +526,7 @@ class PostShieldAdminController {
 			if ( ! $enabled && [] === $entry_bases ) {
 				continue;
 			}
-			// The screen shows matching and depth only for hierarchical types — a
-			// flat type's URLs have no levels below the post. A field that was
-			// not posted keeps the entry's stored value (new entries: slug
-			// matching, no extra levels, 301 to the post), so saving never
-			// silently turns an existing depth rule into "unlimited".
-			$old_entry = $has_old ? (array) ( $entries[ $key ] ?? [] ) : [];
-			$match_raw = array_key_exists( 'match', $row ) ? (string) $row['match'] : (string) ( $old_entry['match'] ?? 'slug' );
-			$match     = 'full-path' === $match_raw ? 'full-path' : 'slug';
-
-			if ( array_key_exists( 'depth_allowed', $row ) ) {
-				$depth_raw = trim( (string) $row['depth_allowed'] );
-			} elseif ( $has_old ) {
-				$depth_raw = isset( $old_entry['depth_allowed'] ) && null !== $old_entry['depth_allowed'] ? (string) (int) $old_entry['depth_allowed'] : '';
-			} else {
-				$depth_raw = '0';
-			}
-			$depth_action = $row['depth_action'] ?? ( $has_old ? ( $old_entry['depth_action'] ?? 'passthrough' ) : 'redirect' );
-
-			$new_entries[ $key ] = [
-				'enabled'            => $enabled,
-				'mode'               => 'allowlist',
-				'post_type'          => $cpt,
-				'url_base'           => $entry_bases,
-				'reserved_allowlist' => $this->lines_from_textarea( (string) ( $row['reserved'] ?? '' ) ),
-				'post_status'        => [] !== $statuses ? array_values( array_unique( $statuses ) ) : [ 'publish' ],
-				'match'              => $match,
-				'allow_pagination'   => ! empty( $row['allow_pagination'] ),
-				'depth_allowed'      => 'full-path' === $match || '' === $depth_raw ? null : max( 0, (int) $depth_raw ),
-				'depth_action'       => in_array( $depth_action, [ 'passthrough', '404', 'redirect' ], true ) ? (string) $depth_action : 'passthrough',
-				'cache_ttl'          => $this->int_or_null( $row['cache_ttl'] ?? '' ),
-				'edge_ttl'           => $this->int_or_null( $row['edge_ttl'] ?? '' ),
-			];
+			$new_entries[ $key ] = $this->based_entry_from_row( $cpt, $row, $enabled, $entry_bases, $statuses, $has_old ? (array) ( $entries[ $key ] ?? [] ) : null );
 		}
 
 		$new_entries = $this->apply_block_rows( $new_entries );
@@ -569,6 +575,55 @@ class PostShieldAdminController {
 				'derived'  => [],
 				'operator' => $operator,
 			],
+		];
+	}
+
+	/**
+	 * A based (non-root) allowlist entry from its posted row.
+	 *
+	 * The screen shows matching and depth only for hierarchical types — a flat
+	 * type's URLs have no levels below the post. A field that was not posted
+	 * keeps the entry's stored value (new entries: slug matching, no extra
+	 * levels, 301 to the post), so saving never silently turns an existing
+	 * depth rule into "unlimited".
+	 *
+	 * @param string                    $cpt         Post type.
+	 * @param array<string, mixed>      $row         Posted row (unslashed).
+	 * @param bool                      $enabled     Row ticked.
+	 * @param string[]                  $entry_bases URL bases.
+	 * @param string[]                  $statuses    Sanitised statuses.
+	 * @param array<string, mixed>|null $old_entry   Stored entry, or null for a new one.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private function based_entry_from_row( string $cpt, array $row, bool $enabled, array $entry_bases, array $statuses, ?array $old_entry ): array {
+		$has_old   = null !== $old_entry;
+		$old_entry = $old_entry ?? [];
+		$match_raw = array_key_exists( 'match', $row ) ? (string) $row['match'] : (string) ( $old_entry['match'] ?? 'slug' );
+		$match     = 'full-path' === $match_raw ? 'full-path' : 'slug';
+
+		if ( array_key_exists( 'depth_allowed', $row ) ) {
+			$depth_raw = trim( (string) $row['depth_allowed'] );
+		} elseif ( $has_old ) {
+			$depth_raw = isset( $old_entry['depth_allowed'] ) && null !== $old_entry['depth_allowed'] ? (string) (int) $old_entry['depth_allowed'] : '';
+		} else {
+			$depth_raw = '0';
+		}
+		$depth_action = $row['depth_action'] ?? ( $has_old ? ( $old_entry['depth_action'] ?? 'passthrough' ) : 'redirect' );
+
+		return [
+			'enabled'            => $enabled,
+			'mode'               => 'allowlist',
+			'post_type'          => $cpt,
+			'url_base'           => $entry_bases,
+			'reserved_allowlist' => $this->lines_from_textarea( (string) ( $row['reserved'] ?? '' ) ),
+			'post_status'        => [] !== $statuses ? array_values( array_unique( $statuses ) ) : [ 'publish' ],
+			'match'              => $match,
+			'allow_pagination'   => ! empty( $row['allow_pagination'] ),
+			'depth_allowed'      => 'full-path' === $match || '' === $depth_raw ? null : max( 0, (int) $depth_raw ),
+			'depth_action'       => in_array( $depth_action, [ 'passthrough', '404', 'redirect' ], true ) ? (string) $depth_action : 'passthrough',
+			'cache_ttl'          => $this->int_or_null( $row['cache_ttl'] ?? '' ),
+			'edge_ttl'           => $this->int_or_null( $row['edge_ttl'] ?? '' ),
 		];
 	}
 
@@ -676,14 +731,15 @@ class PostShieldAdminController {
 	/**
 	 * Stash feedback for the post-redirect render.
 	 *
-	 * @param string[] $errors   Blocking errors (nothing persisted).
-	 * @param string[] $warnings Non-blocking warnings.
-	 * @param bool     $ok       Whether the action succeeded.
-	 * @param string   $message  Success message.
+	 * @param string[]                  $errors   Blocking errors (nothing persisted).
+	 * @param string[]                  $warnings Non-blocking warnings.
+	 * @param bool                      $ok       Whether the action succeeded.
+	 * @param string                    $message  Success message.
+	 * @param array<string, mixed>|null $draft Rejected save's input, re-shown on the page.
 	 *
 	 * @return void
 	 */
-	private function set_notice( array $errors, array $warnings, bool $ok, string $message = '' ): void {
+	private function set_notice( array $errors, array $warnings, bool $ok, string $message = '', ?array $draft = null ): void {
 		set_transient(
 			self::NOTICE_TRANSIENT . get_current_user_id(),
 			[
@@ -691,9 +747,49 @@ class PostShieldAdminController {
 				'message'  => $message,
 				'errors'   => $errors,
 				'warnings' => $warnings,
+				'draft'    => $draft,
 			],
 			MINUTE_IN_SECONDS
 		);
+	}
+
+	/**
+	 * Read and clear this user's one-shot notice.
+	 *
+	 * @return array<string, mixed>|null
+	 */
+	private function pull_notice(): ?array {
+		$notice = get_transient( self::NOTICE_TRANSIENT . get_current_user_id() );
+		if ( ! is_array( $notice ) ) {
+			return null;
+		}
+		delete_transient( self::NOTICE_TRANSIENT . get_current_user_id() );
+		return $notice;
+	}
+
+	/**
+	 * Fingerprint of the settings a form was built from, so a save can tell
+	 * whether they changed since. Covers what the form edits — entries, locale
+	 * and the operator's excluded bases — and leaves out what write() derives
+	 * on its own (redirect-derived reserved slugs, the snapshot buckets, meta),
+	 * which the nightly redirect sync refreshes without anyone editing.
+	 *
+	 * @param array<string, mixed>|null $document Stored config document.
+	 *
+	 * @return string
+	 */
+	private function form_revision( ?array $document ): string {
+		if ( null === $document ) {
+			return 'none';
+		}
+		$entries = [];
+		foreach ( (array) ( $document['entries'] ?? [] ) as $key => $entry ) {
+			if ( is_array( $entry ) ) {
+				unset( $entry['reserved_derived'] );
+			}
+			$entries[ $key ] = $entry;
+		}
+		return md5( (string) wp_json_encode( [ $entries, $document['locale'] ?? null, $document['excluded_bases']['operator'] ?? null ] ) );
 	}
 
 	/**
@@ -988,14 +1084,29 @@ class PostShieldAdminController {
 		$config   = $this->store->artifact();
 		$document = $this->current_document() ?? $config;
 
+		// A rejected save comes back with the operator's input, so the form
+		// shows their edits next to the errors instead of the stored settings.
+		// It keeps the revision it was opened at: if another save landed in
+		// between, saving the draft is refused like any stale form.
+		$notice   = $this->pull_notice();
+		$draft    = is_array( $notice['draft'] ?? null ) && is_array( $notice['draft']['document'] ?? null ) ? $notice['draft'] : null;
+		$form_doc = null !== $draft ? (array) $draft['document'] : $document;
+		$site     = $this->site_state( $form_doc );
+		if ( null !== $draft ) {
+			$site['keep'] = (string) ( $draft['keep'] ?? $site['keep'] );
+		}
+
 		return [
-			'notices'    => $this->notices_state(),
+			'notices'    => $this->notices_state( $notice ),
 			'status'     => $this->status_state( $config ),
 			'form'       => [
-				'site'             => $this->site_state( $document ),
-				'types'            => $this->types_state( $document ),
-				'blocks'           => $this->blocks_state( $document ),
-				'excludedOperator' => implode( "\n", array_filter( (array) ( $document['excluded_bases']['operator'] ?? [] ), 'is_string' ) ),
+				'site'             => $site,
+				'types'            => $this->types_state( $form_doc ),
+				'blocks'           => $this->blocks_state( $form_doc ),
+				'excludedOperator' => implode( "\n", array_filter( (array) ( $form_doc['excluded_bases']['operator'] ?? [] ), 'is_string' ) ),
+				'revision'         => null !== $draft ? (string) ( $draft['revision'] ?? '' ) : $this->form_revision( $this->current_document() ),
+				'draft'            => null !== $draft,
+				'rootConfirm'      => null !== $draft && ! empty( $draft['rootConfirm'] ),
 			],
 			'statuses'   => $this->statuses_state(),
 			'excluded'   => [
@@ -1025,9 +1136,11 @@ class PostShieldAdminController {
 	 * Save/restore/disable feedback (one-shot transient) plus the queue
 	 * buttons' no-JS redirect flags, as a list of notices.
 	 *
+	 * @param array<string, mixed>|null $notice This user's one-shot notice (pull_notice()).
+	 *
 	 * @return array<int, array{status: string, message: string, list: string[]}>
 	 */
-	private function notices_state(): array {
+	private function notices_state( ?array $notice ): array {
 		$notices = [];
 
 		$root_off = get_option( \Post404Shield\Library\ConfigStore::ROOT_OFF_OPTION );
@@ -1042,13 +1155,13 @@ class PostShieldAdminController {
 				'list'    => array_map( 'strval', (array) ( $root_off['errors'] ?? [] ) ),
 			];
 		}
-		$notice  = get_transient( self::NOTICE_TRANSIENT . get_current_user_id() );
 		if ( is_array( $notice ) ) {
-			delete_transient( self::NOTICE_TRANSIENT . get_current_user_id() );
 			if ( ! empty( $notice['errors'] ) ) {
 				$notices[] = [
 					'status'  => 'error',
-					'message' => __( 'Nothing was saved:', 'post-404-shield' ),
+					'message' => is_array( $notice['draft'] ?? null )
+						? __( 'Nothing was saved — your changes are still on the page. Fix the problems below and save again:', 'post-404-shield' )
+						: __( 'Nothing was saved:', 'post-404-shield' ),
 					'list'    => array_map( 'strval', (array) $notice['errors'] ),
 				];
 			} elseif ( ! empty( $notice['ok'] ) ) {
@@ -1503,6 +1616,60 @@ class PostShieldAdminController {
 	}
 
 	/**
+	 * One line per entry for the restore diff: every field the loader acts on,
+	 * defaults filled in and lists sorted, so a revision that only drops a
+	 * status or changes a depth rule or cache time is marked as a change
+	 * rather than looking like a no-op.
+	 *
+	 * @param array<string, mixed>|null $entry Entry, or null when absent.
+	 *
+	 * @return string
+	 */
+	private static function summarise_entry( ?array $entry ): string {
+		if ( null === $entry ) {
+			return '—';
+		}
+		$sorted  = static function ( $list ): array {
+			$list = array_values( array_filter( (array) $list, 'is_string' ) );
+			sort( $list );
+			return $list;
+		};
+		$is_root = true === ( $entry['root'] ?? false );
+		$parts   = [
+			( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] ) ? 'ON' : 'off',
+			$is_root ? 'ROOT' : implode( ', ', (array) ( $entry['url_base'] ?? [] ) ),
+		];
+		if ( 'block' === ( $entry['mode'] ?? 'allowlist' ) ) {
+			$parts[] = 'block';
+		} else {
+			$match   = (string) ( $entry['match'] ?? 'slug' );
+			$parts[] = $match;
+			$parts[] = 'statuses: ' . implode( ', ', $sorted( $entry['post_status'] ?? [ 'publish' ] ) );
+			if ( ! $is_root && 'full-path' !== $match ) {
+				$depth   = $entry['depth_allowed'] ?? null;
+				$parts[] = null === $depth ? 'any depth' : 'depth ' . (int) $depth . ', then ' . (string) ( $entry['depth_action'] ?? 'passthrough' );
+			}
+			if ( isset( $entry['allow_pagination'] ) && false === $entry['allow_pagination'] ) {
+				$parts[] = 'no-pagination';
+			}
+			$reserved = $sorted( $entry['reserved_allowlist'] ?? [] );
+			if ( [] !== $reserved ) {
+				$parts[] = 'reserved: ' . implode( ', ', $reserved );
+			}
+		}
+		$ttl_fields = [
+			'cache_ttl' => 'cache',
+			'edge_ttl'  => 'edge',
+		];
+		foreach ( $ttl_fields as $field => $name ) {
+			if ( isset( $entry[ $field ] ) ) {
+				$parts[] = $name . ' ' . (int) $entry[ $field ] . 's';
+			}
+		}
+		return implode( ' · ', $parts );
+	}
+
+	/**
 	 * The restore confirm screen: a diff of the incoming revision against the
 	 * current config (enabled/bases/match highlighted per entry), the
 	 * registered-CPT and rewrite-slug warnings RE-RUN against the incoming
@@ -1558,8 +1725,8 @@ class PostShieldAdminController {
 				// nothing to compare against; never invent one from the type name.
 				$slug = is_array( $type_object->rewrite ?? null ) && ! empty( $type_object->rewrite['slug'] ) ? (string) $type_object->rewrite['slug'] : '';
 				if ( '' !== $slug && ! in_array( $slug, (array) ( $entry['url_base'] ?? [] ), true ) ) {
-					/* translators: 1: entry key, 2: detected rewrite slug, 3: the configured bases. */
-					$warnings[] = sprintf( __( '%1$s: the type’s detected rewrite slug "%2$s" is not among the revision’s bases (%3$s) — check it predates a permalink change.', 'post-404-shield' ), (string) $key, $slug, implode( ', ', (array) ( $entry['url_base'] ?? [] ) ) );
+					/* translators: 1: entry name, 2: detected rewrite slug, 3: the configured bases. */
+					$warnings[] = sprintf( __( '%1$s: the type’s detected rewrite slug "%2$s" is not among the revision’s bases (%3$s) — check it predates a permalink change.', 'post-404-shield' ), $this->store->entry_label( (string) $key, (array) $entry ), $slug, implode( ', ', (array) ( $entry['url_base'] ?? [] ) ) );
 				}
 			}
 			if ( [] !== $warnings ) {
@@ -1575,17 +1742,6 @@ class PostShieldAdminController {
 				<header class="post-shield-admin-card__header"><h2><?php esc_html_e( 'Changes', 'post-404-shield' ); ?></h2></header>
 				<div class="post-shield-admin-card__body">
 				<?php
-				$summarise   = static function ( ?array $entry ): string {
-					if ( null === $entry ) {
-						return '—';
-					}
-					$on      = ! isset( $entry['enabled'] ) || false !== $entry['enabled'];
-					$is_root = true === ( $entry['root'] ?? false );
-					return ( $on ? 'ON' : 'off' )
-						. ' · ' . ( $is_root ? 'ROOT' : implode( ', ', (array) ( $entry['url_base'] ?? [] ) ) )
-						. ( 'block' === ( $entry['mode'] ?? 'allowlist' ) ? ' · block' : ' · ' . ( $entry['match'] ?? 'slug' ) )
-						. ( ( ! isset( $entry['allow_pagination'] ) || false !== $entry['allow_pagination'] ) ? '' : ' · no-pagination' );
-				};
 				$locale_line = static function ( ?array $config ): string {
 					if ( null === $config ) {
 						return '—';
@@ -1616,10 +1772,12 @@ class PostShieldAdminController {
 				$row( 'locale', $locale_line( $current ), $locale_line( $incoming ) );
 				$row( 'excluded', $excluded_line( $current ), $excluded_line( $incoming ) );
 		foreach ( $keys as $key ) {
+			$from_entry = ( $current['entries'] ?? [] )[ $key ] ?? null;
+			$to_entry   = $incoming['entries'][ $key ] ?? null;
 			$row(
-				(string) $key,
-				$summarise( ( $current['entries'] ?? [] )[ $key ] ?? null ),
-				$summarise( $incoming['entries'][ $key ] ?? null )
+				$this->store->entry_label( (string) $key, (array) ( $to_entry ?? $from_entry ) ),
+				self::summarise_entry( $from_entry ),
+				self::summarise_entry( $to_entry )
 			);
 		}
 		?>

@@ -112,12 +112,14 @@ $post_shield_builder = new \Post404Shield\Library\AllowlistBuilder( $post_shield
 // ordered around the artifact swap so a full-path artifact never reads a
 // slug-format list. Every save path — admin, restore, CLI — inherits this.
 $post_shield_store->set_rebuild_handler(
-	static function ( array $post_types, array $entries ): void {
+	static function ( array $post_types, array $entries ): bool {
 		$candidate_builder = new \Post404Shield\Library\AllowlistBuilder( $entries );
+		$ok                = true;
 		foreach ( $post_types as $rebuild_type ) {
 			try {
 				$candidate_builder->rebuild_type( (string) $rebuild_type );
 			} catch ( \Throwable $e ) {
+				$ok = false;
 				error_log( '[post-404-shield] mode-switch rebuild for ' . $rebuild_type . ' failed: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			}
 		}
@@ -128,9 +130,11 @@ $post_shield_store->set_rebuild_handler(
 			try {
 				$candidate_builder->rebuild_root_extras();
 			} catch ( \Throwable $e ) {
+				$ok = false;
 				error_log( '[post-404-shield] root-extras rebuild failed: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			}
 		}
+		return $ok && [] === $candidate_builder->failed_writes();
 	}
 );
 
@@ -261,6 +265,9 @@ if ( defined( 'WP_CLI' ) && WP_CLI && class_exists( '\WP_CLI' ) ) {
 					\WP_CLI::error( sprintf( '"%s" is not a managed, enabled shield type.', $only ) );
 				}
 				$count = $post_shield_builder->rebuild_type( $only );
+				if ( [] !== $post_shield_builder->failed_writes() ) {
+					\WP_CLI::error( sprintf( 'Could not write %s — the previous list stays in place.', implode( ', ', $post_shield_builder->failed_writes() ) ) );
+				}
 				\WP_CLI::success( sprintf( 'Post shield allowlist rebuilt for %s: %d slug(s).', $only, $count ) );
 				return;
 			}
@@ -269,6 +276,9 @@ if ( defined( 'WP_CLI' ) && WP_CLI && class_exists( '\WP_CLI' ) ) {
 				\WP_CLI::error( 'No enabled shield types — configure the shield on Settings → Post 404 Shield first.' );
 			}
 			$count = $post_shield_builder->rebuild_all();
+			if ( [] !== $post_shield_builder->failed_writes() ) {
+				\WP_CLI::error( sprintf( 'Could not write %s — the previous list stays in place for each.', implode( ', ', $post_shield_builder->failed_writes() ) ) );
+			}
 			\WP_CLI::success( sprintf( 'Post shield allowlist rebuilt: %d slug(s) across %d type(s); stale type dirs reconciled.', $count, count( $post_shield_enabled_types ) ) );
 		},
 		[
@@ -421,11 +431,11 @@ if ( defined( 'WP_CLI' ) && WP_CLI && class_exists( '\WP_CLI' ) ) {
 					// The legacy array is site-owned, so it is passed in rather
 					// than looked for inside the plugin: a vendored copy is
 					// replaced wholesale on every sync, and a file dropped into it
-					// would not survive one. The in-plugin location is still read
-					// when no path is given, for sites following the old docs.
-					$legacy_file = isset( $args[1] ) && '' !== (string) $args[1]
-						? (string) $args[1]
-						: POST_SHIELD_PLUGIN_DIR . '/config/allowed-post-types.php';
+					// would not survive one.
+					$legacy_file = isset( $args[1] ) ? (string) $args[1] : '';
+					if ( '' === $legacy_file ) {
+						\WP_CLI::error( 'Pass the path to the old committed array: wp post-shield config import-legacy <file>' );
+					}
 					if ( ! is_readable( $legacy_file ) ) {
 						\WP_CLI::error( sprintf( 'No legacy config at %s. Pass the path to the old committed array: wp post-shield config import-legacy <file>', $legacy_file ) );
 					}

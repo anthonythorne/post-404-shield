@@ -714,9 +714,27 @@
 			);
 		}
 
-		fields.push(
-			el(CacheFields, { key: 'cache', type, onChange, idPrefix })
-		);
+		// Every root 404 is served with the first root entry's cache times,
+		// and Pages always comes first — so only the Pages row sets them.
+		if (type.root && 'page' !== type.cpt) {
+			fields.push(
+				el(
+					'p',
+					{
+						key: 'cache',
+						className: 'components-base-control__help',
+					},
+					__(
+						'Cache times for 404s at the site root are set on the Pages row.',
+						'post-404-shield'
+					)
+				)
+			);
+		} else {
+			fields.push(
+				el(CacheFields, { key: 'cache', type, onChange, idPrefix })
+			);
+		}
 
 		return el('div', { className: 'post-shield-admin__fields' }, fields);
 	}
@@ -1838,6 +1856,13 @@
 				value: site.localePattern,
 			}),
 			el(Hidden, { key: 'keep', name: 'ps_keep', value: site.keep }),
+			// The settings this form was opened at: a save over newer ones is
+			// refused rather than silently reverting them.
+			el(Hidden, {
+				key: 'revision',
+				name: 'ps_revision',
+				value: data.form.revision,
+			}),
 			el(Hidden, {
 				key: 'operator',
 				name: 'ps_excluded_operator',
@@ -1995,8 +2020,11 @@
 		const [operator, setOperatorState] = useState(
 			data.form.excludedOperator
 		);
-		const [rootConfirm, setRootConfirm] = useState(false);
-		const [dirty, setDirty] = useState(false);
+		const [rootConfirm, setRootConfirm] = useState(
+			Boolean(data.form.rootConfirm)
+		);
+		// A rejected save re-renders the operator's input: still unsaved.
+		const [dirty, setDirty] = useState(Boolean(data.form.draft));
 		const [submitting, setSubmitting] = useState(false);
 		const [disabling, setDisabling] = useState(false);
 

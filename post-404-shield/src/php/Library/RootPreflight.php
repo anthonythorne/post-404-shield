@@ -45,6 +45,82 @@ class RootPreflight {
 	private const EXTRAS_SAMPLE = 200;
 
 	/**
+	 * Newest and oldest published posts per root type whose REAL address
+	 * (get_permalink()) joins the corpus.
+	 */
+	private const PERMALINK_RECENT = 25;
+	private const PERMALINK_OLDEST = 5;
+
+	/**
+	 * Real addresses of a sample of each root type's published posts, taken
+	 * from get_permalink() — independent of the allowlist derivation the rest
+	 * of the corpus shares with the builder. If the builder ever derives a
+	 * line WordPress does not serve (a flat type with a stray post_parent, a
+	 * filtered permalink), the real address misses the list and shows up as a
+	 * would-block instead of passing unmeasured.
+	 *
+	 * @param string[] $root_types Effective CPTs of the enabled root entries.
+	 *
+	 * @return string[] Paths with a trailing slash, locale prefix included.
+	 */
+	private function permalink_sample( array $root_types ): array {
+		global $wpdb;
+		if ( ! isset( $wpdb ) || [] === $root_types ) {
+			return [];
+		}
+
+		$ids = [];
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		foreach ( $root_types as $type ) {
+			$orders = [
+				'DESC' => self::PERMALINK_RECENT,
+				'ASC'  => self::PERMALINK_OLDEST,
+			];
+			foreach ( $orders as $order => $limit ) {
+				foreach ( (array) $wpdb->get_col(
+					$wpdb->prepare(
+						"SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_status = 'publish' AND post_name <> '' ORDER BY ID " . ( 'DESC' === $order ? 'DESC' : 'ASC' ) . ' LIMIT %d', // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the ORDER keyword is one of two literals.
+						$type,
+						$limit
+					)
+				) as $id ) {
+					$ids[ (int) $id ] = $type;
+				}
+			}
+		}
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+
+		// Each post's permalink in its own language (WPML), then back.
+		$lang  = apply_filters( 'wpml_current_language', null );
+		$paths = [];
+		foreach ( $ids as $id => $type ) {
+			$post_lang = apply_filters(
+				'wpml_element_language_code',
+				null,
+				[
+					'element_id'   => $id,
+					'element_type' => $type,
+				]
+			);
+			if ( is_string( $post_lang ) && '' !== $post_lang ) {
+				do_action( 'wpml_switch_language', $post_lang );
+			}
+			$link = get_permalink( $id );
+			if ( ! is_string( $link ) || '' === $link || false !== strpos( $link, '?' ) ) {
+				continue;
+			}
+			$path = (string) wp_parse_url( $link, PHP_URL_PATH );
+			if ( '' !== $path ) {
+				$paths[] = '/' . trim( $path, '/' ) . ( '/' === $path ? '' : '/' );
+			}
+		}
+		if ( is_string( $lang ) && '' !== $lang ) {
+			do_action( 'wpml_switch_language', $lang );
+		}
+		return $paths;
+	}
+
+	/**
 	 * Walk the candidate config and report what root mode would 404.
 	 *
 	 * @param array<string, mixed> $candidate Candidate config document (entries
@@ -157,6 +233,7 @@ class RootPreflight {
 		$would_block = [];
 		$warn_block  = [];
 		$urls        = $this->probe_urls( $candidate, $bodies, $root_candidates, $published, $extras_lines, $excluded_flat, $locale_pattern );
+		$urls        = array_values( array_unique( array_merge( $urls, $this->permalink_sample( array_keys( $root_candidates ) ) ) ) );
 		foreach ( $urls as $url ) {
 			$decision = $this->decide( $url, $entries, $bodies, $excluded_flat, $match_candidates, $locale_pattern );
 			if ( 0 !== strpos( $decision['marker'], 'blocked' ) ) {

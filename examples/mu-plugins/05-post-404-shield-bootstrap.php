@@ -38,8 +38,9 @@ if ( ! defined( 'POST_SHIELD_LOADED' ) ) {
 // Generator (WRITE path) — builds the allowlists the front-end reads, bakes the
 // themed 404 and runs the settings screen. A plain page view uses none of it, so
 // it loads only where generator_needed() says so: admin, cron, WP-CLI, REST,
-// XML-RPC, non-GET requests, /robots.txt and the bake probe. If that check is
-// missing or fails, the generator loads as it always did.
+// XML-RPC, non-GET requests, /robots.txt and the bake probe — or, on any other
+// request, the moment something writes a post. If that check is missing or
+// fails, the generator loads as it always did.
 $post_shield_generator = __DIR__ . '/post-404-shield/bootstrap.php';
 $post_shield_context   = __DIR__ . '/post-404-shield/src/php/Function/LoadContext.php';
 $post_shield_needed    = true;
@@ -63,10 +64,26 @@ if ( is_readable( $post_shield_context ) ) {
 	}
 }
 
-if ( $post_shield_needed && is_readable( $post_shield_generator ) ) {
+$post_shield_load = static function () use ( $post_shield_generator ): void {
+	if ( ! is_readable( $post_shield_generator ) ) {
+		return;
+	}
 	try {
 		require_once $post_shield_generator;
 	} catch ( \Throwable $e ) {
 		error_log( '[post-404-shield] generator bootstrap failed to load: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+	}
+};
+
+if ( $post_shield_needed ) {
+	$post_shield_load();
+} else {
+	// A page view normally writes nothing, but a plugin can publish during one
+	// — PublishPress Revisions publishes a due scheduled revision inline when
+	// its WP-Cron scheduling is off. The first post-write hook loads the
+	// generator; its own listeners, at later priorities, then run in that same
+	// dispatch, so the new or renamed slug is appended at once.
+	foreach ( [ 'transition_post_status', 'post_updated', 'save_post', 'add_attachment', 'edit_attachment', 'revision_applied', 'revision_published' ] as $post_shield_write_hook ) {
+		add_action( $post_shield_write_hook, $post_shield_load, PHP_INT_MIN, 0 );
 	}
 }

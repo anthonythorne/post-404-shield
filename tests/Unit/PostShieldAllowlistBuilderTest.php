@@ -17,8 +17,10 @@ namespace Post404Shield\Tests;
 use PHPUnit\Framework\TestCase;
 use Post404Shield\Library\AllowlistBuilder;
 
-// Require ONLY the class file. It has no top-level side effects, and the methods
-// under test touch only preg_match + the filesystem. __DIR__ is tests/unit-testing/unit.
+// Require the class file and the reader functions it calls (temp_path()). Neither
+// has top-level side effects, and the methods under test touch only preg_match +
+// the filesystem. __DIR__ is tests/unit-testing/unit.
+require_once __DIR__ . '/../../post-404-shield/src/php/Function/ConfigReader.php';
 require_once __DIR__ . '/../../post-404-shield/src/php/Library/AllowlistBuilder.php';
 
 /**
@@ -207,6 +209,85 @@ class PostShieldAllowlistBuilderTest extends TestCase {
 		$this->assertStringContainsString( "\nabout/team/lead\n", (string) file_get_contents( $file ), 'Newline-wrapped for the loader.' );
 
 		$this->assertSame( 0, $builder->append_slugs_to_file( $file, [ 'a/b' ], 'slug' ), 'Slug mode rejects a path.' );
+
+		// A content-only edit re-appends lines that are already listed: skip
+		// them, and write a repeated new line once.
+		$this->assertSame( 0, $builder->append_slugs_to_file( $file, [ 'about', 'about/team' ], 'full-path' ), 'Already listed.' );
+		$this->assertSame( 1, $builder->append_slugs_to_file( $file, [ 'about', 'contact', 'contact' ], 'full-path' ) );
+		$this->assertSame( [ 'about', 'about/team', 'about/team/lead', 'contact' ], $this->parse_slugs( (string) file_get_contents( $file ) ) );
+		$this->assertSame( 1, $builder->append_slugs_to_file( $file, [ 'about/te' ], 'full-path' ), 'A prefix of a listed line is a different line.' );
+	}
+
+	/**
+	 * URIs are built in memory the way get_page_uri() walks them: ancestors
+	 * prepended, a slugless ancestor skipped, a missing parent or a cycle
+	 * ending the chain. Ancestors outside the rows come from one batched read.
+	 *
+	 * @return void
+	 */
+	public function test_resolve_uris_walks_like_get_page_uri() {
+		$GLOBALS['wpdb'] = new class() {
+			/** @var string */
+			public $posts = 'wp_posts';
+			/** @var int */
+			public $reads = 0;
+			/**
+			 * Stub prepare: keep the IDs.
+			 *
+			 * @param string $query SQL.
+			 * @param int[]  $args  IDs.
+			 * @return int[]
+			 */
+			public function prepare( $query, $args ) {
+				return $args;
+			}
+			/**
+			 * Rows for the requested IDs.
+			 *
+			 * @param int[] $ids IDs.
+			 * @return object[]
+			 */
+			public function get_results( $ids ) {
+				++$this->reads;
+				$table = [
+					10 => [ 'products', 0 ],
+					11 => [ 'cameras', 10 ],
+					12 => [ '', 11 ],
+				];
+				$rows  = [];
+				foreach ( $ids as $id ) {
+					if ( isset( $table[ $id ] ) ) {
+						$rows[] = (object) [ 'ID' => $id, 'post_name' => $table[ $id ][0], 'post_parent' => $table[ $id ][1] ];
+					}
+				}
+				return $rows;
+			}
+		};
+
+		$rows = [
+			(object) [ 'ID' => 1, 'post_name' => 'top', 'post_parent' => 0 ],
+			(object) [ 'ID' => 2, 'post_name' => 'child', 'post_parent' => 1 ],
+			(object) [ 'ID' => 3, 'post_name' => 'x-t5', 'post_parent' => 12 ],
+			(object) [ 'ID' => 4, 'post_name' => 'orphan', 'post_parent' => 999 ],
+			(object) [ 'ID' => 5, 'post_name' => 'loop-a', 'post_parent' => 6 ],
+			(object) [ 'ID' => 6, 'post_name' => 'loop-b', 'post_parent' => 5 ],
+		];
+		$method = new \ReflectionMethod( AllowlistBuilder::class, 'resolve_uris' );
+		$method->setAccessible( true );
+		$uris = $method->invoke( new AllowlistBuilder( [] ), $rows );
+		unset( $GLOBALS['wpdb'] );
+
+		$this->assertSame(
+			[
+				1 => 'top',
+				2 => 'top/child',
+				3 => 'products/cameras/x-t5',
+				4 => 'orphan',
+				5 => 'loop-b/loop-a',
+				6 => 'loop-a/loop-b',
+			],
+			$uris
+		);
 	}
 
 	/**
@@ -335,7 +416,9 @@ class PostShieldAllowlistBuilderTest extends TestCase {
 	 * @return void
 	 */
 	private function delete_tree( string $dir ): void {
-		foreach ( (array) glob( $dir . '/*' ) as $path ) {
+		// scandir, not glob: the writer's `.lock` is a dotfile.
+		foreach ( array_diff( (array) scandir( $dir ), [ '.', '..' ] ) as $name ) {
+			$path = $dir . '/' . $name;
 			if ( is_dir( $path ) ) {
 				$this->delete_tree( $path );
 			} else {

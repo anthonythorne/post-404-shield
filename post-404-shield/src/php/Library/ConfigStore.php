@@ -228,7 +228,8 @@ class ConfigStore {
 	 * Inject the allowlist rebuild handler used for synchronous mode-switch
 	 * rebuilds inside write().
 	 *
-	 * @param callable $handler fn( string[] $post_types, array $entries ): void.
+	 * @param callable $handler fn( string[] $post_types, array $entries ): bool —
+	 *                          false when any list failed to write.
 	 *
 	 * @return void
 	 */
@@ -817,8 +818,12 @@ class ConfigStore {
 	 *
 	 * Exact sources yield an exact slug. A regex/starts-with source yields the
 	 * literal prefix plus `*` (see `redirect_pattern_base()`), matched by
-	 * `slug_is_reserved()`. Sources deeper than one segment under a base are
-	 * skipped: slug mode only ever matches a single segment.
+	 * `slug_is_reserved()`. A source deeper than one segment under a base
+	 * reserves its FIRST segment: the matcher tests reserved slugs against the
+	 * first segment at any depth, so that passes the source's whole family to
+	 * WordPress — wider than the redirect, but only in the fail-open direction,
+	 * and the only way its 301 can fire (depth policy would otherwise answer
+	 * `/{base}/{slug}/{deeper}/` first).
 	 *
 	 * Kept in its own bucket so a rebuild can replace it wholesale without
 	 * touching operator-typed reserved slugs.
@@ -860,12 +865,17 @@ class ConfigStore {
 					if ( ! is_string( $base ) || '' === $base || 0 !== strpos( $path . '/', $base . '/' ) ) {
 						continue;
 					}
-					$slug = trim( substr( $path, strlen( $base ) ), '/' );
-					// Single segment only, and the same charset the matcher captures.
-					if ( '' === $slug || false !== strpos( $slug, '/' ) || 1 !== preg_match( '/^[a-z0-9_-]+$/', $slug ) ) {
+					$tail = trim( substr( $path, strlen( $base ) ), '/' );
+					$slug = explode( '/', $tail )[0];
+					// A wildcard (always inside the LAST segment, see
+					// redirect_pattern_base()) below the first segment leaves
+					// that segment whole, so it is reserved exactly.
+					$deep = false !== strpos( $tail, '/' );
+					// The same charset the matcher captures.
+					if ( '' === $slug || 1 !== preg_match( '/^[a-z0-9_-]+$/', $slug ) ) {
 						continue;
 					}
-					$derived[ $key ][] = $wildcard ? $slug . '*' : $slug;
+					$derived[ $key ][] = $wildcard && ! $deep ? $slug . '*' : $slug;
 				}
 			}
 		}
@@ -1021,6 +1031,65 @@ class ConfigStore {
 	// --- Validation -----------------------------------------------------------
 
 	/**
+	 * How an entry is named in messages: what its row on the settings screen
+	 * shows. A blocked section is listed under its key; a shielded type under
+	 * its post type's name with the post type itself (the row's chip) — never
+	 * the internal key alone, which can differ from both after an import.
+	 *
+	 * @param string               $key   Entry key.
+	 * @param array<string, mixed> $entry Entry settings.
+	 *
+	 * @return string
+	 */
+	public function entry_label( string $key, array $entry ): string {
+		if ( 'block' === ( $entry['mode'] ?? 'allowlist' ) ) {
+			return $key;
+		}
+		$type   = is_string( $entry['post_type'] ?? null ) ? $entry['post_type'] : $key;
+		$object = function_exists( 'get_post_type_object' ) ? get_post_type_object( $type ) : null;
+		if ( null === $object || ! is_string( $object->labels->name ?? null ) || '' === $object->labels->name ) {
+			return $type;
+		}
+		return sprintf( '%s (%s)', $object->labels->name, $type );
+	}
+
+	/**
+	 * One post type, one format: a type shielded at the root builds a
+	 * full-path allowlist, a based entry for the same type a slug one, and the
+	 * builder would take whichever entry comes first — a based `page` entry
+	 * ahead of the root one would reduce the root page list to top-level slugs
+	 * and 404 every child page.
+	 *
+	 * @param array<string, mixed> $entries Candidate entries.
+	 *
+	 * @return string[] Errors.
+	 */
+	private function shared_type_errors( array $entries ): array {
+		$root_types  = [];
+		$based_types = [];
+		foreach ( $entries as $key => $entry ) {
+			if ( ! is_array( $entry ) || ( isset( $entry['enabled'] ) && false === $entry['enabled'] ) || 'allowlist' !== ( $entry['mode'] ?? 'allowlist' ) ) {
+				continue;
+			}
+			$type = (string) ( $entry['post_type'] ?? $key );
+			if ( true === ( $entry['root'] ?? false ) ) {
+				$root_types[ $type ] = true;
+			} else {
+				$based_types[ $type ] = true;
+			}
+		}
+		$errors = [];
+		foreach ( array_keys( array_intersect_key( $based_types, $root_types ) ) as $type ) {
+			$errors[] = sprintf(
+				/* translators: %s: post type name and slug. */
+				__( '%s is shielded at the root on the Pages & posts tab, so it cannot also be shielded under a URL base. Switch one of them off.', 'post-404-shield' ),
+				$this->entry_label( (string) $type, [ 'post_type' => (string) $type ] )
+			);
+		}
+		return $errors;
+	}
+
+	/**
 	 * Validate a candidate config document for saving.
 	 *
 	 * Returns EVERY failure (the admin banner lists them all), plus non-blocking
@@ -1070,29 +1139,29 @@ class ConfigStore {
 				$errors[] = __( 'An entry has a malformed key.', 'post-404-shield' );
 				continue;
 			}
-			$label         = $key;
+			$label         = $this->entry_label( $key, $entry );
 			$entry_mode    = $entry['mode'] ?? 'allowlist';
 			$entry_enabled = ! isset( $entry['enabled'] ) || false !== $entry['enabled'];
 			$entry_root    = true === ( $entry['root'] ?? false );
 			if ( ! in_array( $entry_mode, [ 'allowlist', 'block' ], true ) ) {
-				/* translators: %s: entry key. */
+				/* translators: %s: entry name. */
 				$errors[] = sprintf( __( '%s: mode must be "allowlist" or "block".', 'post-404-shield' ), $label );
 				// Reported once; the checks below take a string (strict_types), so a
 				// hand-staged non-string mode must not fatal the save instead.
 				$entry_mode = '';
 			}
 			if ( isset( $entry['root'] ) && ! is_bool( $entry['root'] ) ) {
-				/* translators: %s: entry key. */
+				/* translators: %s: entry name. */
 				$errors[] = sprintf( __( '%s: root must be a boolean.', 'post-404-shield' ), $label );
 			}
 			if ( isset( $entry['allow_pagination'] ) && ! is_bool( $entry['allow_pagination'] ) ) {
-				/* translators: %s: entry key. */
+				/* translators: %s: entry name. */
 				$errors[] = sprintf( __( '%s: the pagination allowance must be a boolean.', 'post-404-shield' ), $label );
 			}
 
 			// Root entries (root-pages v2) + the unsupported-permalink refusal —
 			// split out to keep this function's complexity in bounds.
-			foreach ( $this->root_entry_errors( $label, $entry, $entry_mode, $entry_enabled, $entry_root, $root_dwellers, $post_info ) as $root_error ) {
+			foreach ( $this->root_entry_errors( $label, $entry + [ 'post_type' => $key ], $entry_mode, $entry_enabled, $entry_root, $root_dwellers, $post_info ) as $root_error ) {
 				$errors[] = $root_error;
 			}
 			if ( $entry_root && $entry_enabled ) {
@@ -1109,12 +1178,12 @@ class ConfigStore {
 			$bases = is_array( $bases ) ? $bases : [];
 			if ( $entry_enabled && ! $entry_root ) {
 				if ( [] === $bases ) {
-					/* translators: %s: entry key. */
+					/* translators: %s: entry name. */
 					$errors[] = sprintf( __( '%s: at least one URL base is required.', 'post-404-shield' ), $label );
 				}
 				foreach ( $bases as $base ) {
 					if ( ! \Post404Shield\url_base_is_valid( $base ) ) {
-						/* translators: 1: entry key, 2: the offending base. */
+						/* translators: 1: entry name, 2: the offending base. */
 						$errors[] = sprintf( __( '%1$s: base "%2$s" is invalid — lowercase letters, digits, hyphens and internal slashes only (no leading/trailing slash).', 'post-404-shield' ), $label, is_scalar( $base ) ? (string) $base : gettype( $base ) );
 						continue;
 					}
@@ -1124,7 +1193,7 @@ class ConfigStore {
 					// First segment only — deeper collisions (e.g. docs/feed) are fine.
 					$first_segment = explode( '/', (string) $base )[0];
 					if ( in_array( $first_segment, \Post404Shield\reserved_namespaces(), true ) ) {
-						/* translators: 1: entry key, 2: the offending base, 3: the reserved namespace. */
+						/* translators: 1: entry name, 2: the offending base, 3: the reserved namespace. */
 						$errors[] = sprintf( __( '%1$s: base "%2$s" collides with the WordPress-reserved "%3$s" URL namespace (pagination/core routes) and cannot be shielded. Untick the entry to disable it (a disabled entry saves fine), or change the base.', 'post-404-shield' ), $label, (string) $base, $first_segment );
 						continue;
 					}
@@ -1143,7 +1212,7 @@ class ConfigStore {
 			// Allowlist-mode extras: statuses must exist; CPT registration warns.
 			$post_type = (string) ( $entry['post_type'] ?? $key );
 			if ( function_exists( 'post_type_exists' ) && ! post_type_exists( $post_type ) ) {
-				/* translators: 1: entry key, 2: post type. */
+				/* translators: 1: entry name, 2: post type. */
 				$warnings[] = sprintf( __( '%1$s: post type "%2$s" is not registered — its allowlist will be empty and the base fails open.', 'post-404-shield' ), $label, $post_type );
 			}
 			if ( isset( $entry['post_status'] ) && is_array( $entry['post_status'] ) && function_exists( 'get_post_stati' ) ) {
@@ -1157,15 +1226,19 @@ class ConfigStore {
 					if ( ! is_string( $status ) || ! isset( $known[ $status ] ) ) {
 						$shown = is_scalar( $status ) ? (string) $status : gettype( $status );
 						if ( $entry_enabled ) {
-							/* translators: 1: entry key, 2: the status. */
+							/* translators: 1: entry name, 2: the status. */
 							$errors[] = sprintf( __( '%1$s: post status "%2$s" does not exist.', 'post-404-shield' ), $label, $shown );
 						} else {
-							/* translators: 1: entry key, 2: the status. */
+							/* translators: 1: entry name, 2: the status. */
 							$warnings[] = sprintf( __( '%1$s: post status "%2$s" is not registered; it is ignored while the entry is off.', 'post-404-shield' ), $label, $shown );
 						}
 					}
 				}
 			}
+		}
+
+		foreach ( $this->shared_type_errors( $entries ) as $shared_error ) {
+			$errors[] = $shared_error;
 		}
 
 		// S1 — the root completeness invariant (root-pages v2, ENFORCED): root
@@ -1203,7 +1276,7 @@ class ConfigStore {
 				$seg_b           = explode( '/', $b );
 				$prefix_len      = min( count( $seg_a ), count( $seg_b ) );
 				if ( array_slice( $seg_a, 0, $prefix_len ) === array_slice( $seg_b, 0, $prefix_len ) ) {
-					/* translators: 1: first entry key, 2: first base, 3: second entry key, 4: second base. */
+					/* translators: 1: first entry name, 2: first base, 3: second entry name, 4: second base. */
 					$errors[] = sprintf( __( 'Bases overlap: %1$s (%2$s) and %3$s (%4$s) — one is a segment-prefix of the other.', 'post-404-shield' ), $label_a, $a, $label_b, $b );
 				}
 			}
@@ -1220,7 +1293,7 @@ class ConfigStore {
 	 * reserved-slug charset. Split from validate() to keep its complexity in
 	 * bounds.
 	 *
-	 * @param string               $label Entry key (for messages).
+	 * @param string               $label Entry name for messages (entry_label()).
 	 * @param array<string, mixed> $entry The entry.
 	 *
 	 * @return string[] Errors.
@@ -1229,23 +1302,23 @@ class ConfigStore {
 		$errors = [];
 
 		if ( ! in_array( $entry['match'] ?? 'slug', [ 'slug', 'full-path' ], true ) ) {
-			/* translators: %s: entry key. */
+			/* translators: %s: entry name. */
 			$errors[] = sprintf( __( '%s: match must be "slug" or "full-path".', 'post-404-shield' ), $label );
 		}
 		if ( ! in_array( $entry['depth_action'] ?? 'passthrough', [ 'passthrough', '404', 'redirect' ], true ) ) {
-			/* translators: %s: entry key. */
+			/* translators: %s: entry name. */
 			$errors[] = sprintf( __( '%s: depth action must be passthrough, 404 or redirect.', 'post-404-shield' ), $label );
 		}
 		foreach ( [ 'depth_allowed', 'cache_ttl', 'edge_ttl' ] as $field ) {
 			if ( isset( $entry[ $field ] ) && ( ! is_int( $entry[ $field ] ) || $entry[ $field ] < 0 ) ) {
-				/* translators: 1: entry key, 2: field name. */
+				/* translators: 1: entry name, 2: field name. */
 				$errors[] = sprintf( __( '%1$s: %2$s must be a whole number ≥ 0, or empty.', 'post-404-shield' ), $label, $field );
 			}
 		}
 		if ( isset( $entry['reserved_allowlist'] ) && is_array( $entry['reserved_allowlist'] ) ) {
 			foreach ( $entry['reserved_allowlist'] as $slug ) {
 				if ( ! is_string( $slug ) || 1 !== preg_match( '/^[a-z0-9-]+$/', $slug ) ) {
-					/* translators: 1: entry key, 2: the offending slug. */
+					/* translators: 1: entry name, 2: the offending slug. */
 					$errors[] = sprintf( __( '%1$s: reserved slug "%2$s" is invalid — lowercase letters, digits and hyphens only.', 'post-404-shield' ), $label, is_scalar( $slug ) ? (string) $slug : gettype( $slug ) );
 				}
 			}
@@ -1261,8 +1334,8 @@ class ConfigStore {
 	 * is refused in any shape (fail open — the shield cannot enumerate those
 	 * URLs). Split from validate() to keep its complexity in bounds.
 	 *
-	 * @param string        $label         Entry key (for messages).
-	 * @param array         $entry         The entry.
+	 * @param string        $label         Entry name for messages (entry_label()).
+	 * @param array         $entry         The entry, `post_type` always set.
 	 * @param string        $entry_mode    Resolved mode.
 	 * @param bool          $entry_enabled Resolved enabled flag.
 	 * @param bool          $entry_root    Resolved root flag.
@@ -1275,17 +1348,19 @@ class ConfigStore {
 		$errors = [];
 
 		if ( $entry_root ) {
-			$root_type = (string) ( $entry['post_type'] ?? $label );
+			$root_type = (string) $entry['post_type'];
 			if ( 'allowlist' !== $entry_mode ) {
-				/* translators: %s: entry key. */
+				/* translators: %s: entry name. */
 				$errors[] = sprintf( __( '%s: a root entry must be an allowlist entry.', 'post-404-shield' ), $label );
 			}
-			if ( [] !== array_filter( (array) ( $entry['url_base'] ?? [] ) ) ) {
-				/* translators: %s: entry key. */
+			// Any value at all — a callback-less array_filter() let "0" and ""
+			// through, to fail later as an internal error.
+			if ( [] !== (array) ( $entry['url_base'] ?? [] ) ) {
+				/* translators: %s: entry name. */
 				$errors[] = sprintf( __( '%s: a root entry has no URL base — its base is the site root by definition.', 'post-404-shield' ), $label );
 			}
 			if ( 'full-path' !== ( $entry['match'] ?? 'full-path' ) ) {
-				/* translators: %s: entry key. */
+				/* translators: %s: entry name. */
 				$errors[] = sprintf( __( '%s: a root entry always matches full paths.', 'post-404-shield' ), $label );
 			}
 			// Dweller membership is SITE STATE (the permalink structure), not
@@ -1293,16 +1368,16 @@ class ConfigStore {
 			// documented emergency rollback (the disable-all save must always
 			// land; disabling IS the remediation).
 			if ( $entry_enabled && null !== $root_dwellers && ! in_array( $root_type, $root_dwellers, true ) ) {
-				/* translators: 1: entry key, 2: post type. */
+				/* translators: 1: entry name, 2: post type. */
 				$errors[] = sprintf( __( '%1$s: "%2$s" is not a root-dwelling type on this site — its URLs live under a base, so it must be shielded as a normal based entry.', 'post-404-shield' ), $label, $root_type );
 			}
 		}
 
 		if ( $entry_enabled && 'allowlist' === $entry_mode
-			&& 'post' === (string) ( $entry['post_type'] ?? $label )
+			&& 'post' === (string) $entry['post_type']
 			&& null !== $post_info && ! $post_info['supported']
 		) {
-			/* translators: %s: entry key. */
+			/* translators: %s: entry name. */
 			$errors[] = sprintf( __( '%s: unsupported permalink structure — the post base cannot be derived (only static segments before %%postname%% are supported), so posts cannot be shielded and fail open. Untick the entry.', 'post-404-shield' ), $label );
 		}
 
@@ -1436,9 +1511,23 @@ class ConfigStore {
 			// full-path rebuilds AFTER the swap (a slug artifact reads a full-path
 			// list safely for the instant in between). Applies to restores too —
 			// they run through this same pipeline.
+			// A list that failed to write stays in its old format, so the swap
+			// would put a full-path artifact over a slug list: refuse instead.
 			[ $rebuild_before, $rebuild_after ] = $this->match_switch_rebuilds( $config );
-			if ( null !== $this->rebuild_handler && [] !== $rebuild_before ) {
-				( $this->rebuild_handler )( $rebuild_before, $config['entries'] );
+			if ( null !== $this->rebuild_handler && [] !== $rebuild_before
+				&& false === ( $this->rebuild_handler )( $rebuild_before, $config['entries'] )
+			) {
+				return [
+					'ok'       => false,
+					'errors'   => [
+						sprintf(
+							/* translators: %s: comma-separated post type names. */
+							__( 'Nothing was saved: the allowlist for %s could not be written in the new format, so switching would 404 real URLs. Check that the uploads/post-404-shield directory is writable, then save again.', 'post-404-shield' ),
+							implode( ', ', $rebuild_before )
+						),
+					],
+					'warnings' => $validated['warnings'],
+				];
 			}
 
 			// S6 — the root-preflight coverage gate. Any save that leaves root mode
@@ -1495,6 +1584,10 @@ class ConfigStore {
 				$coverage    = ( $this->coverage_handler )( $config, is_array( $current_doc['entries'] ?? null ) ? $current_doc['entries'] : null );
 				$breaks      = (array) ( $coverage['breaks'] ?? [] );
 				$unclaimed   = (array) ( $coverage['unclaimed'] ?? [] );
+				$name        = function ( $entry_key ) use ( $config ): string {
+					$entry = $config['entries'][ (string) $entry_key ] ?? [];
+					return $this->entry_label( (string) $entry_key, is_array( $entry ) ? $entry : [] );
+				};
 				if ( [] !== $unclaimed && empty( $flags['force_preflight'] ) ) {
 					$unclaimed_errors = [];
 					foreach ( $unclaimed as $entry_key => $home ) {
@@ -1507,7 +1600,7 @@ class ConfigStore {
 							: sprintf(
 								/* translators: 1: entry name, 2: the URL base its posts really use. */
 								__( 'Coverage check FAILED: none of %1$s\'s real URLs sit under its URL bases, so it would shield nothing. Its posts live under /%2$s/ — check the URL base.', 'post-404-shield' ),
-								(string) $entry_key,
+								$name( $entry_key ),
 								(string) $home
 							);
 					}
@@ -1530,7 +1623,7 @@ class ConfigStore {
 						$coverage_errors[] = sprintf(
 							/* translators: 1: entry name, 2: the URL base its posts really use. */
 							__( '%1$s: its posts live under /%2$s/ — check the URL base.', 'post-404-shield' ),
-							(string) $entry_key,
+							$name( $entry_key ),
 							(string) $home
 						);
 					}
@@ -1540,7 +1633,7 @@ class ConfigStore {
 							__( 'Would break: %1$s (%2$s, %3$s)', 'post-404-shield' ),
 							(string) $break['url'],
 							(string) $break['marker'],
-							(string) $break['entry']
+							$name( $break['entry'] )
 						);
 					}
 					return [
@@ -1569,7 +1662,7 @@ class ConfigStore {
 						$validated['warnings'][] = sprintf(
 							/* translators: 1: entry name, 2: the URL base most of its posts use. */
 							__( '%1$s: most of its real URLs live under /%2$s/, which is not one of its URL bases — check the bases are complete.', 'post-404-shield' ),
-							(string) $entry_key,
+							$name( $entry_key ),
 							(string) $home
 						);
 					}
@@ -1750,10 +1843,13 @@ class ConfigStore {
 		// whole file BEFORE running `exit`, so a direct hit on the JSON body is a
 		// Parse error (500 + log line) rather than an empty response. Readers
 		// skip line 1 either way.
-		$content = "<?php exit; __halt_compiler(); // post-404-shield generated config — do not edit by hand.\n" . $json . "\n";
+		// The guard line also carries the loader's pre-filter, so a request
+		// that is not shield business exits without decoding the document.
+		$content = '<?php exit; __halt_compiler(); // post-404-shield generated config — do not edit by hand. prefilter:'
+			. wp_json_encode( \Post404Shield\prefilter_for( $config ), JSON_UNESCAPED_SLASHES ) . "\n" . $json . "\n";
 
 		// Named temp file in the SAME directory so rename() is an atomic swap.
-		$tmp     = $file . '.' . getmypid() . '.tmp';
+		$tmp     = \Post404Shield\temp_path( $file );
 		$written = file_put_contents( $tmp, $content ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_file_put_contents
 		// A SHORT write is not an error to file_put_contents — a full disk or a
 		// quota stop returns a byte count, not false. Renaming that into place
@@ -2118,9 +2214,11 @@ class ConfigStore {
 		//
 		// An environment is brought onto the artifact model by staging its
 		// `post_shield_config` option BEFORE the code lands (branch 2 then
-		// regenerates the artifact on the first request), or afterwards with
-		// `wp post-shield config import-legacy`. Both are explicit operator
-		// actions. Nothing reconfigures a site as a side effect of deploying.
+		// writes the artifact on the next admin request or the daily health
+		// check — until then every request fails open to WordPress), or
+		// afterwards with `wp post-shield config import-legacy`. Both are
+		// explicit operator actions. Nothing reconfigures a site as a side
+		// effect of deploying.
 	}
 
 	/**
@@ -2273,18 +2371,22 @@ class ConfigStore {
 	// --- Housekeeping --------------------------------------------------------------
 
 	/**
-	 * Remove stale config temp files left by a crashed save (older than a day).
-	 * Called by the daily cron sweep.
+	 * Remove temp files left by a killed write — the config, every allowlist
+	 * and the probe token — once they are an hour old (no write takes that
+	 * long, so nothing in flight is touched). Called by the daily cron sweep.
 	 *
 	 * @return void
 	 */
 	public function sweep_tmp(): void {
-		$files = glob( $this->artifact_dir() . '/config*.tmp' );
-		if ( ! is_array( $files ) ) {
-			return;
-		}
+		$files = array_merge(
+			(array) glob( $this->artifact_dir() . '/*.tmp*' ),
+			(array) glob( $this->artifact_dir() . '/*/*.tmp*' )
+		);
 		foreach ( $files as $file ) {
-			if ( is_file( $file ) && ( time() - (int) filemtime( $file ) ) > DAY_IN_SECONDS ) {
+			if ( ! is_string( $file ) || ! \Post404Shield\is_temp_file_name( basename( $file ) ) ) {
+				continue;
+			}
+			if ( is_file( $file ) && ( time() - (int) filemtime( $file ) ) > HOUR_IN_SECONDS ) {
 				unlink( $file ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_unlink
 			}
 		}
