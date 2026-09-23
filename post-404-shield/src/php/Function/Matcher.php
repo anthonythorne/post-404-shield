@@ -210,9 +210,18 @@ function strip_trailing_sub_routes( array $segments, bool $allow_pagination = tr
  *   7. no hit → `blocked`, attributed to the FIRST candidate's type (root
  *      ownership is inherently ambiguous; the loader orders `page` first).
  *
+ * A candidate's `body` may be the allowlist buffer itself or a callable that
+ * returns it (`?string`). The loader passes callables so an allowlist file is
+ * read only when step 6 reaches it: steps 1–5 answer most requests without
+ * reading any, and a hit on the first candidate skips the rest. Each read costs
+ * about a millisecond on network storage, so that is most of this function's
+ * real cost. A callable is invoked at most once. If one returns null, root
+ * mode is not in place (a missing or empty allowlist) and the result is
+ * `pass`: without every buffer, a miss cannot justify a block.
+ *
  * @param string $path           URL path with the query string already stripped.
  * @param array  $excluded_bases Flat list of excluded base entries (floor + derived + operator, pre-flattened).
- * @param array  $entries        Ordered candidates: {type: string, allow_pagination: bool, body: string} each.
+ * @param array  $entries        Ordered candidates: {type: string, allow_pagination: bool, body: string|callable(): ?string} each.
  * @param string $locale_pattern Regex BODY for the locale segment, or '' for none.
  *
  * @return array{outcome: 'pass'|'allowed'|'blocked', type: string, locale: string}
@@ -298,6 +307,12 @@ function match_root( string $path, array $excluded_bases, array $entries, string
 			continue;
 		}
 		$body = $entry['body'] ?? null;
+		if ( ! is_string( $body ) && is_callable( $body ) ) {
+			$body = $body();
+			if ( null === $body ) {
+				return $pass( $locale ); // A missing or empty allowlist: root mode is not in place.
+			}
+		}
 		if ( ! is_string( $body ) || '' === $body ) {
 			continue; // An empty candidate can never justify a block (fail-open).
 		}

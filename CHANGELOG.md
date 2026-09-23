@@ -4,6 +4,24 @@
 
 Moved out of the sites that used it into its own repository.
 
+- Less work per request. File reads dominate the shield's cost on network storage
+  (about a millisecond each), so the loader now avoids them:
+  - `/`, WordPress's own trees and dotted first segments pass before anything is
+    read (REST, cron, admin, `robots.txt`, sitemaps);
+  - the config is read once per request and validated from memory
+    (`read_config_validated_in_memory()`), where it used to be read twice;
+  - root allowlists are read lazily, page first, stopping at the first hit, so a
+    real page reads one instead of three. `match_root()` accepts a callable body.
+  Measured against a production site's files: a real page view went from five
+  file reads to two, and a REST, cron or admin request from five to none. Every
+  decision is unchanged.
+- The generator (`bootstrap.php`) loads only where it is needed — admin, cron,
+  WP-CLI, REST, XML-RPC, non-GET requests, `robots.txt` and the bake probe
+  (`generator_needed()`), about 6 ms saved per page view. Sites vendoring the
+  shield should copy the updated `examples/mu-plugins/05-post-404-shield-bootstrap.php`.
+- Schedule checks run only in wp-admin, on a cron run or under WP-CLI, not on
+  every `init`.
+
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing
   install upgrades in place with its config, allowlists and baked pages intact.

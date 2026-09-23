@@ -76,6 +76,29 @@ define( 'POST_SHIELD_LOADED', true );
 		newrelic_add_custom_parameter( 'wpAuthCookie', is_string( $cookies ) && false !== strpos( $cookies, 'wordpress_logged_in_' ) );
 	}
 
+	// Fast path: a request that can never be shield business, whatever the config
+	// says, goes straight to WordPress before anything is read from disk. Each file
+	// read costs about a millisecond on network storage, and these are most of the
+	// GET requests that reach PHP (REST, cron, the home page, feeds, sitemaps).
+	// Three shapes qualify. `/` itself: root matching passes it and no base can be
+	// empty. WordPress's own trees (wp-admin, wp-json, wp-content, wp-includes):
+	// reserved namespaces no base may claim, and root matching's hard floor. A
+	// first segment containing a dot (wp-login.php, wp-cron.php, xmlrpc.php,
+	// robots.txt, sitemap XML, .well-known): bases and locale patterns are
+	// dot-free, and root matching passes any segment outside [a-z0-9_-].
+	// Passing early is the fail-open direction, so this can only ever hand
+	// WordPress a request the full decision would also have handed it.
+	$early_path = parse_url( $uri, PHP_URL_PATH ); // phpcs:ignore WordPress.WP.AlternativeFunctions.parse_url_parse_url -- wp_parse_url() does not exist pre-boot.
+	if ( is_string( $early_path ) ) {
+		$first_segment = explode( '/', ltrim( $early_path, '/' ), 2 )[0];
+		if ( '' === $first_segment
+			|| in_array( $first_segment, [ 'wp-admin', 'wp-json', 'wp-content', 'wp-includes' ], true )
+			|| false !== strpos( $first_segment, '.' )
+		) {
+			return;
+		}
+	}
+
 	// Allowlist directory: derived from this file's location (works pre-boot and
 	// at mu-plugin load). __DIR__ = .../mu-plugins/post-404-shield ; two up =
 	// wp-content. Computed BEFORE the config load — the config artifact itself
@@ -172,8 +195,14 @@ define( 'POST_SHIELD_LOADED', true );
 	}
 
 	// Shield business: validate the whole document before acting on any of
-	// it. Same file, same request — the decode above is reused, not repeated.
-	if ( null === \Post404Shield\read_config( $config_file ) ) {
+	// it. Validated from memory — the bytes read above — so the file is not
+	// read a second time in this request (about a millisecond on network
+	// storage). A ConfigReader.php from an older release lacks that function;
+	// fall back to read_config() rather than switching the shield off.
+	$validated = function_exists( 'Post404Shield\\read_config_validated_in_memory' )
+		? \Post404Shield\read_config_validated_in_memory( $config_file )
+		: \Post404Shield\read_config( $config_file );
+	if ( null === $validated ) {
 		return;
 	}
 
@@ -460,28 +489,36 @@ define( 'POST_SHIELD_LOADED', true );
 		}
 	}
 
-	// The union candidates, in order (page first — the ambiguity owner). Each
-	// enabled root type MUST contribute a readable, NON-EMPTY allowlist, or
-	// root mode is inert this request: with no base to scope it, matching
-	// against a missing or empty list would 404 the whole site (fail-open).
+	// The union candidates, in order (page first — the ambiguity owner). Each is
+	// a loader, read only if match_root() reaches it: its cheap checks answer most
+	// requests without any read, and a hit on `page` skips the rest. That keeps a
+	// real page view to one allowlist read instead of every one (about a
+	// millisecond each on network storage).
+	// Each enabled root type MUST contribute a readable, NON-EMPTY allowlist, or
+	// root mode is inert: with no base to scope it, matching against a missing or
+	// empty list would 404 the whole site. A loader returns null for that, and
+	// match_root() then passes the request through (fail-open) — it can only
+	// block after every loader has returned a usable list.
 	$candidates = [];
 	foreach ( $root_entries as $root_type => $settings ) {
 		$allowlist_file = $allowlist_dir . '/' . $root_type . '/allowlist.php';
-		if ( ! is_readable( $allowlist_file ) ) {
-			return;
-		}
-		$raw = file_get_contents( $allowlist_file ); // phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
-		if ( false === $raw ) {
-			return;
-		}
-		$guard_end = strpos( $raw, "\n" );
-		if ( false === $guard_end || ! isset( $raw[ $guard_end + 1 ] ) || "\n" === $raw[ $guard_end + 1 ] ) {
-			return;
-		}
-		$candidates[] = [
+		$candidates[]   = [
 			'type'             => (string) $root_type,
 			'allow_pagination' => ! isset( $settings['allow_pagination'] ) || false !== $settings['allow_pagination'],
-			'body'             => $raw,
+			'body'             => static function () use ( $allowlist_file ): ?string {
+				if ( ! is_readable( $allowlist_file ) ) {
+					return null;
+				}
+				$raw = file_get_contents( $allowlist_file ); // phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
+				if ( false === $raw ) {
+					return null;
+				}
+				$guard_end = strpos( $raw, "\n" );
+				if ( false === $guard_end || ! isset( $raw[ $guard_end + 1 ] ) || "\n" === $raw[ $guard_end + 1 ] ) {
+					return null;
+				}
+				return $raw;
+			},
 		];
 	}
 
@@ -489,18 +526,17 @@ define( 'POST_SHIELD_LOADED', true );
 	// automatically (never an operator row). The FILE must exist — a missing
 	// build means the union is incomplete and root mode may not block anything —
 	// but an EMPTY file is a legitimate state (no attachments, no renames).
-	$extras_file = $allowlist_dir . '/root-extras/allowlist.php';
-	if ( ! is_readable( $extras_file ) ) {
-		return;
-	}
-	$extras_raw = file_get_contents( $extras_file ); // phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
-	if ( false === $extras_raw ) {
-		return;
-	}
+	$extras_file  = $allowlist_dir . '/root-extras/allowlist.php';
 	$candidates[] = [
 		'type'             => 'root-extras',
 		'allow_pagination' => true,
-		'body'             => $extras_raw,
+		'body'             => static function () use ( $extras_file ): ?string {
+			if ( ! is_readable( $extras_file ) ) {
+				return null;
+			}
+			$raw = file_get_contents( $extras_file ); // phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
+			return false === $raw ? null : $raw;
+		},
 	];
 
 	$decision = \Post404Shield\match_root( $path, $excluded_flat, $candidates, $locale_pattern );

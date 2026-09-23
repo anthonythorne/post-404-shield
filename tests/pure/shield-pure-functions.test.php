@@ -17,6 +17,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../../post-404-shield/src/php/Function/Matcher.php';
 require_once __DIR__ . '/../../post-404-shield/src/php/Function/ConfigReader.php';
+require_once __DIR__ . '/../../post-404-shield/src/php/Function/LoadContext.php';
 
 $failures = 0;
 $checks   = 0;
@@ -453,6 +454,130 @@ check( true, false !== $rv && ( microtime( true ) - $t0 ) < 0.05, 'L2: worst all
 $bad_locale                      = $base_doc;
 $bad_locale['locale']            = [ 'mode' => 'custom', 'pattern' => '[,-z]{1,20}' ];
 check( false, Post404Shield\config_is_valid( $bad_locale ), 'L2: config_is_valid rejects a document with the spanning pattern' );
+
+
+// --- match_root: lazy allowlist bodies ------------------------------------------
+// The loader passes each allowlist as a callable so a file is read only when the
+// decision reaches it. These pin that: no read for a path the cheap checks settle,
+// reading stops at the first hit, and a missing list (null) can never block.
+
+/**
+ * Build lazy candidates that record which loaders ran.
+ *
+ * @param array<string, ?string> $bodies Type => body (null = missing file).
+ * @param array<int, string>     $calls  Filled with the types whose loader ran.
+ *
+ * @return array<int, array<string, mixed>>
+ */
+function lazy_entries( array $bodies, array &$calls ): array {
+	$out = [];
+	foreach ( $bodies as $type => $body ) {
+		$out[] = [
+			'type'             => $type,
+			'allow_pagination' => true,
+			'body'             => static function () use ( $type, $body, &$calls ): ?string {
+				$calls[] = $type;
+				return $body;
+			},
+		];
+	}
+	return $out;
+}
+
+$lazy_bodies = [
+	'page'        => $page_body,
+	'post'        => $post_body,
+	'root-extras' => $xtra_body,
+];
+
+$calls = [];
+check( 'pass:', root_outcome( '/wp-json/wp/v2/', lazy_entries( $lazy_bodies, $calls ), $excluded ), 'lazy: floor path passes' );
+check( [], $calls, 'lazy: floor path reads no allowlist' );
+
+$calls = [];
+check( 'pass:', root_outcome( '/sitemap_index.xml', lazy_entries( $lazy_bodies, $calls ), $excluded ), 'lazy: dotted path passes' );
+check( [], $calls, 'lazy: dotted path reads no allowlist' );
+
+$calls = [];
+check( 'pass:', root_outcome( '/author/annabelle/', lazy_entries( $lazy_bodies, $calls ), $excluded ), 'lazy: excluded base passes' );
+check( [], $calls, 'lazy: excluded base reads no allowlist' );
+
+$calls = [];
+check( 'allowed:page', root_outcome( '/contact/', lazy_entries( $lazy_bodies, $calls ), $excluded ), 'lazy: page hit allowed' );
+check( [ 'page' ], $calls, 'lazy: a page hit reads only the page allowlist' );
+
+$calls = [];
+check( 'allowed:post', root_outcome( '/better-support/', lazy_entries( $lazy_bodies, $calls ), $excluded ), 'lazy: post hit allowed' );
+check( [ 'page', 'post' ], $calls, 'lazy: a post hit stops before the extras' );
+
+$calls = [];
+check( 'blocked:page', root_outcome( '/casd/', lazy_entries( $lazy_bodies, $calls ), $excluded ), 'lazy: unknown slug blocked' );
+check( [ 'page', 'post', 'root-extras' ], $calls, 'lazy: a block reads every allowlist, each once' );
+
+$calls         = [];
+$missing_post  = $lazy_bodies;
+$missing_post['post'] = null;
+check( 'pass:', root_outcome( '/casd/', lazy_entries( $missing_post, $calls ), $excluded ), 'lazy: a missing allowlist can never justify a block' );
+check( 'allowed:page', root_outcome( '/contact/', lazy_entries( $missing_post, $calls ), $excluded ), 'lazy: a hit before the missing list still passes through' );
+
+$calls         = [];
+$empty_extras  = $lazy_bodies;
+$empty_extras['root-extras'] = '';
+check( 'blocked:page', root_outcome( '/casd/', lazy_entries( $empty_extras, $calls ), $excluded ), 'lazy: an empty extras file is legitimate and still lets a miss block' );
+
+// A string body that happens to name a PHP function is data, never a loader.
+$named = [
+	[
+		'type'             => 'page',
+		'allow_pagination' => true,
+		'body'             => 'strlen',
+	],
+];
+check( 'blocked:page', root_outcome( '/casd/', $named, $excluded ), 'lazy: a string body is never called' );
+
+// --- generator_needed -------------------------------------------------------------
+
+/**
+ * Shorthand for a GET/HEAD/POST request with no special context.
+ *
+ * @param string $uri    REQUEST_URI.
+ * @param string $method REQUEST_METHOD.
+ *
+ * @return bool
+ */
+function gen_needed( string $uri, string $method = 'GET' ): bool {
+	return Post404Shield\generator_needed(
+		[
+			'REQUEST_METHOD' => $method,
+			'REQUEST_URI'    => $uri,
+		],
+		false,
+		false,
+		false,
+		false,
+		'wp-json'
+	);
+}
+
+check( false, gen_needed( '/about-us/' ), 'generator: a page view skips it' );
+check( false, gen_needed( '/' ), 'generator: the home page skips it' );
+check( false, gen_needed( '/about-us/?utm_source=x' ), 'generator: a query string alone does not load it' );
+check( false, gen_needed( '/about-us/', 'HEAD' ), 'generator: HEAD skips it' );
+check( false, gen_needed( '/wp-login.php' ), 'generator: the login screen skips it' );
+check( true, gen_needed( '/contact/', 'POST' ), 'generator: a front-end POST loads it (a form can create a post)' );
+check( true, gen_needed( '/wp-json/wp/v2/pages/2' ), 'generator: REST by path loads it' );
+check( true, gen_needed( '/wp-json' ), 'generator: the bare REST root loads it' );
+check( true, gen_needed( '/blog/wp-json/wp/v2/posts' ), 'generator: REST under a subdirectory install loads it' );
+check( true, gen_needed( '/?rest_route=/wp/v2/pages' ), 'generator: REST by query loads it' );
+check( true, gen_needed( '/robots.txt' ), 'generator: robots.txt loads it (probe Disallow line)' );
+check( true, gen_needed( '/en-au/post-shield-404-probe/?post_shield_bake=abc' ), 'generator: the bake probe loads it' );
+check( false, gen_needed( '/wp-jsonx/' ), 'generator: a lookalike of the REST prefix does not load it' );
+check( true, gen_needed( '' ), 'generator: an empty URI keeps the old behaviour' );
+check( true, Post404Shield\generator_needed( [ 'REQUEST_URI' => '/x/' ], true, false, false, false, 'wp-json' ), 'generator: wp-admin loads it' );
+check( true, Post404Shield\generator_needed( [ 'REQUEST_URI' => '/x/' ], false, true, false, false, 'wp-json' ), 'generator: a cron run loads it' );
+check( true, Post404Shield\generator_needed( [ 'REQUEST_URI' => '/x/' ], false, false, true, false, 'wp-json' ), 'generator: WP-CLI loads it' );
+check( true, Post404Shield\generator_needed( [ 'REQUEST_URI' => '/xmlrpc.php' ], false, false, false, true, 'wp-json' ), 'generator: XML-RPC loads it' );
+check( true, Post404Shield\generator_needed( [ 'REQUEST_URI' => '/api/v1/x' ], false, false, false, false, 'api' ), 'generator: a custom REST prefix is honoured' );
 
 // --------------------------------------------------------------------------------
 

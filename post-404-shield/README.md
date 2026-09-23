@@ -24,7 +24,7 @@ revisions with one-click restore.
 | | Path | Loads via | Needs WordPress? |
 |---|---|---|---|
 | **Read (front-end)** | `bootstrap-front-end-post-404-shield.php` (+ `src/php/Function/Matcher.php`, `src/php/Function/ConfigReader.php`) | `wp-config.php` (Tier 1) or `05-post-404-shield-bootstrap.php` (Tier 2) | No — pure PHP |
-| **Write (generator)** | `src/php/Controller/*` + `src/php/Library/{AllowlistBuilder,ConfigStore,Static404Baker}.php` | `05-post-404-shield-bootstrap.php` → `bootstrap.php` | Yes — `$wpdb`, hooks, cron, WP-CLI |
+| **Write (generator)** | `src/php/Controller/*` + `src/php/Library/{AllowlistBuilder,ConfigStore,Static404Baker}.php` | `05-post-404-shield-bootstrap.php` → `bootstrap.php`, only for admin, cron, CLI, REST, non-GET, `robots.txt` and the bake probe (`generator_needed()`) | Yes — `$wpdb`, hooks, cron, WP-CLI |
 
 They meet at generated files in `uploads/post-404-shield/`: the runtime config
 (`config.php` + its `config-<stamp>.php` revisions) and one allowlist per type

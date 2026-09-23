@@ -140,6 +140,12 @@ class PostShield404Controller {
 	 * @return void
 	 */
 	public function register_cron_event(): void {
+		// Only where scheduling can matter: wp-admin (including a settings save), a
+		// cron run or WP-CLI. A REST call or a front-end POST never runs cron here, so
+		// checking the schedule on every one of those was wasted work.
+		if ( ! is_admin() && ! wp_doing_cron() && ! ( defined( 'WP_CLI' ) && WP_CLI ) ) {
+			return;
+		}
 		// Reschedule if a prior interval is still registered (migrate to `weekly`).
 		$event = function_exists( 'wp_get_scheduled_event' ) ? wp_get_scheduled_event( self::BAKE_CRON ) : false;
 		if ( false !== $event && 'weekly' !== ( $event->schedule ?? '' ) ) {

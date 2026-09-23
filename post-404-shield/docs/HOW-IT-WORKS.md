@@ -66,7 +66,8 @@ uploads/post-404-shield/config.php  ◀──read ONLY this──  loader + gene
   `config-<YYYYMMDD-HHMMSS>.php` (retention 10–100, default 10; the live
   `config.php` is never pruned). Restore = the same save pipeline fed from an
   old file, behind a diff/confirm screen.
-- **Self-heal** (generator bootstrap, on `wp_loaded` — late enough that
+- **Self-heal** (generator bootstrap, on `wp_loaded` of any request that loads
+  the generator — see *Where the generator loads* below — late enough that
   every CPT and custom status is registered): artifact missing **or invalid**
   with a valid option → regenerated from the option (logged); artifact valid
   with the option missing (DB restore) → the option is rehydrated FROM the
@@ -81,11 +82,27 @@ uploads/post-404-shield/config.php  ◀──read ONLY this──  loader + gene
      auditable revision);
   3. break-glass: delete `uploads/post-404-shield/config.php` over SSH/SFTP —
      state, not code, so it's allowed on WPE. **Caveat: it self-heals from the
-     option on the next mu-plugin load**, so also delete the
+     option on the next admin, cron or REST request**, so also delete the
      `post_shield_config` option (or use the button) for a lasting kill;
   4. the absolute constant `POST_SHIELD_DISABLED` (define as `true` in
      `wp-config.php`, above the Tier-1 require) — checked first in the loader,
      wins over everything, survives self-heal.
+
+## Where the generator loads
+
+The mu-plugin loader requires `bootstrap.php` (the generator) only where
+`generator_needed()` (`src/php/Function/LoadContext.php`) says so: wp-admin
+(including admin-ajax and admin-post), a cron run, WP-CLI, XML-RPC, REST (by
+path or `?rest_route=`), any method other than GET/HEAD, `/robots.txt` (its
+filter adds the probe path's Disallow line) and the bake probe's own loopback.
+A site running `ALTERNATE_WP_CRON` loads it everywhere, because that setting
+runs cron inside ordinary page requests. A plain page view never builds,
+bakes or saves anything, so it skips the ten class files and four controllers;
+on a production site that was about 6 ms per uncached request. If the check is
+missing or fails, the loader falls back to loading the generator as before.
+
+Inside the generator, the three schedule checks (weekly bake, daily rebuild,
+daily health) run only in wp-admin, on a cron run or under WP-CLI.
 
 ## A request's journey
 
@@ -95,15 +112,25 @@ defined by the config's **locale option** (`wpml-directory` here: `xx-xx` or
 WordPress untouched. A site with `locale.mode: none` has no prefix at all):
 
 1. `POST_SHIELD_DISABLED` set, or not GET/HEAD → hand to WordPress.
-2. Read + validate the config artifact; missing or invalid → the shield is not
-   in place, return.
-3. **Pre-filter:** unless the URL contains an enabled entry's base, return —
+2. **Fast path**, before anything is read from disk: `/` itself, WordPress's own
+   trees (`wp-admin`, `wp-json`, `wp-content`, `wp-includes`) and any URL whose
+   first segment contains a dot (`wp-login.php`, `wp-cron.php`, `robots.txt`,
+   sitemaps, `.well-known`) → hand to WordPress. None can ever be shield
+   business: bases and locale patterns are dot-free and may not claim a
+   WordPress namespace, and root matching passes all three. Passing is the
+   fail-open direction, so this can never block anything the full decision
+   would not. It matters because each file read costs about a millisecond on
+   network storage, and these are most of the GET requests that reach PHP.
+3. Read + validate the config artifact once; missing or invalid → the shield is
+   not in place, return. Validation runs on the bytes already read
+   (`read_config_validated_in_memory()`), not on a second read.
+4. **Pre-filter:** unless the URL contains an enabled entry's base, return —
    most traffic stops here after a couple of string checks. With a ROOT entry
    enabled there is nothing to pre-filter on: every URI is potentially the
    catch-all's business and proceeds.
-4. Parse + match (per the locale pattern); a reserved or malformed slug falls
+5. Parse + match (per the locale pattern); a reserved or malformed slug falls
    through.
-5. Read the type's allowlist. Missing/empty → fall through (fail-open). In
+6. Read the type's allowlist. Missing/empty → fall through (fail-open). In
    `match: full-path` mode the whole sub-path is exact-matched and the depth
    policy below is skipped. Core sub-routes of a real page (`feed/…`, `embed`,
    `trackback`) are ALWAYS stripped before the match so they pass with their
@@ -116,7 +143,7 @@ WordPress untouched. A site with `locale.mode: none` has no prefix at all):
    falls through to WordPress (slow 404) instead of fast-404ing; never the
    reverse — pagination of real content always passes while the checkbox is
    on.
-6. **Root catch-all (root-pages v2), LAST** — only when no based entry claimed
+7. **Root catch-all (root-pages v2), LAST** — only when no based entry claimed
    the URI, and only with every precondition met (enabled root entries, a
    valid `excluded_bases` snapshot, readable NON-empty root allowlists, the
    root-extras file present — any doubt → WordPress). The decision for a path:
@@ -127,8 +154,13 @@ WordPress untouched. A site with `locale.mode: none` has no prefix at all):
    sub-routes per the type's checkbox and membership-test the path against
    the UNION of root allowlists + root-extras — hit → `allowed-known-slug`,
    miss → themed 404 `blocked-unknown-slug` (`postShieldType: page` — root
-   ownership is ambiguous by nature).
-7. Decide, recording the outcome in the `X-Post-Shield` header:
+   ownership is ambiguous by nature). The root allowlists are read **lazily**,
+   in order (`page`, then `post`, then root-extras): the cheap checks answer
+   most paths with no read at all, and reading stops at the first hit, so a
+   real page costs one allowlist read and only a miss reads them all. A list
+   found missing or empty when reached → pass, so a block still requires
+   every list.
+8. Decide, recording the outcome in the `X-Post-Shield` header:
 
 | Situation | Result | `X-Post-Shield` |
 |---|---|---|
@@ -325,6 +357,22 @@ Read path, per URL under a shielded base: read the file → one SIMD scan for
 Even the largest list is ~4 orders of magnitude cheaper than the boot it
 replaces, and only URLs under a shielded base pay it. Write path: an append per
 publish (a few bytes), plus one indexed query per type in the daily rebuild.
+
+**The file read, not the scan, is the real cost.** On network storage (measured on
+a managed WordPress host, 2026) opening and reading a small file costs about a
+millisecond whatever its size, against tens of microseconds for the scan and
+~0.01 ms for a `stat`. So the loader is built to open as few files as possible:
+
+| Request | Files read |
+|---|---:|
+| `/`, REST, cron, admin, `robots.txt`, sitemaps (fast path) | 0 |
+| Real page (root mode, hit on `page`) | 2 (config + one allowlist) |
+| Real post (hit on `post`) | 3 |
+| Unknown root slug → themed 404 | 5 (config, three allowlists, the baked page) |
+| Real slug under a based entry | 2 |
+
+In root mode, before 2026-09 every one of these read the config twice and all
+three root allowlists: five reads even for REST and cron.
 
 ## FAQ
 

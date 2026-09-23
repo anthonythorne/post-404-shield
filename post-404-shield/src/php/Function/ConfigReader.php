@@ -725,6 +725,32 @@ function read_config_document( string $file ): ?array {
 }
 
 /**
+ * Validate the document read_config_document() last read — WITHOUT reading again.
+ *
+ * By design, read_config() always re-reads the file: comparing bytes is how the
+ * memo catches an in-place rewrite. But the pre-boot loader has just read and
+ * decoded the file a few lines earlier in the same request, and a second read
+ * costs about a millisecond on network storage. This validates the bytes the
+ * loader already holds, and records the verdict in the same memo slot, so a
+ * later read_config() of an unchanged file in this request skips validation too.
+ *
+ * @param string $file Absolute path to the artifact.
+ *
+ * @return array<string, mixed>|null The validated document, or null when nothing
+ *                                    was read or it is invalid.
+ */
+function read_config_validated_in_memory( string $file ): ?array {
+	$slot = &config_memo_slot( $file );
+	if ( null === $slot['document'] ) {
+		return null;
+	}
+	if ( null === $slot['valid'] ) {
+		$slot['valid'] = config_is_valid( $slot['document'] );
+	}
+	return $slot['valid'] ? $slot['document'] : null;
+}
+
+/**
  * Whether a decoded document has the TYPES the loader's pre-filter reads.
  *
  * Deliberately not validation: no regexes, no charset or reserved-namespace

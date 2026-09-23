@@ -21,6 +21,8 @@ use function Post404Shield\config_shape_is_valid;
 use function Post404Shield\config_is_valid;
 use function Post404Shield\locale_pattern_is_valid;
 use function Post404Shield\url_base_is_valid;
+use function Post404Shield\read_config_document;
+use function Post404Shield\read_config_validated_in_memory;
 
 require_once __DIR__ . '/../../post-404-shield/src/php/Function/ConfigReader.php';
 
@@ -119,6 +121,38 @@ class PostShieldConfigReaderTest extends TestCase {
 		clearstatcache();
 		$this->assertSame( $size, filesize( $this->file ), 'Precondition: same size.' );
 		$this->assertSame( [ 'storiez' ], read_config( $this->file )['entries']['story']['url_base'] );
+	}
+
+	/**
+	 * The pre-boot loader validates the bytes it already decoded instead of
+	 * reading the file again. The function must never read: after an in-place
+	 * rewrite it still returns what was read, and only read_config(), which
+	 * re-reads by design, sees the new bytes.
+	 */
+	public function test_validated_in_memory_never_reads_the_file() {
+		$this->assertNull( read_config_validated_in_memory( $this->file ), 'Nothing read yet: null, and no read happens.' );
+
+		$this->write( $this->valid_config() );
+		$this->assertNotNull( read_config_document( $this->file ) );
+
+		$changed = $this->valid_config();
+		$changed['entries']['story']['url_base'] = [ 'storiez' ];
+		$this->write( $changed );
+
+		$this->assertSame( [ 'stories' ], read_config_validated_in_memory( $this->file )['entries']['story']['url_base'], 'Validates the bytes already in memory, without re-reading.' );
+		$this->assertSame( [ 'storiez' ], read_config( $this->file )['entries']['story']['url_base'], 'read_config() still re-reads and sees the rewrite.' );
+	}
+
+	/**
+	 * An invalid document read into memory validates to null, never to the
+	 * document — the loader must fail open on it.
+	 */
+	public function test_validated_in_memory_rejects_an_invalid_document() {
+		$bad = $this->valid_config();
+		$bad['entries']['story']['url_base'] = [ '../escape' ];
+		$this->write( $bad );
+		$this->assertNotNull( read_config_document( $this->file ), 'Precondition: it decodes.' );
+		$this->assertNull( read_config_validated_in_memory( $this->file ) );
 	}
 
 	/**
