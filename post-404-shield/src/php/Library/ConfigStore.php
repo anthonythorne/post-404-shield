@@ -539,6 +539,9 @@ class ConfigStore {
 			error_log( '[post-404-shield] post_shield_redirect_sources filter threw (ignored): ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 		}
 
+		// The ONE place a source is checked: readers hand back rows as they
+		// find them, and anything that is not a non-blank string pattern —
+		// from a reader or from the filter — is dropped here.
 		$clean = [];
 		foreach ( $sources as $source ) {
 			if ( ! is_array( $source ) || ! is_string( $source['pattern'] ?? null ) || '' === trim( $source['pattern'] ) ) {
@@ -605,30 +608,47 @@ class ConfigStore {
 	 * Redirection (John Godley) enabled URL redirects: `redirection_items.url`
 	 * with the per-row `regex` flag.
 	 *
-	 * @return array<int, array{pattern: string, regex: bool}>
+	 * @return array<int, array{pattern: mixed, regex: bool}>
 	 */
 	private function redirection_plugin_redirect_sources(): array {
+		return $this->table_redirect_sources( 'redirection_items', 'url', 'regex', "status = 'enabled' AND match_type = 'url'" );
+	}
+
+	/**
+	 * Redirect sources from a plugin table that stores one source column and
+	 * one regex flag per row — the shape Redirection and AIOSEO share.
+	 *
+	 * Every argument is a literal from this class, never input: they are
+	 * interpolated as identifiers and a WHERE clause, which prepare() cannot
+	 * bind.
+	 *
+	 * @param string $table       Table name without the prefix.
+	 * @param string $pattern_col Source column.
+	 * @param string $regex_col   Regex flag column.
+	 * @param string $where       Row filter.
+	 *
+	 * @return array<int, array{pattern: mixed, regex: bool}>
+	 */
+	private function table_redirect_sources( string $table, string $pattern_col, string $regex_col, string $where ): array {
 		global $wpdb;
 
 		if ( ! isset( $wpdb ) ) {
 			return [];
 		}
-		$table = $wpdb->prefix . 'redirection_items';
+		$table = $wpdb->prefix . $table;
 		if ( ! $this->table_exists( $table ) ) {
 			return [];
 		}
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
-		$rows = $wpdb->get_results( "SELECT url, regex FROM {$table} WHERE status = 'enabled' AND match_type = 'url'" );
+		$rows = $wpdb->get_results( "SELECT {$pattern_col} AS pattern, {$regex_col} AS is_regex FROM {$table} WHERE {$where}" );
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
 
 		$sources = [];
 		foreach ( (array) $rows as $row ) {
-			if ( is_string( $row->url ?? null ) && '' !== $row->url ) {
-				$sources[] = [
-					'pattern' => $row->url,
-					'regex'   => ! empty( $row->regex ),
-				];
-			}
+			$sources[] = [
+				'pattern' => $row->pattern ?? null,
+				'regex'   => ! empty( $row->is_regex ),
+			];
 		}
 		return $sources;
 	}
@@ -645,7 +665,7 @@ class ConfigStore {
 	 * usually redirected elsewhere (edge rules, another plugin) and often to
 	 * newer targets, so reserving slugs from it only weakens the shield.
 	 *
-	 * @return array<int, array{pattern: string, regex: bool}>
+	 * @return array<int, array{pattern: mixed, regex: bool}> Unchecked; redirect_sources() filters.
 	 */
 	private function yoast_premium_redirect_sources(): array {
 		if ( ! defined( 'WPSEO_PREMIUM_VERSION' ) && ! class_exists( 'WPSEO_Premium', false ) ) {
@@ -657,11 +677,11 @@ class ConfigStore {
 		}
 		$sources = [];
 		foreach ( $rows as $redirect ) {
-			if ( ! is_array( $redirect ) || ! is_string( $redirect['origin'] ?? null ) || '' === $redirect['origin'] ) {
+			if ( ! is_array( $redirect ) ) {
 				continue;
 			}
 			$sources[] = [
-				'pattern' => $redirect['origin'],
+				'pattern' => $redirect['origin'] ?? null,
 				'regex'   => 'regex' === ( $redirect['format'] ?? 'plain' ),
 			];
 		}
@@ -673,7 +693,7 @@ class ConfigStore {
 	 * `_redirect_rule_from` (may carry a `*` wildcard) with the
 	 * `_redirect_rule_from_regex` flag.
 	 *
-	 * @return array<int, array{pattern: string, regex: bool}>
+	 * @return array<int, array{pattern: mixed, regex: bool}> Unchecked; redirect_sources() filters.
 	 */
 	private function safe_redirect_manager_redirect_sources(): array {
 		if ( ! function_exists( 'post_type_exists' ) || ! post_type_exists( 'redirect_rule' ) ) {
@@ -695,12 +715,10 @@ class ConfigStore {
 
 		$sources = [];
 		foreach ( (array) $rows as $row ) {
-			if ( is_string( $row->source ?? null ) && '' !== $row->source ) {
-				$sources[] = [
-					'pattern' => $row->source,
-					'regex'   => ! empty( $row->is_regex ) && '0' !== $row->is_regex,
-				];
-			}
+			$sources[] = [
+				'pattern' => $row->source ?? null,
+				'regex'   => ! empty( $row->is_regex ), // '0' is empty().
+			];
 		}
 		return $sources;
 	}
@@ -716,36 +734,14 @@ class ConfigStore {
 	 * @return array<int, array{pattern: string, regex: bool}>
 	 */
 	private function aioseo_redirect_sources(): array {
-		global $wpdb;
-
-		if ( ! isset( $wpdb ) ) {
-			return [];
-		}
-		$table = $wpdb->prefix . 'aioseo_redirects';
-		if ( ! $this->table_exists( $table ) ) {
-			return [];
-		}
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
-		$rows = $wpdb->get_results( "SELECT source_url, regex FROM {$table} WHERE enabled = 1" );
-		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
-
-		$sources = [];
-		foreach ( (array) $rows as $row ) {
-			if ( is_string( $row->source_url ?? null ) && '' !== $row->source_url ) {
-				$sources[] = [
-					'pattern' => $row->source_url,
-					'regex'   => ! empty( $row->regex ),
-				];
-			}
-		}
-		return $sources;
+		return $this->table_redirect_sources( 'aioseo_redirects', 'source_url', 'regex', 'enabled = 1' );
 	}
 
 	/**
 	 * Simple 301 Redirects: the `301_redirects` option, a plain `old => new`
 	 * map (keys are the sources).
 	 *
-	 * @return array<int, array{pattern: string, regex: bool}>
+	 * @return array<int, array{pattern: mixed, regex: bool}> Unchecked; redirect_sources() filters.
 	 */
 	private function simple_301_redirect_sources(): array {
 		$map = get_option( '301_redirects', [] );
@@ -754,12 +750,10 @@ class ConfigStore {
 		}
 		$sources = [];
 		foreach ( array_keys( $map ) as $origin ) {
-			if ( is_string( $origin ) && '' !== $origin ) {
-				$sources[] = [
-					'pattern' => $origin,
-					'regex'   => false,
-				];
-			}
+			$sources[] = [
+				'pattern' => $origin,
+				'regex'   => false,
+			];
 		}
 		return $sources;
 	}
