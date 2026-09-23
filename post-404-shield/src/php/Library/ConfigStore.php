@@ -144,6 +144,15 @@ class ConfigStore {
 	private $preflight_handler = null;
 
 	/**
+	 * Based-entry coverage gate, injected by bootstrap: fn( array $candidate,
+	 * ?array $current_entries ): array{checked:int, breaks:array, homes:array}.
+	 * See BasedPreflight.
+	 *
+	 * @var callable|null
+	 */
+	private $coverage_handler = null;
+
+	/**
 	 * Redirect source rows read this request (see redirect_sources()); null
 	 * until first read.
 	 *
@@ -186,6 +195,18 @@ class ConfigStore {
 	 */
 	public function set_preflight_handler( callable $handler ): void {
 		$this->preflight_handler = $handler;
+	}
+
+	/**
+	 * Inject the based-entry coverage gate (see BasedPreflight). Unset in pure
+	 * unit contexts, where there are no real URLs to replay.
+	 *
+	 * @param callable $handler fn( array $candidate, ?array $current_entries ): array.
+	 *
+	 * @return void
+	 */
+	public function set_coverage_handler( callable $handler ): void {
+		$this->coverage_handler = $handler;
 	}
 
 	/**
@@ -1387,6 +1408,73 @@ class ConfigStore {
 				} else {
 					/* translators: %d: number of URLs the root preflight would 404 (forced save). */
 					$validated['warnings'][] = sprintf( __( 'Root preflight reported %d would-block URL(s) but the save was FORCED.', 'post-404-shield' ), count( $would_block ) );
+				}
+			}
+
+			// Based-entry coverage gate. Validation rejects a MALFORMED base; it
+			// cannot know a well-formed one is WRONG. So every save that enables
+			// or changes a based entry replays that entry's real URLs through the
+			// loader's own decision against this candidate, and refuses if any
+			// real URL would 404 or be redirected away. A save that changes no
+			// based entry — the self-heal, a CLI write of the stored option —
+			// runs nothing. `force_preflight` (CLI --force) overrides, as above.
+			if ( null !== $this->coverage_handler ) {
+				$current_doc = $this->option();
+				$coverage    = ( $this->coverage_handler )( $config, is_array( $current_doc['entries'] ?? null ) ? $current_doc['entries'] : null );
+				$breaks      = (array) ( $coverage['breaks'] ?? [] );
+				if ( [] !== $breaks && empty( $flags['force_preflight'] ) ) {
+					$coverage_errors = [
+						sprintf(
+							/* translators: 1: number of real URLs that would 404, 2: number checked. */
+							__( 'Coverage check FAILED: %1$d of %2$d real URLs checked would be served a 404 by this change.', 'post-404-shield' ),
+							count( $breaks ),
+							(int) ( $coverage['checked'] ?? 0 )
+						),
+					];
+					foreach ( (array) ( $coverage['homes'] ?? [] ) as $entry_key => $home ) {
+						$coverage_errors[] = sprintf(
+							/* translators: 1: entry name, 2: the URL base its posts really use. */
+							__( '%1$s: its posts live under /%2$s/ — check the URL base.', 'post-404-shield' ),
+							(string) $entry_key,
+							(string) $home
+						);
+					}
+					foreach ( array_slice( $breaks, 0, 10 ) as $break ) {
+						$coverage_errors[] = sprintf(
+							/* translators: 1: URL, 2: shield decision, 3: entry name. */
+							__( 'Would break: %1$s (%2$s, %3$s)', 'post-404-shield' ),
+							(string) $break['url'],
+							(string) $break['marker'],
+							(string) $break['entry']
+						);
+					}
+					return [
+						'ok'       => false,
+						'errors'   => $coverage_errors,
+						'warnings' => $validated['warnings'],
+					];
+				}
+				$depth_hits = (array) ( $coverage['depth'] ?? [] );
+				if ( [] !== $depth_hits ) {
+					$validated['warnings'][] = sprintf(
+						/* translators: 1: number of real URLs, 2: an example URL, 3: its decision. */
+						_n(
+							'%1$d real URL sits deeper than its entry\'s depth limit and the depth policy will act on it (e.g. %2$s → %3$s). That is intended if the entry folds child pages into their parent.',
+							'%1$d real URLs sit deeper than their entry\'s depth limit and the depth policy will act on them (e.g. %2$s → %3$s). That is intended if the entry folds child pages into their parent.',
+							count( $depth_hits ),
+							'post-404-shield'
+						),
+						count( $depth_hits ),
+						(string) $depth_hits[0]['url'],
+						(string) $depth_hits[0]['marker']
+					);
+				}
+				if ( (int) ( $coverage['checked'] ?? 0 ) > 0 ) {
+					$validated['warnings'][] = [] === $breaks
+						/* translators: %d: number of real URLs checked. */
+						? sprintf( __( 'Coverage check passed — %d real URLs of the changed post types still resolve.', 'post-404-shield' ), (int) $coverage['checked'] )
+						/* translators: %d: number of real URLs the forced save breaks. */
+						: sprintf( __( 'Coverage check reported %d broken real URL(s) but the save was FORCED.', 'post-404-shield' ), count( $breaks ) );
 				}
 			}
 

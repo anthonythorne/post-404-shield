@@ -207,6 +207,26 @@ $post_shield_store->set_rebuild_handler(
 	}
 );
 
+// Based-entry coverage seam: every save that enables or changes a based entry
+// replays that entry's real URLs through the loader's decision; ConfigStore::
+// write() refuses a save that would 404 or redirect any of them. This is what
+// catches a well-formed but WRONG base, which validation cannot.
+require_once POST_SHIELD_PLUGIN_DIR . '/src/php/Library/BasedPreflight.php';
+$post_shield_store->set_coverage_handler(
+	static function ( array $candidate, ?array $current_entries ): array {
+		$keys = \Post404Shield\Library\BasedPreflight::changed_keys( (array) ( $candidate['entries'] ?? [] ), $current_entries );
+		if ( [] === $keys ) {
+			return [
+				'checked' => 0,
+				'breaks'  => [],
+				'depth'   => [],
+				'homes'   => [],
+			];
+		}
+		return ( new \Post404Shield\Library\BasedPreflight() )->run( $candidate, $keys );
+	}
+);
+
 // S6 preflight seam: every save that leaves root mode active walks real URLs
 // through the would-be loader decision; ConfigStore::write() aborts on a
 // non-empty report. The result is persisted for the status card either way.
