@@ -21,6 +21,17 @@ Moved out of the sites that used it into its own repository.
   shield should copy the updated `examples/mu-plugins/05-post-404-shield-bootstrap.php`.
 - Schedule checks run only in wp-admin, on a cron run or under WP-CLI, not on
   every `init`.
+- A save that enables or changes a based entry replays a sample of that type's
+  real URLs, and pages beneath its bases, through the loader's own decision, and
+  is refused if any would read as a fake slug or a denied base. The message says
+  where the posts really live. Validation can only catch a malformed base; this
+  catches a wrong one. Restores go through it too; CLI `--force` overrides.
+- A flat post type's posts that carry a `post_parent` are no longer dropped from
+  the allowlist (WordPress ignores the parent and serves them at the flat URL).
+- Self-heal runs on `admin_init` and at the start of the daily health check
+  (`ConfigStore::self_heal()`), never on a page view.
+- One data-directory helper, `shield_dir()`, for the loader and every writer; the
+  writers no longer call `wp_upload_dir()`.
 
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing
