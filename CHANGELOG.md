@@ -93,6 +93,21 @@ Moved out of the sites that used it into its own repository.
   redirect sync and permalink re-check use it too.
 - A cache time over a day saves with a warning and is capped when served (an
   older artifact keeps working).
+- A failed database read never builds a list: the rebuild keeps the previous
+  one, and a save is refused.
+- Automatic switch-offs land whatever unrelated errors the config carries,
+  never over a save that committed meanwhile, and only for a root-mode
+  refusal (a busy lock is retried); the self-heal checks the revision too.
+- A type switched on, or given more statuses, is rebuilt before the swap.
+- Redirects that go on below a base with a numeric part reserve digit-led
+  slugs (others warn at save); `^/?…` and optional locale groups reduce; a
+  failed redirect read keeps the derived buckets; new routes under a base make
+  the snapshot stale.
+- Attachment sub-routes and renamed media pass in root mode; PublishPress
+  revisions keep the addresses they move; draft slugs are never kept as old
+  addresses; WPML translations are re-walked only on a re-parent.
+- Retention is stored under the save lock; a new type row never overwrites an
+  entry holding its key; an all-digit blocked-section name is refused clearly.
 
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing
