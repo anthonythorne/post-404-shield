@@ -886,6 +886,14 @@
 					type: 'search',
 					value: filter,
 					onChange: setFilter,
+					// A UI-only control inside the settings form: without this,
+					// Enter triggers the browser's implicit submit and saves
+					// whatever is half-edited elsewhere on the page.
+					onKeyDown: (event) => {
+						if (event.key === 'Enter') {
+							event.preventDefault();
+						}
+					},
 				}),
 			},
 			group(
