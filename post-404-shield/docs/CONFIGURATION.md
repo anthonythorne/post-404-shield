@@ -555,7 +555,8 @@ current rewrite slugs for exactly this reason. Structural caveats:
   and 404 bake keep working regardless.
 - **Never edit `uploads/post-404-shield/config.php` by hand.** It is regenerated
   from the option (self-heal) — a manual edit is overwritten, and a corrupt one
-  just switches the shield off until the next request heals it. Change config
+  just switches the shield off until the next admin request or the daily health
+  cron heals it. Change config
   through the UI (or `wp post-shield config …`).
 - **Nothing seeds automatically.** Deploying the plugin does not configure a
   site. An environment is brought onto the artifact model either by staging its

@@ -9,7 +9,8 @@
  * Config comes from the GENERATED artifact (`uploads/post-404-shield/config.php`)
  * — the same runtime truth the loader reads — never from a committed file. The
  * artifact is produced by Settings → Post 404 Shield (or the CLI) from the
- * `post_shield_config` option, and SELF-HEALS here on init:
+ * `post_shield_config` option, and SELF-HEALS (ConfigStore::self_heal(), on
+ * admin_init and in the daily health cron):
  *   1. artifact present and valid                     → nothing to do;
  *   2. artifact missing/corrupt, option valid         → regenerate from option;
  *   3. neither → the shield stays inert until an operator configures it;
@@ -48,98 +49,17 @@ require_once POST_SHIELD_PLUGIN_DIR . '/src/php/Library/ConfigStore.php';
 $post_shield_store  = new \Post404Shield\Library\ConfigStore();
 $post_shield_config = $post_shield_store->artifact();
 
-// Self-heal / rehydrate — deferred to wp_loaded because validation
-// needs registered CPTs and custom post STATUSES, which do not
-// exist at mu-plugin load and can register as late as the END of init (a
-// custom status has been seen at init priority 100050) — wp_loaded is the first hook
-// guaranteed to run after every init registration. The health check is
-// read_config() !== null, NOT is_readable(): a corrupt-but-present artifact
-// (truncated write, bad manual edit, attacker garbage) must heal too, or the
-// shield stays silently off forever. The loader already ran fail-open this
-// request; the heal makes the NEXT request shielded again.
+// Self-heal / rehydrate — ConfigStore::self_heal(). It runs where an operator
+// or the scheduler is anyway: admin_init (admin pages, admin-ajax, admin-post)
+// and the daily health cron, which heals before it reports. Never on a page
+// view. Both run after every init registration, which validation needs:
+// custom post types and statuses can register as late as the end of init.
+// The loader already ran fail-open while the artifact was missing; the heal
+// makes the next request shielded again.
 add_action(
-	'wp_loaded',
-	static function () use ( $post_shield_store, $post_shield_config ): void {
-		$option = $post_shield_store->option();
-
-		if ( null !== $post_shield_config ) {
-			if ( null === $option ) {
-				// 4. Artifact valid, option missing (e.g. DB restored from backup):
-				// rehydrate the option FROM the artifact — never let them fight.
-				update_option( \Post404Shield\Library\ConfigStore::OPTION, $post_shield_config, false );
-				error_log( '[post-404-shield] self-heal: rehydrated the config option from the artifact (option was missing).' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-			}
-			return;
-		}
-
-		// 2. Artifact missing or invalid, option valid → regenerate the artifact.
-		if ( null !== $option && \Post404Shield\config_is_valid( $option ) ) {
-			// Root mode: the S6 preflight inside write() walks every real URL —
-			// far too heavy for a request, so it is the one step skipped here.
-			// The two snapshots are NOT skipped: they are cheap, and root mode
-			// depends on them. A staged option predates both, so publishing it
-			// verbatim leaves the loader with no excluded bases (root mode then
-			// never engages) and no derived reserved slugs — the same defect the
-			// based path below fixes by going through write().
-			if ( $post_shield_store->has_enabled_root_entries( (array) ( $option['entries'] ?? [] ) ) ) {
-				$healed                   = $option;
-				$heal_pattern             = \Post404Shield\Library\ConfigStore::locale_pattern_of( $healed );
-				$healed['excluded_bases'] = $post_shield_store->excluded_bases_snapshot( (array) ( $healed['excluded_bases']['operator'] ?? [] ), $heal_pattern );
-				$healed['entries']        = $post_shield_store->apply_derived_reserved( (array) ( $healed['entries'] ?? [] ), $heal_pattern );
-				if ( ! \Post404Shield\config_is_valid( $healed ) ) {
-					$healed = $option;
-				}
-				if ( $post_shield_store->write_artifact( $healed ) ) {
-					// Keep the option in step with what was published, so the two
-					// never disagree about the snapshots.
-					if ( $healed !== $option ) {
-						update_option( \Post404Shield\Library\ConfigStore::OPTION, $healed, false );
-					}
-					error_log( '[post-404-shield] self-heal: regenerated the config artifact from the option (root mode: snapshots refreshed, no preflight).' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-				}
-				return;
-			}
-
-			// Claimed BEFORE trying, cleared on success. The first requests after
-			// a deploy arrive together; this keeps them from all piling into
-			// write() and all but one losing the lock. It is kept only on
-			// FAILURE, so a heal that keeps failing costs one attempt a minute
-			// rather than the full save path on every request — while a fresh
-			// loss after a good heal still recovers on the very next request.
-			if ( false !== get_transient( 'post_shield_heal_backoff' ) ) {
-				return;
-			}
-			set_transient( 'post_shield_heal_backoff', 1, MINUTE_IN_SECONDS );
-
-			// The full save pipeline, not a bare file write. The option goes
-			// through validate() (reserved namespaces, overlaps — F10), and the
-			// derived reserved slugs are computed (F15: a staged option predates
-			// them, so a bare write published an artifact without them and the
-			// shielded redirects stayed dead until the nightly sync). The swap is
-			// one rename under the lock.
-			$result = $post_shield_store->write( $option, 'self-heal (artifact was missing or invalid)' );
-			if ( $result['ok'] ) {
-				delete_transient( 'post_shield_heal_backoff' );
-				error_log( '[post-404-shield] self-heal: regenerated the config artifact through the full save pipeline.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-			} else {
-				error_log( '[post-404-shield] self-heal FAILED, next attempt in a minute: ' . implode( ' | ', $result['errors'] ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-			}
-			return;
-		}
-		if ( null !== $option ) {
-			error_log( '[post-404-shield] self-heal: the config option exists but is INVALID — it cannot regenerate the artifact. Re-save Settings → Post 404 Shield.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-			return;
-		}
-
-		// 3. Nothing anywhere: no artifact, no option. The shield stays INERT
-		// until an operator configures it — deliberately, there is no automatic
-		// seed from the legacy committed config.
-		//
-		// An environment is brought onto the artifact model by staging its
-		// `post_shield_config` option BEFORE the code lands (branch 2 then
-		// regenerates the artifact on the first request), or afterwards with
-		// `wp post-shield config import-legacy`. Both are explicit operator
-		// actions. Nothing reconfigures a site as a side effect of deploying.
+	'admin_init',
+	static function () use ( $post_shield_store ): void {
+		$post_shield_store->self_heal();
 	},
 	20
 );

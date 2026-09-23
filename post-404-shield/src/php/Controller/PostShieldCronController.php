@@ -213,7 +213,8 @@ class PostShieldCronController {
 	}
 
 	/**
-	 * Daily operator signal: silence must not be ambiguous. Compares the shield
+	 * Daily self-heal, then an operator signal: silence must not be ambiguous.
+	 * After ConfigStore::self_heal() has had its go, compares the shield
 	 * state — artifact valid? at least one enabled entry? consistent with the
 	 * option? — and error_log()s + emits a New Relic custom event (no-op where
 	 * the NR extension is absent) on any mismatch, so a shield that silently
@@ -225,6 +226,11 @@ class PostShieldCronController {
 	 * @return void
 	 */
 	public function check_config_health(): void {
+		// Heal first, then report only what healing could not fix. The heal
+		// runs regardless of POST_SHIELD_DISABLED, exactly as it does on
+		// admin_init; the loader ignores the artifact while disabled anyway.
+		$this->store->self_heal();
+
 		if ( defined( 'POST_SHIELD_DISABLED' ) && POST_SHIELD_DISABLED ) {
 			return;
 		}

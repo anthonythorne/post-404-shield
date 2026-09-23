@@ -66,23 +66,24 @@ uploads/post-404-shield/config.php  ◀──read ONLY this──  loader + gene
   `config-<YYYYMMDD-HHMMSS>.php` (retention 10–100, default 10; the live
   `config.php` is never pruned). Restore = the same save pipeline fed from an
   old file, behind a diff/confirm screen.
-- **Self-heal** (generator bootstrap, on `wp_loaded` of any request that loads
-  the generator — see *Where the generator loads* below — late enough that
-  every CPT and custom status is registered): artifact missing **or invalid**
+- **Self-heal** (`ConfigStore::self_heal()`, on `admin_init` — any admin page,
+  admin-ajax or admin-post request — and at the start of the daily health cron;
+  both late enough that every CPT and custom status is registered, and neither
+  ever on a page view): artifact missing **or invalid**
   with a valid option → regenerated from the option (logged); artifact valid
   with the option missing (DB restore) → the option is rehydrated FROM the
   artifact; neither present → the shield stays **inert** until an operator
   configures it. There is no automatic seed: deploying never reconfigures a
-  site as a side effect. The daily cron re-checks artifact/option consistency and
-  `error_log`s + emits a New Relic `PostShieldConfigHealth` event on mismatch —
-  silence is never ambiguous.
+  site as a side effect. After healing, the daily cron re-checks artifact/option
+  consistency and `error_log`s + emits a New Relic `PostShieldConfigHealth` event
+  on anything healing could not fix — silence is never ambiguous.
 - **Kill switches**, weakest to strongest:
   1. per-type toggle (Settings, regenerates the artifact);
   2. the **Disable shield** button (writes an all-disabled artifact — still an
      auditable revision);
   3. break-glass: delete `uploads/post-404-shield/config.php` over SSH/SFTP —
      state, not code, so it's allowed on WPE. **Caveat: it self-heals from the
-     option on the next admin, cron or REST request**, so also delete the
+     option on the next admin request or the daily health cron**, so also delete the
      `post_shield_config` option (or use the button) for a lasting kill;
   4. the absolute constant `POST_SHIELD_DISABLED` (define as `true` in
      `wp-config.php`, above the Tier-1 require) — checked first in the loader,

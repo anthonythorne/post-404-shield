@@ -76,7 +76,8 @@ The loader is driven ONLY by the generated artifact
 404 Shield**; guard line + JSON, text-read, never executed). **A missing or
 invalid artifact is NOT an error** — the shield is simply not in place and every
 request falls through to WordPress; the generator self-heals the artifact from
-the `post_shield_config` option on the next mu-plugin load. So Tier 1 can be
+the `post_shield_config` option on the next admin request or the daily health
+cron. So Tier 1 can be
 wired before an environment has any config; it just does nothing until a config
 is saved (or an option is staged / `wp post-shield config import-legacy` run).
 
