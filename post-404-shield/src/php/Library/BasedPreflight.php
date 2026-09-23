@@ -61,8 +61,49 @@ final class BasedPreflight {
 
 	/**
 	 * The fields whose change can alter which real URLs an entry blocks.
+	 * `reserved_allowlist` counts: removing a reserved slug can 404 the page it
+	 * protected. `reserved_derived` does not — it is re-derived from the redirect
+	 * plugins on every write, and a derived slug leaves only when its redirect has.
 	 */
-	private const BEHAVIOUR_FIELDS = [ 'post_type', 'url_base', 'match', 'depth_allowed', 'depth_action', 'post_status', 'published_only', 'allow_pagination', 'mode' ];
+	private const BEHAVIOUR_FIELDS = [ 'post_type', 'url_base', 'match', 'depth_allowed', 'depth_action', 'post_status', 'published_only', 'allow_pagination', 'mode', 'reserved_allowlist' ];
+
+	/**
+	 * An entry field's value with the loader's defaults applied, so an absent
+	 * key and its default compare equal — a config written by import_legacy()
+	 * omits allow_pagination, which the screen then saves as true, and without
+	 * this every entry would read as changed on the first save.
+	 *
+	 * @param array<string, mixed> $entry Entry.
+	 * @param string               $field Field name.
+	 * @param string|int           $key   Entry key (the post_type default).
+	 *
+	 * @return mixed
+	 */
+	private static function normalised( array $entry, string $field, $key ) {
+		switch ( $field ) {
+			case 'post_type':
+				return (string) ( $entry['post_type'] ?? $key );
+			case 'url_base':
+				return array_values( (array) ( $entry['url_base'] ?? [] ) );
+			case 'match':
+				return (string) ( $entry['match'] ?? 'slug' );
+			case 'depth_action':
+				return (string) ( $entry['depth_action'] ?? 'passthrough' );
+			case 'allow_pagination':
+				return ! isset( $entry['allow_pagination'] ) || false !== $entry['allow_pagination'];
+			case 'published_only':
+				return ! empty( $entry['published_only'] );
+			case 'mode':
+				return (string) ( $entry['mode'] ?? 'allowlist' );
+			case 'post_status':
+			case 'reserved_allowlist':
+				$list = array_values( array_unique( array_map( 'strval', (array) ( $entry[ $field ] ?? ( 'post_status' === $field ? [ 'publish' ] : [] ) ) ) ) );
+				sort( $list );
+				return $list;
+			default:
+				return $entry[ $field ] ?? null;
+		}
+	}
 
 	/**
 	 * Keys of the enabled based entries a candidate adds or changes relative
@@ -90,7 +131,7 @@ final class BasedPreflight {
 				continue;
 			}
 			foreach ( self::BEHAVIOUR_FIELDS as $field ) {
-				if ( ( $entry[ $field ] ?? null ) !== ( $before[ $field ] ?? null ) ) {
+				if ( self::normalised( $entry, $field, $key ) !== self::normalised( $before, $field, $key ) ) {
 					$keys[] = $key;
 					break;
 				}
@@ -102,15 +143,25 @@ final class BasedPreflight {
 	/**
 	 * Replay real URLs of the given entries through the candidate config.
 	 *
-	 * @param array<string, mixed>   $candidate Candidate config document.
-	 * @param array<int, string|int> $keys      Entry keys to check (changed_keys()).
+	 * Three kinds of real URL are replayed per changed entry:
+	 * - a sample of its posts in EVERY publicly viewable status it had before
+	 *   or has now — a save that drops a status (Discontinued, say) must replay
+	 *   the posts it is about to stop recognising;
+	 * - published pages that live beneath its bases;
+	 * - each reserved slug the save removes, when real content still carries
+	 *   that slug.
 	 *
-	 * @return array{checked: int, breaks: array<int, array{url: string, marker: string, entry: string}>, depth: array<int, array{url: string, marker: string, entry: string}>, homes: array<string, string>}
+	 * @param array<string, mixed>          $candidate Candidate config document.
+	 * @param array<int, string|int>        $keys      Entry keys to check (changed_keys()).
+	 * @param array<string|int, mixed>|null $current   Stored entries, when there are any.
+	 *
+	 * @return array{checked: int, breaks: array<int, array{url: string, marker: string, entry: string}>, depth: array<int, array{url: string, marker: string, entry: string}>, homes: array<string, string>, unclaimed: array<string, string>}
 	 *         `breaks` refuse the save; `depth` are real URLs the depth policy
 	 *         acts on (reported only); `homes`: per entry, the base its real
-	 *         URLs actually use when that differs.
+	 *         URLs actually use when that differs; `unclaimed`: entries whose
+	 *         bases claim none of their real URLs (refuse — the base is wrong).
 	 */
-	public function run( array $candidate, array $keys ): array {
+	public function run( array $candidate, array $keys, ?array $current = null ): array {
 		$entries = (array) ( $candidate['entries'] ?? [] );
 		$pattern = ConfigStore::locale_pattern_of( $candidate );
 		$builder = new AllowlistBuilder( $entries );
@@ -124,11 +175,12 @@ final class BasedPreflight {
 			return $bodies[ $type ];
 		};
 
-		$checked = 0;
-		$breaks  = [];
-		$depth   = [];
-		$homes   = [];
-		$lang    = function_exists( 'apply_filters' ) ? apply_filters( 'wpml_current_language', null ) : null;
+		$checked   = 0;
+		$breaks    = [];
+		$depth     = [];
+		$homes     = [];
+		$unclaimed = [];
+		$lang      = function_exists( 'apply_filters' ) ? apply_filters( 'wpml_current_language', null ) : null;
 
 		try {
 			foreach ( $keys as $key ) {
@@ -136,28 +188,48 @@ final class BasedPreflight {
 				if ( ! is_array( $entry ) ) {
 					continue;
 				}
-				$type  = (string) ( $entry['post_type'] ?? $key );
-				$bases = array_values( array_filter( (array) ( $entry['url_base'] ?? [] ), 'is_string' ) );
+				$before = is_array( $current[ $key ] ?? null ) ? $current[ $key ] : [];
+				$type   = (string) ( $entry['post_type'] ?? $key );
+				$bases  = array_values( array_filter( (array) ( $entry['url_base'] ?? [] ), 'is_string' ) );
 
-				$paths = $this->real_paths( $type, $bases );
-				$seen  = [];
+				$statuses = self::viewable_statuses(
+					array_merge(
+						(array) ( $entry['post_status'] ?? [ 'publish' ] ),
+						[] === $before ? [] : (array) ( $before['post_status'] ?? [ 'publish' ] )
+					)
+				);
+				$paths    = $this->real_paths( $type, $bases, $statuses );
+
+				$seen    = [];
+				$claimed = 0;
+				$sampled = 0;
 				foreach ( $paths as $path ) {
 					++$checked;
-					$decision = \Post404Shield\decide_based( $path, $path, $entries, $read, $pattern );
-					$marker   = null === $decision ? 'unclaimed' : (string) $decision['marker'];
-					$hit = [
-						'url'    => $path,
-						'marker' => $marker,
-						'entry'  => (string) $key,
-					];
-					if ( in_array( $marker, self::BREAKING, true ) ) {
-						$breaks[] = $hit;
-					} elseif ( in_array( $marker, self::DEPTH, true ) ) {
-						$depth[] = $hit;
+					++$sampled;
+					$marker = $this->record( $path, (string) $key, $entries, $read, $pattern, $breaks, $depth );
+					if ( 'unclaimed' !== $marker ) {
+						++$claimed;
 					}
 					$home = self::base_of( $path, $pattern );
 					if ( '' !== $home ) {
 						$seen[ $home ] = ( $seen[ $home ] ?? 0 ) + 1;
+					}
+				}
+
+				// Reserved slugs this save removes, where real content still
+				// carries the slug: the page they protected would now read as fake.
+				$locale  = [] !== $paths ? self::locale_of( $paths[0], $pattern ) : '';
+				$removed = array_diff(
+					array_map( 'strval', (array) ( $before['reserved_allowlist'] ?? [] ) ),
+					array_map( 'strval', (array) ( $entry['reserved_allowlist'] ?? [] ) )
+				);
+				foreach ( $removed as $slug ) {
+					if ( ! $this->slug_has_content( $slug ) ) {
+						continue;
+					}
+					foreach ( $bases as $base ) {
+						++$checked;
+						$this->record( ( '' === $locale ? '' : '/' . $locale ) . '/' . $base . '/' . $slug . '/', (string) $key, $entries, $read, $pattern, $breaks, $depth );
 					}
 				}
 
@@ -170,6 +242,11 @@ final class BasedPreflight {
 						$homes[ (string) $key ] = $top;
 					}
 				}
+				// Real URLs, and not one under the entry's bases: the base is
+				// wrong. The entry would shield nothing, so a "passed" would lie.
+				if ( $sampled > 0 && 0 === $claimed ) {
+					$unclaimed[ (string) $key ] = $homes[ (string) $key ] ?? '';
+				}
 			}
 		} finally {
 			if ( function_exists( 'do_action' ) ) {
@@ -178,11 +255,95 @@ final class BasedPreflight {
 		}
 
 		return [
-			'checked' => $checked,
-			'breaks'  => $breaks,
-			'depth'   => $depth,
-			'homes'   => $homes,
+			'checked'   => $checked,
+			'breaks'    => $breaks,
+			'depth'     => $depth,
+			'homes'     => $homes,
+			'unclaimed' => $unclaimed,
 		];
+	}
+
+	/**
+	 * Decide one real URL and file it as a break or a depth note.
+	 *
+	 * @param string                    $path    URL path.
+	 * @param string                    $key     Entry key it was replayed for.
+	 * @param array<string|int, mixed>  $entries Candidate entries.
+	 * @param callable(string): ?string $read    Allowlist reader.
+	 * @param string                    $pattern Locale pattern body.
+	 * @param array<int, array>         $breaks  Breaks (appended).
+	 * @param array<int, array>         $depth   Depth notes (appended).
+	 *
+	 * @return string The decision marker, or `unclaimed`.
+	 */
+	private function record( string $path, string $key, array $entries, callable $read, string $pattern, array &$breaks, array &$depth ): string {
+		$decision = \Post404Shield\decide_based( $path, $path, $entries, $read, $pattern );
+		$marker   = null === $decision ? 'unclaimed' : (string) $decision['marker'];
+		$hit      = [
+			'url'    => $path,
+			'marker' => $marker,
+			'entry'  => $key,
+		];
+		if ( in_array( $marker, self::BREAKING, true ) ) {
+			$breaks[] = $hit;
+		} elseif ( in_array( $marker, self::DEPTH, true ) ) {
+			$depth[] = $hit;
+		}
+		return $marker;
+	}
+
+	/**
+	 * The statuses whose posts anyone can view, from a list; `publish` always.
+	 * A private or draft post has no public pretty permalink to replay.
+	 *
+	 * @param array<int, mixed> $statuses Candidate statuses.
+	 *
+	 * @return string[]
+	 */
+	private static function viewable_statuses( array $statuses ): array {
+		$out = [ 'publish' ];
+		foreach ( $statuses as $status ) {
+			$status = (string) $status;
+			if ( '' === $status || in_array( $status, $out, true ) ) {
+				continue;
+			}
+			if ( function_exists( 'is_post_status_viewable' ) ? is_post_status_viewable( $status ) : false ) {
+				$out[] = $status;
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Whether a published post or page (any type) carries this slug.
+	 *
+	 * @param string $slug Slug.
+	 *
+	 * @return bool
+	 */
+	private function slug_has_content( string $slug ): bool {
+		global $wpdb;
+		if ( ! isset( $wpdb ) || '' === $slug ) {
+			return false;
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		return null !== $wpdb->get_var( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_name = %s AND post_status = 'publish' LIMIT 1", $slug ) );
+	}
+
+	/**
+	 * The locale segment a URL path starts with, when the pattern accepts it.
+	 *
+	 * @param string $path           URL path.
+	 * @param string $locale_pattern Locale pattern body ('' = none).
+	 *
+	 * @return string
+	 */
+	private static function locale_of( string $path, string $locale_pattern ): string {
+		$first = (string) strtok( ltrim( $path, '/' ), '/' );
+		if ( '' === $locale_pattern || '' === $first ) {
+			return '';
+		}
+		return 1 === @preg_match( '#^(?:' . $locale_pattern . ')$#', $first ) ? $first : ''; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- operator pattern; a bad one must not warn.
 	}
 
 	/**
@@ -190,34 +351,43 @@ final class BasedPreflight {
 	 * published posts, plus published pages that live beneath its bases —
 	 * a base set too shallow claims those pages as fake slugs.
 	 *
-	 * @param string   $type  Effective post type.
-	 * @param string[] $bases The entry's URL bases.
+	 * @param string   $type     Effective post type.
+	 * @param string[] $bases    The entry's URL bases.
+	 * @param string[] $statuses Publicly viewable statuses to sample.
 	 *
 	 * @return string[]
 	 */
-	private function real_paths( string $type, array $bases ): array {
+	private function real_paths( string $type, array $bases, array $statuses = [ 'publish' ] ): array {
 		global $wpdb;
 		if ( ! isset( $wpdb ) ) {
 			return [];
 		}
 
+		// Per status, so a status with few posts is sampled at all rather than
+		// crowded out by thousands of published ones.
+		$ids = [];
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
-		$ids = array_merge(
-			(array) $wpdb->get_col(
-				$wpdb->prepare(
-					"SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_status = 'publish' AND post_name <> '' ORDER BY ID DESC LIMIT %d",
-					$type,
-					self::SAMPLE_RECENT
+		foreach ( $statuses as $status ) {
+			$ids = array_merge(
+				$ids,
+				(array) $wpdb->get_col(
+					$wpdb->prepare(
+						"SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_status = %s AND post_name <> '' ORDER BY ID DESC LIMIT %d",
+						$type,
+						$status,
+						self::SAMPLE_RECENT
+					)
+				),
+				(array) $wpdb->get_col(
+					$wpdb->prepare(
+						"SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_status = %s AND post_name <> '' ORDER BY ID ASC LIMIT %d",
+						$type,
+						$status,
+						self::SAMPLE_OLDEST
+					)
 				)
-			),
-			(array) $wpdb->get_col(
-				$wpdb->prepare(
-					"SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_status = 'publish' AND post_name <> '' ORDER BY ID ASC LIMIT %d",
-					$type,
-					self::SAMPLE_OLDEST
-				)
-			)
-		);
+			);
+		}
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
 
 		$paths = [];
@@ -231,9 +401,11 @@ final class BasedPreflight {
 		// Pages beneath each base. The page's own path segments name it, so
 		// look for its last base segment first, then confirm the full URI.
 		// Skipped when the base IS a post type's own URL prefix: WordPress
-		// routes /{base}/{anything}/ to that post type, so a page there can
-		// never be served, and replaying it would refuse a save over a URL
-		// nobody can reach.
+		// routes /{base}/{anything}/ to that post type, so such a page is
+		// normally unreachable, and replaying it would refuse a save over a URL
+		// nobody can reach. A site that routes a page there with its own
+		// rewrite rule protects it with a reserved slug — and removing that
+		// slug is replayed separately (see run()).
 		$post_type_prefixes = self::post_type_prefixes();
 		foreach ( $bases as $base ) {
 			if ( in_array( $base, $post_type_prefixes, true ) ) {

@@ -79,6 +79,49 @@ class PostShieldBasedPreflightTest extends TestCase {
 	}
 
 	/**
+	 * An absent key and its default are the same value: a config written by
+	 * the legacy importer omits allow_pagination, which the screen saves as
+	 * true — that must not make every entry look changed. Reordered lists are
+	 * not a change either.
+	 *
+	 * @return void
+	 */
+	public function test_changed_keys_ignores_defaults_and_order(): void {
+		$stored    = [
+			'manual' => [
+				'enabled'     => true,
+				'post_type'   => 'manual',
+				'url_base'    => [ 'support/manual/detail' ],
+				'post_status' => [ 'publish', 'discontinued' ],
+			],
+		];
+		$candidate = [
+			'manual' => array_merge(
+				$stored['manual'],
+				[
+					'mode'             => 'allowlist',
+					'match'            => 'slug',
+					'allow_pagination' => true,
+					'post_status'      => [ 'discontinued', 'publish' ],
+				]
+			),
+		];
+		$this->assertSame( [], BasedPreflight::changed_keys( $candidate, $stored ) );
+	}
+
+	/**
+	 * Editing reserved slugs is in scope: removing one can 404 the page it
+	 * protected.
+	 *
+	 * @return void
+	 */
+	public function test_changed_keys_includes_reserved_slug_edits(): void {
+		$stored    = [ 'story' => $this->entry( [ 'post_type' => 'story', 'url_base' => [ 'stories' ], 'reserved_allowlist' => [ 'b2b-solutions' ] ] ) ];
+		$candidate = [ 'story' => $this->entry( [ 'post_type' => 'story', 'url_base' => [ 'stories' ], 'reserved_allowlist' => [] ] ) ];
+		$this->assertSame( [ 'story' ], BasedPreflight::changed_keys( $candidate, $stored ) );
+	}
+
+	/**
 	 * Disabled entries, blocked bases and root entries are never replayed here.
 	 *
 	 * @return void

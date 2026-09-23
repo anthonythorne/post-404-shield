@@ -137,13 +137,14 @@ $post_shield_store->set_coverage_handler(
 		$keys = \Post404Shield\Library\BasedPreflight::changed_keys( (array) ( $candidate['entries'] ?? [] ), $current_entries );
 		if ( [] === $keys ) {
 			return [
-				'checked' => 0,
-				'breaks'  => [],
-				'depth'   => [],
-				'homes'   => [],
+				'checked'   => 0,
+				'breaks'    => [],
+				'depth'     => [],
+				'homes'     => [],
+				'unclaimed' => [],
 			];
 		}
-		return ( new \Post404Shield\Library\BasedPreflight() )->run( $candidate, $keys );
+		return ( new \Post404Shield\Library\BasedPreflight() )->run( $candidate, $keys, $current_entries );
 	}
 );
 

@@ -1432,6 +1432,29 @@ class ConfigStore {
 				$current_doc = $this->option();
 				$coverage    = ( $this->coverage_handler )( $config, is_array( $current_doc['entries'] ?? null ) ? $current_doc['entries'] : null );
 				$breaks      = (array) ( $coverage['breaks'] ?? [] );
+				$unclaimed   = (array) ( $coverage['unclaimed'] ?? [] );
+				if ( [] !== $unclaimed && empty( $flags['force_preflight'] ) ) {
+					$unclaimed_errors = [];
+					foreach ( $unclaimed as $entry_key => $home ) {
+						$unclaimed_errors[] = '' === (string) $home
+							? sprintf(
+								/* translators: %s: entry name. */
+								__( 'Coverage check FAILED: none of %s\'s real URLs sit under its URL bases, so it would shield nothing — check the URL base.', 'post-404-shield' ),
+								(string) $entry_key
+							)
+							: sprintf(
+								/* translators: 1: entry name, 2: the URL base its posts really use. */
+								__( 'Coverage check FAILED: none of %1$s\'s real URLs sit under its URL bases, so it would shield nothing. Its posts live under /%2$s/ — check the URL base.', 'post-404-shield' ),
+								(string) $entry_key,
+								(string) $home
+							);
+					}
+					return [
+						'ok'       => false,
+						'errors'   => $unclaimed_errors,
+						'warnings' => $validated['warnings'],
+					];
+				}
 				if ( [] !== $breaks && empty( $flags['force_preflight'] ) ) {
 					$coverage_errors = [
 						sprintf(
@@ -1478,6 +1501,16 @@ class ConfigStore {
 						(string) $depth_hits[0]['url'],
 						(string) $depth_hits[0]['marker']
 					);
+				}
+				foreach ( (array) ( $coverage['homes'] ?? [] ) as $entry_key => $home ) {
+					if ( ! isset( $unclaimed[ $entry_key ] ) ) {
+						$validated['warnings'][] = sprintf(
+							/* translators: 1: entry name, 2: the URL base most of its posts use. */
+							__( '%1$s: most of its real URLs live under /%2$s/, which is not one of its URL bases — check the bases are complete.', 'post-404-shield' ),
+							(string) $entry_key,
+							(string) $home
+						);
+					}
 				}
 				if ( (int) ( $coverage['checked'] ?? 0 ) > 0 ) {
 					$validated['warnings'][] = [] === $breaks
