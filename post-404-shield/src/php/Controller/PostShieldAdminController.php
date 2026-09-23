@@ -1430,16 +1430,20 @@ class PostShieldAdminController {
 				'valid'       => (bool) $revision['valid'],
 				'generatedAt' => (string) $revision['generated_at'],
 				'generatedBy' => (string) $revision['generated_by'],
+				// Built with add_query_arg(), NOT wp_nonce_url(): core's
+				// wp_nonce_url() returns esc_html()'d output (`&amp;`), which is
+				// right for PHP-rendered markup but wrong here. This URL travels
+				// as JSON into React, which sets href without decoding entities,
+				// so PHP would receive `amp;ps_restore` and `amp;_wpnonce` and the
+				// restore would silently render the normal page instead.
 				'restoreUrl'  => $revision['valid']
-					? wp_nonce_url(
-						add_query_arg(
-							[
-								'page'       => self::PAGE_SLUG,
-								'ps_restore' => $revision['stamp'],
-							],
-							admin_url( 'options-general.php' )
-						),
-						'post_shield_restore_confirm'
+					? add_query_arg(
+						[
+							'page'       => self::PAGE_SLUG,
+							'ps_restore' => rawurlencode( (string) $revision['stamp'] ),
+							'_wpnonce'   => wp_create_nonce( 'post_shield_restore_confirm' ),
+						],
+						admin_url( 'options-general.php' )
 					)
 					: '',
 			];
