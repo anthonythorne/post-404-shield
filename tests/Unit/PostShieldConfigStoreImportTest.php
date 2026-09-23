@@ -170,4 +170,43 @@ class PostShieldConfigStoreImportTest extends TestCase {
 		$this->assertFalse( $off['story']['enabled'] );
 		$this->assertSame( [ 'stories' ], $off['story']['url_base'] );
 	}
+
+	/**
+	 * The redirect-derivation version salts the redirect fingerprint, so a
+	 * reducer change reaches existing sites only when the version moves. This
+	 * pins both together: change what the reducers produce and this fails
+	 * until REDIRECT_DERIVATION_VERSION is bumped and the hash updated.
+	 *
+	 * @return void
+	 */
+	public function test_derivation_version_moves_with_the_reducers(): void {
+		require_once __DIR__ . '/../../post-404-shield/src/php/Function/ConfigReader.php';
+		$pattern = '[a-z]{2}-[a-z]{2}|global';
+		$sources = [
+			[ '^/old-product-\\d+/?$', true ],
+			[ '^/promo', true ],
+			[ '^/promo/', true ],
+			[ '^/sale\\-', true ],
+			[ '^/news/(.+)$', true ],
+			[ '^/product-.*$', true ],
+			[ '^/colou?r$', true ],
+			[ '^/([a-z]{2}-[a-z]{2})/stories/old/?$', true ],
+			[ '^([a-z]{2}-[a-z]{2}|global)/products/(finder|grip)/?$', true ],
+			[ '/old-page/', false ],
+			[ 'faq?x=1', false ],
+			[ 'ja-jp/special/x/', false ],
+		];
+		$out = [];
+		foreach ( $sources as [ $source, $regex ] ) {
+			foreach ( \Post404Shield\redirect_source_variants( $source, $regex, $pattern ) as $variant ) {
+				$out[] = \Post404Shield\redirect_pattern_base( $variant, $regex );
+			}
+		}
+		$version = ( new \ReflectionClassConstant( ConfigStore::class, 'REDIRECT_DERIVATION_VERSION' ) )->getValue();
+		$this->assertSame(
+			[ 3, '141ef53dee96ec7eec5642e9110ee919' ],
+			[ $version, md5( implode( '|', $out ) ) ],
+			'The reducers changed: bump REDIRECT_DERIVATION_VERSION and update this hash. Outputs: ' . implode( ' | ', $out )
+		);
+	}
 }

@@ -331,6 +331,21 @@
 									el('li', { key: i }, item)
 								)
 							)
+						: null,
+					notice.action
+						? el(
+								'p',
+								null,
+								el(
+									Button,
+									{
+										variant: 'secondary',
+										size: 'compact',
+										href: notice.action.url,
+									},
+									notice.action.label
+								)
+							)
 						: null
 				)
 			)
@@ -713,7 +728,7 @@
 						'span',
 						{ className: 'post-shield-admin__field-label' },
 						__(
-							'Let through because a redirect exists',
+							'Let through because WordPress serves them (a redirect, or a route such as an archive)',
 							'post-404-shield'
 						)
 					),
@@ -722,7 +737,7 @@
 						'p',
 						{ className: 'components-base-control__help' },
 						__(
-							'Read from Rank Math redirects every time you save, and every night. You don’t need to add these yourself. A name ending in * covers every name that starts with it.',
+							'Read from the site’s redirect plugins and WordPress’s own routes every time you save, and every night. You don’t need to add these yourself. A name ending in * covers every name that starts with it.',
 							'post-404-shield'
 						)
 					)
@@ -842,7 +857,7 @@
 					// kept while root matching is switched off automatically, and
 					// a based entry left behind when the type moved to the root.
 					!type.enabled && type.hasEntry
-						? type.root && !type.rootKept
+						? (type.root && !type.rootKept) || type.removing
 							? el(
 									Badge,
 									{ tone: 'warning' },

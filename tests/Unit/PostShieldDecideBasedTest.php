@@ -89,6 +89,21 @@ class PostShieldDecideBasedTest extends TestCase {
 	}
 
 	/**
+	 * The depth policy counts real levels only: a segment outside
+	 * [a-z0-9_-] below a real slug is WordPress's to judge, never a 301 or a
+	 * 404 a normalising cache could store under the canonical URL.
+	 *
+	 * @return void
+	 */
+	public function test_depth_policy_ignores_non_canonical_segments(): void {
+		$e = [ 'story' => $this->entry() ];
+		$l = [ 'story' => [ 'real-one' ] ];
+		$this->assertSame( 'allowed-deep-path', $this->decide( '/intl/stories/real-one/Upper/', $e, $l )['marker'] );
+		$this->assertSame( 'allowed-deep-path', $this->decide( '/intl/stories/real-one/a~b/', $e, $l )['marker'] );
+		$this->assertSame( 'redirect-deep-path', $this->decide( '/intl/stories/real-one/a/', $e, $l )['marker'], 'A canonical deeper path still redirects.' );
+	}
+
+	/**
 	 * Each depth action under a real slug.
 	 *
 	 * @return void

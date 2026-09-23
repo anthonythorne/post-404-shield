@@ -112,7 +112,7 @@ $post_shield_builder = new \Post404Shield\Library\AllowlistBuilder( $post_shield
 // ordered around the artifact swap so a full-path artifact never reads a
 // slug-format list. Every save path — admin, restore, CLI — inherits this.
 $post_shield_store->set_rebuild_handler(
-	static function ( array $post_types, array $entries ): bool {
+	static function ( array $post_types, array $entries, bool $root_switching_on = false ): bool {
 		$candidate_builder = new \Post404Shield\Library\AllowlistBuilder( $entries );
 		$ok                = true;
 		foreach ( $post_types as $rebuild_type ) {
@@ -125,8 +125,10 @@ $post_shield_store->set_rebuild_handler(
 		}
 		// Root mode (root-pages v2): the extras union member (attachments + old
 		// slugs) must exist BEFORE a root-enabling artifact swaps in — the
-		// loader refuses to run root matching without it (fail-open).
-		if ( $candidate_builder->has_root_entries() ) {
+		// loader refuses to run root matching without it (fail-open). Built
+		// when root mode is being switched on, or the file is missing; while
+		// root mode stays on, the appends and the nightly rebuild keep it.
+		if ( $candidate_builder->has_root_entries() && ( $root_switching_on || ! is_file( $candidate_builder->get_root_extras_file() ) ) ) {
 			try {
 				$candidate_builder->rebuild_root_extras();
 			} catch ( \Throwable $e ) {
@@ -138,12 +140,14 @@ $post_shield_store->set_rebuild_handler(
 	}
 );
 
-// Root mode depends on the permalink structure and the category and tag bases,
+// The shield depends on the permalink structure and the category and tag bases,
 // which are only checked at save time. When any of them changes, re-validate
-// at shutdown — once, after Settings → Permalinks has written all three and
-// flushed the rewrite rules — refreshing the snapshot, or switching root
-// matching off if it no longer holds (ConfigStore::revalidate_root()).
-// Fail-open, never a site of pre-boot 404s.
+// (ConfigStore::revalidate_root()) twice. At shutdown — once, after Settings →
+// Permalinks has written all three — for what cannot wait: a post base that
+// moved, or root mode that no longer fits. And again a minute later, from
+// cron: this request's rewrite rules are the old ones and its endpoint list is
+// empty until the next request flushes and re-registers them, so only then is
+// the snapshot true. Fail-open, never a site of pre-boot 404s.
 $post_shield_revalidate = static function () use ( $post_shield_store ): void {
 	static $queued = false;
 	if ( $queued ) {
@@ -154,12 +158,21 @@ $post_shield_revalidate = static function () use ( $post_shield_store ): void {
 		'shutdown',
 		static function () use ( $post_shield_store ): void {
 			$post_shield_store->revalidate_root( 'the permalink settings changed' );
+			if ( false === wp_next_scheduled( 'post_shield_revalidate' ) ) {
+				wp_schedule_single_event( time() + MINUTE_IN_SECONDS, 'post_shield_revalidate' );
+			}
 		}
 	);
 };
 add_action( 'permalink_structure_changed', $post_shield_revalidate );
 add_action( 'update_option_category_base', $post_shield_revalidate );
 add_action( 'update_option_tag_base', $post_shield_revalidate );
+add_action(
+	'post_shield_revalidate',
+	static function () use ( $post_shield_store ): void {
+		$post_shield_store->revalidate_root( 'the permalink settings changed (follow-up once the rules were flushed)' );
+	}
+);
 
 // Based-entry coverage seam: every save that enables or changes a based entry
 // replays that entry's real URLs through the loader's decision; ConfigStore::

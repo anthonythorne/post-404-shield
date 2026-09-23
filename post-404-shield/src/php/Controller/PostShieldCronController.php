@@ -202,7 +202,9 @@ class PostShieldCronController {
 			return;
 		}
 
-		$result = $this->store->write( $option, 'cron (redirect sync)' );
+		// Refused (stale) if an operator saves between this read and the
+		// save's lock: their save re-derived the bucket itself.
+		$result = $this->store->write( $option, 'cron (redirect sync)', [ 'expect_revision' => $this->store->revision_of( $option ) ] );
 		if ( $result['ok'] ) {
 			update_option( ConfigStore::REDIRECT_FP_OPTION, $fingerprint, false );
 			error_log( '[post-404-shield] redirect sync: derived reserved slugs rebuilt (redirect sources changed).' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log

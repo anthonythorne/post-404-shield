@@ -135,6 +135,7 @@ class PostShieldAdminController {
 		add_action( 'admin_post_post_shield_save_config', [ $this, 'handle_save_config' ] );
 		add_action( 'admin_post_post_shield_restore', [ $this, 'handle_restore' ] );
 		add_action( 'admin_post_post_shield_disable', [ $this, 'handle_disable' ] );
+		add_action( 'admin_post_post_shield_discard_root', [ $this, 'handle_discard_root' ] );
 
 		// Worker for the button-queued per-type rebuild (runs in WP-Cron).
 		add_action( self::REBUILD_EVENT, [ $this, 'run_type_rebuild' ], 10, 1 );
@@ -286,11 +287,6 @@ class PostShieldAdminController {
 		$this->store->update_keep( $keep );
 
 		$this->queue_follow_up_jobs( $previous, $candidate );
-		// The "switched off automatically" notice stays until root matching is
-		// back on: its root settings are kept by every save until then.
-		if ( $wants_root ) {
-			delete_option( \Post404Shield\Library\ConfigStore::ROOT_OFF_OPTION );
-		}
 		$this->set_notice( [], $result['warnings'], true, __( 'Config saved — the artifact was regenerated and the shield now runs this configuration.', 'post-404-shield' ) );
 		$this->redirect_to_page();
 	}
@@ -365,6 +361,35 @@ class PostShieldAdminController {
 			$this->redirect_to_page();
 		}
 		$this->set_notice( [], $result['warnings'], true, __( 'Shield disabled — every entry switched off (the previous config is available as a revision).', 'post-404-shield' ) );
+		$this->redirect_to_page();
+	}
+
+	/**
+	 * Discard the root settings kept after root matching was switched off
+	 * automatically — for an operator who is not switching it back on. The
+	 * entries go through the normal save; the notice ends with them.
+	 *
+	 * @return void
+	 */
+	public function handle_discard_root(): void {
+		check_admin_referer( 'post_shield_discard_root' );
+		$this->require_capability();
+
+		$current = $this->current_document();
+		if ( null !== $current ) {
+			foreach ( (array) ( $current['entries'] ?? [] ) as $key => $entry ) {
+				if ( is_array( $entry ) && true === ( $entry['root'] ?? false ) && false === ( $entry['enabled'] ?? true ) ) {
+					unset( $current['entries'][ $key ] );
+				}
+			}
+			$result = $this->store->write( $current, $this->current_user_label() . ' (discard switched-off root settings)' );
+			if ( ! $result['ok'] ) {
+				$this->set_notice( $result['errors'], $result['warnings'], false );
+				$this->redirect_to_page();
+			}
+		}
+		delete_option( ConfigStore::ROOT_OFF_OPTION );
+		$this->set_notice( [], [], true, __( 'The kept root settings were discarded.', 'post-404-shield' ) );
 		$this->redirect_to_page();
 	}
 
@@ -542,10 +567,21 @@ class PostShieldAdminController {
 			if ( $is_root_dweller ) {
 				if ( ! $enabled ) {
 					// Switched off automatically (ConfigStore::revalidate_root()):
-					// keep the stored root settings, as its notice promises, until
-					// an operator switches root matching back on.
-					if ( $root_off && $has_old && true === ( $entries[ $key ]['root'] ?? false ) ) {
-						$new_entries[ $key ] = array_merge( (array) $entries[ $key ], [ 'enabled' => false ] );
+					// keep the stored root settings, as its notice promises, with the
+					// row's edits, until root matching is back on. An entry the
+					// operator switched off themselves is removed as usual.
+					if ( $root_off && $has_old && true === ( $entries[ $key ]['root'] ?? false ) && false === ( $entries[ $key ]['enabled'] ?? true ) ) {
+						$new_entries[ $key ] = array_merge(
+							(array) $entries[ $key ],
+							[
+								'enabled'            => false,
+								'reserved_allowlist' => $this->lines_from_textarea( (string) ( $row['reserved'] ?? '' ) ),
+								'post_status'        => [] !== $statuses ? array_values( array_unique( $statuses ) ) : [ 'publish' ],
+								'allow_pagination'   => ! empty( $row['allow_pagination'] ),
+								'cache_ttl'          => $this->int_or_null( $row['cache_ttl'] ?? '' ),
+								'edge_ttl'           => $this->int_or_null( $row['edge_ttl'] ?? '' ),
+							]
+						);
 					}
 					continue;
 				}
@@ -1186,7 +1222,7 @@ class PostShieldAdminController {
 	 *
 	 * @param array<string, mixed>|null $notice This user's one-shot notice (pull_notice()).
 	 *
-	 * @return array<int, array{status: string, message: string, list: string[]}>
+	 * @return array<int, array<string, mixed>> Each: status, message, list, and optionally action {label, url}.
 	 */
 	private function notices_state( ?array $notice ): array {
 		$notices = [];
@@ -1201,6 +1237,16 @@ class PostShieldAdminController {
 					(string) ( $root_off['reason'] ?? '' )
 				),
 				'list'    => array_map( 'strval', (array) ( $root_off['errors'] ?? [] ) ),
+				'action'  => [
+					'label' => __( 'Discard the kept root settings', 'post-404-shield' ),
+					'url'   => add_query_arg(
+						[
+							'action'   => 'post_shield_discard_root',
+							'_wpnonce' => wp_create_nonce( 'post_shield_discard_root' ),
+						],
+						admin_url( 'admin-post.php' )
+					),
+				],
 			];
 		}
 		if ( is_array( $notice ) ) {
@@ -1487,11 +1533,17 @@ class PostShieldAdminController {
 			&& isset( $stored['enabled'] ) && false === $stored['enabled']
 			&& is_array( get_option( ConfigStore::ROOT_OFF_OPTION ) );
 
+		// A rejected save's draft that deleted this entry (unticked, bases
+		// cleared): show it deleted, so the resubmit deletes it again rather
+		// than recreating it from the pre-filled bases with reset settings.
+		$removing = null === $entry && null !== $stored;
+
 		return [
 			'cpt'             => $cpt,
 			'label'           => null !== $type_object ? (string) $type_object->labels->name : $cpt,
 			'rootMoved'       => $root_moved,
 			'rootKept'        => $root_kept,
+			'removing'        => $removing,
 			'registered'      => null !== $type_object,
 			// Unknown (unregistered) types show every field rather than guess.
 			'hierarchical'    => null === $type_object || (bool) $type_object->hierarchical,
@@ -1502,7 +1554,7 @@ class PostShieldAdminController {
 			'seenBases'       => array_values( $seen_bases ),
 			'hasEntry'        => null !== $stored,
 			'enabled'         => null !== $entry && ! ( $root_moved && $entry === $stored ) && ( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] ),
-			'urlBase'         => isset( $entry['url_base'] ) && is_array( $entry['url_base'] ) ? implode( "\n", $entry['url_base'] ) : $default_base,
+			'urlBase'         => isset( $entry['url_base'] ) && is_array( $entry['url_base'] ) ? implode( "\n", $entry['url_base'] ) : ( $removing ? '' : $default_base ),
 			'match'           => (string) ( $entry['match'] ?? 'slug' ),
 			// Matching is offered for hierarchical types, and for any type already
 			// stored as full-path (so it can be switched back). Fixed per page load:

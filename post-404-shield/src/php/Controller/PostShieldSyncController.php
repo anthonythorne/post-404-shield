@@ -71,6 +71,13 @@ class PostShieldSyncController {
 	private array $orphans = [];
 
 	/**
+	 * Media of a post being deleted, keyed by its ID (root mode only).
+	 *
+	 * @var array<int, int[]>
+	 */
+	private array $orphan_media = [];
+
+	/**
 	 * Construct the sync controller for a set of managed post types.
 	 *
 	 * @param AllowlistBuilder $builder    Shared builder.
@@ -109,6 +116,8 @@ class PostShieldSyncController {
 		if ( $this->builder->has_root_entries() ) {
 			add_action( 'add_attachment', [ $this, 'handle_attachment' ], 10, 1 );
 			add_action( 'edit_attachment', [ $this, 'handle_attachment' ], 10, 1 );
+			// Attach / Detach in the Media Library re-parents with a direct query.
+			add_action( 'wp_media_attach_action', [ $this, 'handle_media_attach' ], 10, 2 );
 			// Media on a draft is left out of the union (no public page yet);
 			// it joins the instant its post goes live.
 			add_action( 'transition_post_status', [ $this, 'handle_parent_live' ], 10, 3 );
@@ -145,6 +154,18 @@ class PostShieldSyncController {
 	}
 
 	/**
+	 * Attach or Detach in the Media Library: the attachment's URL moved.
+	 *
+	 * @param string $action        `attach` or `detach`.
+	 * @param int    $attachment_id Attachment ID.
+	 *
+	 * @return void
+	 */
+	public function handle_media_attach( $action, $attachment_id ): void {
+		$this->handle_attachment( (int) $attachment_id );
+	}
+
+	/**
 	 * A post went live: append its media to the root-extras union, which leaves
 	 * out media whose post is not live yet.
 	 *
@@ -175,7 +196,25 @@ class PostShieldSyncController {
 	 */
 	public function handle_before_delete( int $post_id ): void {
 		$post_type = get_post_type( $post_id );
-		if ( ! is_string( $post_type ) || ! in_array( $post_type, $this->post_types, true ) || ! is_post_type_hierarchical( $post_type ) ) {
+		if ( ! is_string( $post_type ) || 'attachment' === $post_type ) {
+			return;
+		}
+		// Root mode: core also moves the post's media to its parent — their
+		// URLs change the same unseen way.
+		if ( $this->builder->has_root_entries() ) {
+			$media = get_children(
+				[
+					'post_parent' => $post_id,
+					'post_type'   => 'attachment',
+					'post_status' => 'inherit',
+					'fields'      => 'ids',
+				]
+			);
+			if ( [] !== $media ) {
+				$this->orphan_media[ $post_id ] = array_map( 'intval', (array) $media );
+			}
+		}
+		if ( ! in_array( $post_type, $this->post_types, true ) || ! is_post_type_hierarchical( $post_type ) ) {
 			return;
 		}
 		$children = get_children(
@@ -200,6 +239,10 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	public function handle_after_delete( int $post_id ): void {
+		if ( isset( $this->orphan_media[ $post_id ] ) ) {
+			$this->builder->append_root_extras( $this->builder->attachment_lines( null, $this->orphan_media[ $post_id ] ) );
+			unset( $this->orphan_media[ $post_id ] );
+		}
 		if ( ! isset( $this->orphans[ $post_id ] ) ) {
 			return;
 		}
@@ -256,6 +299,7 @@ class PostShieldSyncController {
 	public function handle_post_updated( int $post_id, \WP_Post $post_after, \WP_Post $post_before ): void {
 		if ( $post_before->post_name !== $post_after->post_name || $post_before->post_parent !== $post_after->post_parent ) {
 			$this->moved[ $post_id ] = true;
+			$this->remember_old_uris( $post_id, $post_after, $post_before );
 		}
 		if ( ! $this->builder->is_root_type( $post_after->post_type ) ) {
 			$this->append_based_old_slug( $post_after, $post_before );
@@ -271,20 +315,84 @@ class PostShieldSyncController {
 		}
 
 		$old_slug = $slug_changed ? $post_before->post_name : $post_after->post_name;
-		$this->builder->append_root_extra( $old_slug );
+		$lines    = [ $old_slug ];
 
 		// Old parent context: the address the post lived at before this save.
 		if ( $post_before->post_parent > 0 && is_post_type_hierarchical( $post_after->post_type ) ) {
 			$old_parent_uri = get_page_uri( $post_before->post_parent );
 			if ( is_string( $old_parent_uri ) && '' !== $old_parent_uri ) {
-				$this->builder->append_root_extra( $old_parent_uri . '/' . $old_slug );
+				$lines[] = $old_parent_uri . '/' . $old_slug;
 			}
 		}
 		// Current parent context (renamed in place under the same parent).
 		$uri = $this->builder->uris_for( $post_after->post_type, [ $post_id ] )[ $post_id ] ?? '';
 		if ( false !== strpos( $uri, '/' ) ) {
-			$this->builder->append_root_extra( substr( $uri, 0, (int) strrpos( $uri, '/' ) ) . '/' . $old_slug );
+			$lines[] = substr( $uri, 0, (int) strrpos( $uri, '/' ) ) . '/' . $old_slug;
 		}
+		$this->builder->append_root_extras( $lines );
+	}
+
+	/**
+	 * A hierarchical post moved (renamed, or re-parented): the addresses it and
+	 * its live descendants just left still get WordPress's 301 — its 404 guess
+	 * finds a page by name — but core records no old slug for them. Remember
+	 * them (AllowlistBuilder::record_old_uris(), which the nightly rebuild
+	 * reads) and append them now, in the format the type's list uses.
+	 *
+	 * @param int      $post_id Post ID.
+	 * @param \WP_Post $after   Post after the update.
+	 * @param \WP_Post $before  Post before the update.
+	 *
+	 * @return void
+	 */
+	private function remember_old_uris( int $post_id, \WP_Post $after, \WP_Post $before ): void {
+		$type = $after->post_type;
+		if ( '' === $before->post_name || ! in_array( $type, $this->post_types, true ) || ! is_post_type_hierarchical( $type ) ) {
+			return;
+		}
+		$new_uri = $this->builder->uris_for( $type, [ $post_id ] )[ $post_id ] ?? '';
+		$parent  = (int) $before->post_parent;
+		$old_uri = ( $parent > 0 ? ( $this->builder->uris_for( $type, [ $parent ] )[ $parent ] ?? '' ) . '/' : '' ) . $before->post_name;
+		if ( '' === $new_uri || $old_uri === $new_uri || 0 === strpos( $old_uri, '/' ) ) {
+			return;
+		}
+
+		$old = [];
+		if ( $this->builder->is_shielding_status( $type, (string) $after->post_status ) ) {
+			$old[ $post_id ] = $old_uri;
+		}
+		$live = [];
+		foreach ( $this->descendant_statuses( $post_id, $type ) as $child_id => $child_status ) {
+			if ( $this->builder->is_shielding_status( $type, $child_status ) ) {
+				$live[] = $child_id;
+			}
+		}
+		foreach ( $this->builder->uris_for( $type, $live ) as $child_id => $uri ) {
+			if ( 0 === strpos( $uri, $new_uri . '/' ) ) {
+				$old[ $child_id ] = $old_uri . substr( $uri, strlen( $new_uri ) );
+			}
+		}
+		if ( [] === $old ) {
+			return;
+		}
+		$this->builder->record_old_uris( $old );
+
+		$lines = array_values( $old );
+		if ( $this->builder->is_root_type( $type ) ) {
+			$this->builder->append_root_extras( $lines );
+			return;
+		}
+		if ( 'full-path' !== $this->builder->match_for( $type ) ) {
+			$lines = array_values(
+				array_filter(
+					$lines,
+					static function ( string $line ): bool {
+						return false === strpos( $line, '/' );
+					}
+				)
+			);
+		}
+		$this->builder->append_slugs( $type, $lines );
 	}
 
 	/**
@@ -409,22 +517,35 @@ class PostShieldSyncController {
 		// walk runs even when the moved post itself is a draft or private —
 		// WordPress still serves its published children at the new path.
 		if ( 'full-path' === $this->builder->match_for( $post_type ) ) {
-			$ids = $live ? [ $post_id ] : [];
-			if ( ( $moved || isset( $this->moved[ $post_id ] ) ) && is_post_type_hierarchical( $post_type ) ) {
+			// Root mode lists every PRIVATE root-type address in root-extras,
+			// whatever the entry's statuses (staff open them at their pretty
+			// URL): append those at once too.
+			$root_type = $this->builder->is_root_type( $post_type );
+			$ids       = $live ? [ $post_id ] : [];
+			$private   = $root_type && 'private' === $status ? [ $post_id ] : [];
+			$was_moved = $moved || isset( $this->moved[ $post_id ] );
+			if ( $was_moved && is_post_type_hierarchical( $post_type ) ) {
 				foreach ( $this->descendant_statuses( $post_id, $post_type ) as $child_id => $child_status ) {
 					if ( $this->builder->is_shielding_status( $post_type, $child_status ) ) {
 						$ids[] = $child_id;
+					} elseif ( $root_type && 'private' === $child_status ) {
+						$private[] = $child_id;
 					}
 				}
 			}
-			if ( [] === $ids ) {
+			if ( [] === $ids && [] === $private ) {
 				return;
 			}
-			$this->builder->append_slugs( $post_type, array_values( $this->builder->uris_for( $post_type, $ids ) ) );
+			if ( [] !== $ids ) {
+				$this->builder->append_slugs( $post_type, array_values( $this->builder->uris_for( $post_type, $ids ) ) );
+			}
+			if ( [] !== $private ) {
+				$this->builder->append_root_extras( array_values( $this->builder->uris_for( $post_type, $private ) ) );
+			}
 			// Root mode: the media of every moved post moves with it — its URL
 			// nests under the post's.
-			if ( $this->builder->has_root_entries() && ( $moved || isset( $this->moved[ $post_id ] ) ) ) {
-				$this->builder->append_root_extras( $this->builder->attachment_lines( $ids ) );
+			if ( $this->builder->has_root_entries() && $was_moved ) {
+				$this->builder->append_root_extras( $this->builder->attachment_lines( array_merge( $ids, $private ) ) );
 			}
 			if ( $live ) {
 				$this->purge_page_cache( $post_id );

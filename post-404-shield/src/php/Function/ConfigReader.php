@@ -247,6 +247,11 @@ function rewrite_pattern_base( string $pattern ): string {
 		}
 		$out .= $char;
 	}
+	// WordPress anchors rewrite rules at the start only (`#^{rule}#`): a rule
+	// that is literal to its end matches everything that starts with it.
+	if ( '' !== $out && $i >= $len ) {
+		$out .= '*';
+	}
 	return $out;
 }
 
@@ -292,6 +297,10 @@ function redirect_pattern_base( string $source, bool $is_regex ): string {
 			if ( '' !== $next && ! ctype_alnum( $next ) ) {
 				$out .= $next; // Escaped literal (\. \/).
 				++$i;
+				// Literal to the very end, unanchored: a prefix (see below).
+				if ( $i === $len - 1 && '/' !== $next ) {
+					$truncated = true;
+				}
 				continue;
 			}
 			// A class escape (\d, \w, \s, \b …) or a backreference is not a
@@ -381,6 +390,33 @@ function redirect_source_variants( string $source, bool $is_regex, string $local
 			$slash = strpos( $source, '/' );
 			if ( false !== $slash && $is_locale( substr( $source, 0, $slash ) ) ) {
 				$source = substr( $source, $slash + 1 );
+			}
+		}
+
+		// Any other leading group that is a locale in its own words — a
+		// capture reused as `$1` (`([a-z]{2}-[a-z]{2})`, `(\w{2}-\w{2})`), a
+		// reordered alternation: stripped when EVERY alternative matches a
+		// locale this site uses, and the group can never match across a `/`.
+		// Only ever wider, in the fail-open direction.
+		if ( $is_regex && 1 === preg_match( '#^\((?:\?:)?((?:[^()\\\\]|\\\\.)+)\)(\?)?/#', $source, $group ) ) {
+			$samples = array_values( array_filter( array_merge( [ 'en-us', 'ja-jp', 'en-gb', 'de-de', 'global' ], explode( '|', $locale_pattern ) ), $is_locale ) );
+			$matches = static function ( string $regex, string $subject ): bool {
+				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- an engine error on a plugin-supplied pattern must read as "no match".
+				return 1 === @preg_match( '#^(?:' . $regex . ')$#', $subject );
+			};
+			$all = [] !== $samples;
+			foreach ( explode( '|', $group[1] ) as $alternative ) {
+				$one = false;
+				foreach ( $samples as $sample ) {
+					if ( $matches( $alternative, $sample ) ) {
+						$one = true;
+						break;
+					}
+				}
+				$all = $all && $one;
+			}
+			if ( $all && ! $matches( $group[1], 'en-us/x' ) && ! $matches( $group[1], 'x/y' ) ) {
+				$source = substr( $source, strlen( $group[0] ) );
 			}
 		}
 	}
@@ -680,12 +716,6 @@ function config_is_valid( $config ): bool {
 				return false;
 			}
 		}
-		// A cached 404 cannot be recalled from browsers: at most a day.
-		foreach ( [ 'cache_ttl', 'edge_ttl' ] as $field ) {
-			if ( isset( $entry[ $field ] ) && $entry[ $field ] > MAX_TTL ) {
-				return false;
-			}
-		}
 
 		// `reserved_derived` is machine-built from the redirect plugins and may
 		// carry a trailing `*` (a prefix family, see slug_is_reserved()); it
@@ -703,7 +733,9 @@ function config_is_valid( $config ): bool {
 
 /**
  * The longest a shield 404 may be cached, in seconds (one day). Browsers keep
- * a cached 404 for as long as they were told, and no purge reaches them.
+ * a cached 404 for as long as they were told, and no purge reaches them. The
+ * loader clamps to it; a save warns about a longer one. Deliberately not an
+ * artifact invariant: one saved before the cap existed must keep working.
  */
 const MAX_TTL = 86400;
 

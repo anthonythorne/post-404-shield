@@ -104,6 +104,15 @@ define( 'POST_SHIELD_LOADED', true );
 		) {
 			return;
 		}
+		// A path not in canonical form — a `.` or `..` segment, a percent
+		// escape or a backslash — is not judged. A cache that normalises paths
+		// (Cloudflare does) keys the response by the canonical URL it resolves
+		// to while PHP sees the raw one, so a shield 404 or 301 for
+		// `/x/../real-page/` would be stored as the real page's. WordPress
+		// answers it instead, uncached, and canonicalises it.
+		if ( 1 === preg_match( '#(?:^|/)\.{1,2}(?:/|$)#', $early_path ) || false !== strpbrk( $early_path, '%\\' ) ) {
+			return;
+		}
 	}
 
 	// The generated config artifact is the ONLY runtime config source. It is
@@ -237,9 +246,9 @@ define( 'POST_SHIELD_LOADED', true );
 	} catch ( \Throwable ) {
 		return;
 	}
-	// Both checked: a Matcher.php from another release (a half-finished deploy)
+	// All checked: a Matcher.php from another release (a half-finished deploy)
 	// must leave the shield off, never fatal the request.
-	if ( ! function_exists( 'Post404Shield\\match_entry' ) || ! function_exists( 'Post404Shield\\decide_based' ) ) {
+	if ( ! function_exists( 'Post404Shield\\match_entry' ) || ! function_exists( 'Post404Shield\\decide_based' ) || ! function_exists( 'Post404Shield\\list_is_empty' ) ) {
 		return;
 	}
 
@@ -295,6 +304,10 @@ define( 'POST_SHIELD_LOADED', true );
 	// a permissive CUSTOM locale pattern (e.g. a class range spanning `/`) could
 	// otherwise capture a traversal-shaped string.
 	$emit_404 = static function ( string $marker, string $locale, int $ttl = 0, ?int $edge_ttl = null ) use ( $allowlist_dir ): void {
+		// No purge reaches a browser's cached 404: never longer than a day.
+		$max_ttl = defined( 'Post404Shield\\MAX_TTL' ) ? \Post404Shield\MAX_TTL : 86400;
+		$ttl     = min( $ttl, $max_ttl );
+		$edge_ttl = null === $edge_ttl ? null : min( $edge_ttl, $max_ttl );
 		if ( ! headers_sent() ) {
 			http_response_code( 404 );
 			header( 'Content-Type: text/html; charset=UTF-8' );
@@ -441,6 +454,9 @@ define( 'POST_SHIELD_LOADED', true );
 				$nr_tag( $marker, $shield_type );
 				if ( ! headers_sent() ) {
 					header( 'X-Post-Shield: redirect-deep-path' );
+					// Cached briefly, like a publishable 404, rather than for as
+					// long as a cache's heuristics allow a bare 301.
+					header( 'Cache-Control: public, max-age=' . min( $entry_ttl ?? $publishable_ttl, defined( 'Post404Shield\\MAX_TTL' ) ? \Post404Shield\MAX_TTL : 86400 ) );
 					header( 'Location: ' . $decision['location'], true, 301 );
 				}
 				exit;
@@ -533,8 +549,7 @@ define( 'POST_SHIELD_LOADED', true );
 				if ( false === $raw ) {
 					return null;
 				}
-				$guard_end = strpos( $raw, "\n" );
-				if ( false === $guard_end || ! isset( $raw[ $guard_end + 1 ] ) || "\n" === $raw[ $guard_end + 1 ] ) {
+				if ( \Post404Shield\list_is_empty( $raw ) ) {
 					return null;
 				}
 				return $raw;

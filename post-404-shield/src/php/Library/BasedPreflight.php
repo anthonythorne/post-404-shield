@@ -314,11 +314,32 @@ final class BasedPreflight {
 				$paths[ $path ] = true;
 			}
 		}
-		// A page AT a base (real_paths() finds the pages beneath one).
+		// A page AT a base (real_paths() finds the pages beneath one), and any
+		// published post whose slug is the base's last segment — a sample can
+		// miss the one post a base like `products/cameras/x-t5` would block.
+		global $wpdb;
 		foreach ( $bases as $base ) {
 			$page = function_exists( 'get_page_by_path' ) ? get_page_by_path( $base ) : null;
 			if ( $page instanceof \WP_Post && 'publish' === $page->post_status ) {
 				$path = $this->public_path( (int) $page->ID, 'page' );
+				if ( null !== $path ) {
+					$paths[ $path ] = true;
+				}
+			}
+			if ( ! isset( $wpdb ) || [] === $types ) {
+				continue;
+			}
+			$placeholders = implode( ', ', array_fill( 0, count( $types ), '%s' ) );
+			// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			$rows = (array) $wpdb->get_results(
+				$wpdb->prepare(
+					"SELECT ID, post_type FROM {$wpdb->posts} WHERE post_status = 'publish' AND post_name = %s AND post_type IN ($placeholders) LIMIT 50",
+					array_merge( [ basename( $base ) ], array_values( $types ) )
+				)
+			);
+			// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			foreach ( $rows as $row ) {
+				$path = $this->public_path( (int) $row->ID, (string) $row->post_type );
 				if ( null !== $path ) {
 					$paths[ $path ] = true;
 				}

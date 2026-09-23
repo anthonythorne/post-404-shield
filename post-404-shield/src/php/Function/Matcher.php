@@ -20,6 +20,25 @@ declare(strict_types=1);
 namespace Post404Shield;
 
 /**
+ * Whether an allowlist file's contents list nothing: the guard line alone, or
+ * the guard and the empty line an empty rebuild writes. O(1). Not "the byte
+ * after the guard is a newline": an append to an empty list gives
+ * `guard\n\nslug\n`, which lists a slug.
+ *
+ * @param string $raw File contents.
+ *
+ * @return bool
+ */
+function list_is_empty( string $raw ): bool {
+	$guard_end = strpos( $raw, "\n" );
+	if ( false === $guard_end ) {
+		return true;
+	}
+	$rest = strlen( $raw ) - $guard_end - 1;
+	return 0 === $rest || ( 1 === $rest && "\n" === $raw[ $guard_end + 1 ] );
+}
+
+/**
  * Match a `/{locale}/{base}/{slug}[/{extra}...]` path and split out its parts.
  *
  * When $locale_pattern is non-empty the prefix is REQUIRED — a bare
@@ -520,8 +539,7 @@ function decide_based( string $uri, string $path, array $entries, callable $allo
 			if ( null === $raw ) {
 				return $decision( 'pass' );
 			}
-			$guard_end = strpos( $raw, "\n" );
-			if ( false === $guard_end || ! isset( $raw[ $guard_end + 1 ] ) || "\n" === $raw[ $guard_end + 1 ] ) {
+			if ( list_is_empty( $raw ) ) {
 				return $decision( 'pass' );
 			}
 
@@ -548,6 +566,14 @@ function decide_based( string $uri, string $path, array $entries, callable $allo
 
 			if ( ! is_allowed( $match['slug'], $raw ) ) {
 				return $decision( 'blocked-unknown-slug', (string) $match['locale'] );
+			}
+
+			// The depth policy counts real levels only: a segment outside
+			// `[a-z0-9_-]` below a real slug is WordPress's to judge.
+			foreach ( $segments as $segment ) {
+				if ( 1 !== preg_match( '/^[a-z0-9_-]+$/', $segment ) ) {
+					return $decision( 'allowed-deep-path' );
+				}
 			}
 
 			$depth_allowed = $settings['depth_allowed'] ?? null;

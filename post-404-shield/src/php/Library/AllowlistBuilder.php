@@ -33,6 +33,19 @@ class AllowlistBuilder {
 	private const BATCH = 2000;
 
 	/**
+	 * Post meta holding a hierarchical post's former addresses. Core keeps
+	 * `_wp_old_slug` for flat posts only, yet WordPress still 301s a renamed
+	 * or moved page's old address (its 404 guess finds the page by name), so
+	 * the shield keeps its own record to go on passing those addresses.
+	 */
+	public const OLD_URI_META = '_post_shield_old_uri';
+
+	/**
+	 * Former addresses kept per post, newest last.
+	 */
+	private const OLD_URI_KEEP = 10;
+
+	/**
 	 * Config entries, keyed by entry key (the artifact's or a candidate's).
 	 *
 	 * @var array<string, array<string, mixed>>
@@ -473,7 +486,70 @@ class AllowlistBuilder {
 		if ( $this->is_root_type( $post_type ) ) {
 			return $lines;
 		}
-		return array_merge( $lines, $this->fetch_old_slugs( $post_type, $statuses ) );
+		$lines = array_merge( $lines, $this->fetch_old_slugs( $post_type, $statuses ) );
+		if ( $this->is_hierarchical( $post_type ) ) {
+			// A slug list takes a former top-level address; a full-path list any.
+			foreach ( $this->old_uri_lines( [ $post_type ] ) as $uri ) {
+				if ( 'full-path' === $match || false === strpos( $uri, '/' ) ) {
+					$lines[] = $uri;
+				}
+			}
+		}
+		return $lines;
+	}
+
+	/**
+	 * Former addresses (OLD_URI_META) of posts of these types that are live
+	 * in their type's statuses — unvalidated lines.
+	 *
+	 * @param string[] $types Effective CPTs.
+	 *
+	 * @return string[]
+	 */
+	private function old_uri_lines( array $types ): array {
+		global $wpdb;
+		if ( [] === $types ) {
+			return [];
+		}
+		$placeholders = implode( ', ', array_fill( 0, count( $types ), '%s' ) );
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT pm.meta_value AS uri, p.post_type, p.post_status FROM {$wpdb->postmeta} pm
+				 INNER JOIN {$wpdb->posts} p ON p.ID = pm.post_id
+				 WHERE pm.meta_key = %s AND p.post_type IN ($placeholders) AND pm.meta_value <> ''",
+				array_merge( [ self::OLD_URI_META ], $types )
+			)
+		);
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$lines = [];
+		foreach ( (array) $rows as $row ) {
+			if ( $this->is_shielding_status( (string) $row->post_type, (string) $row->post_status ) ) {
+				$lines[] = (string) $row->uri;
+			}
+		}
+		return $lines;
+	}
+
+	/**
+	 * Remember posts' former addresses (see OLD_URI_META), the newest
+	 * OLD_URI_KEEP per post.
+	 *
+	 * @param array<int, string> $uris Post ID => the address it just left.
+	 *
+	 * @return void
+	 */
+	public function record_old_uris( array $uris ): void {
+		foreach ( $uris as $id => $uri ) {
+			$known = array_values( array_filter( (array) get_post_meta( (int) $id, self::OLD_URI_META, false ), 'is_string' ) );
+			if ( '' === $uri || in_array( $uri, $known, true ) ) {
+				continue;
+			}
+			add_post_meta( (int) $id, self::OLD_URI_META, $uri );
+			if ( count( $known ) >= self::OLD_URI_KEEP ) {
+				delete_post_meta( (int) $id, self::OLD_URI_META, $known[0] );
+			}
+		}
 	}
 
 	/**
@@ -672,14 +748,20 @@ class AllowlistBuilder {
 		if ( ! is_string( $raw ) ) {
 			return $lines;
 		}
-		return array_values(
-			array_filter(
-				$lines,
-				static function ( string $line ) use ( $raw ): bool {
-					return false === strpos( $raw, "\n" . $line . "\n" );
-				}
-			)
-		);
+		// A scan per line for a handful; a set, built once, for a batch (a
+		// moved section's media) — a scan per line over a large list would
+		// cost seconds inside the lock.
+		if ( count( $lines ) <= 4 ) {
+			$test = static function ( string $line ) use ( $raw ): bool {
+				return false === strpos( $raw, "\n" . $line . "\n" );
+			};
+		} else {
+			$listed = array_flip( explode( "\n", $raw ) );
+			$test   = static function ( string $line ) use ( $listed ): bool {
+				return ! isset( $listed[ $line ] );
+			};
+		}
+		return array_values( array_filter( $lines, $test ) );
 	}
 
 	/**
@@ -1086,7 +1168,7 @@ class AllowlistBuilder {
 				$lines[] = substr( $uri, 0, (int) strrpos( $uri, '/' ) ) . '/' . $row->old_slug;
 			}
 		}
-		return $lines;
+		return array_merge( $lines, $this->old_uri_lines( $root_types ) );
 	}
 
 	/**

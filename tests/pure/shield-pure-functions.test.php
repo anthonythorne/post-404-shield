@@ -152,6 +152,15 @@ check( 'news*', Post404Shield\redirect_pattern_base( '^/news-?(.*)$', true ), 'r
 check( 'trail-*', Post404Shield\redirect_pattern_base( '^trail-+$', true ), 'redirect: `+` keeps the char (at least one)' );
 check( 'news', Post404Shield\redirect_pattern_base( '^news/?$', true ), 'redirect: `/?` after a separator drops nothing' );
 check( 'faq*', Post404Shield\redirect_pattern_base( 'faq?x=1', false ), 'redirect: plain-source `?` is not a quantifier (no char dropped)' );
+check( 'sale-*', Post404Shield\redirect_pattern_base( '^/sale\\-', true ), 'redirect: unanchored, ending in an escaped literal: a prefix' );
+check( 'shop*', Post404Shield\rewrite_pattern_base( '^shop' ), 'rewrite: literal to its end is a prefix (rules anchor at the start only)' );
+check( [ 'stories/old/?$' ], Post404Shield\redirect_source_variants( '^/([a-z]{2}-[a-z]{2})/stories/old/?$', true, '[a-z]{2}-[a-z]{2}|global' ), 'variants: a locale capture written differently is stripped' );
+check( [ 'stories/y/?$' ], Post404Shield\redirect_source_variants( '^/(\\w{2}-\\w{2})/stories/y/?$', true, '[a-z]{2}-[a-z]{2}|global' ), 'variants: an escape-class locale group is stripped' );
+check( [ '(.*)/stories/z/?$' ], Post404Shield\redirect_source_variants( '^/(.*)/stories/z/?$', true, '[a-z]{2}-[a-z]{2}|global' ), 'variants: a group that can span a slash is kept' );
+check( true, Post404Shield\list_is_empty( "<?php exit;\n\n" ), 'empty list: guard + empty line' );
+check( true, Post404Shield\list_is_empty( "<?php exit;\n" ), 'empty list: guard alone' );
+check( false, Post404Shield\list_is_empty( "<?php exit;\n\nnew-slug\n" ), 'not empty: a first append to an empty list' );
+check( false, Post404Shield\list_is_empty( "<?php exit;\na\n" ), 'not empty: one line' );
 check( 'old-product-*', Post404Shield\redirect_pattern_base( '^/old-product-\\d+/?$', true ), 'redirect: \\d ends the literal run mid-segment' );
 check( 'promo*', Post404Shield\redirect_pattern_base( '^/promo', true ), 'redirect: an unanchored literal regex is a prefix' );
 check( 'promo', Post404Shield\redirect_pattern_base( '^/promo/', true ), 'redirect: an unanchored regex ending on a separator is the segment' );
