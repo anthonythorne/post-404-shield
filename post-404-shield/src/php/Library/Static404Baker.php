@@ -27,11 +27,6 @@ namespace Post404Shield\Library;
 class Static404Baker {
 
 	/**
-	 * Uploads-relative directory that holds the baked 404 pages.
-	 */
-	private const SUBDIR = 'post-404-shield/404';
-
-	/**
 	 * A path with no real content, so WordPress renders its normal themed 404 —
 	 * what we capture. The pre-boot loader BLOCKS this path for everyone except
 	 * requests carrying the probe token (see probe_token()), so crawlers that
@@ -362,8 +357,7 @@ class Static404Baker {
 	 * @return string
 	 */
 	public function get_token_file(): string {
-		$uploads = wp_upload_dir();
-		return trailingslashit( $uploads['basedir'] ) . 'post-404-shield/probe-token.php';
+		return \Post404Shield\shield_dir() . '/probe-token.php';
 	}
 
 	/**
@@ -437,8 +431,7 @@ class Static404Baker {
 	 * @return string
 	 */
 	public function get_file( string $locale ): string {
-		$uploads = wp_upload_dir();
-		return trailingslashit( $uploads['basedir'] ) . self::SUBDIR . '/' . $locale . '.html';
+		return \Post404Shield\shield_dir() . '/404/' . $locale . '.html';
 	}
 
 	/**

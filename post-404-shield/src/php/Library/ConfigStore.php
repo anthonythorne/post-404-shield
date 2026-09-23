@@ -227,8 +227,7 @@ class ConfigStore {
 	 * @return string
 	 */
 	public function artifact_dir(): string {
-		$uploads = wp_upload_dir();
-		return trailingslashit( $uploads['basedir'] ) . 'post-404-shield';
+		return \Post404Shield\shield_dir();
 	}
 
 	/**

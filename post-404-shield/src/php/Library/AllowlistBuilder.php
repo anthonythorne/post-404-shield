@@ -23,11 +23,6 @@ namespace Post404Shield\Library;
 class AllowlistBuilder {
 
 	/**
-	 * Uploads-relative directory that holds the generated allowlists.
-	 */
-	private const ALLOWLIST_SUBDIR = 'post-404-shield';
-
-	/**
 	 * Managed post types, keyed by CPT name (from config/allowed-post-types.php).
 	 *
 	 * @var array<string, array<string, mixed>>
@@ -759,8 +754,7 @@ class AllowlistBuilder {
 	 * @return string
 	 */
 	public function get_allowlist_root(): string {
-		$uploads = wp_upload_dir();
-		return trailingslashit( $uploads['basedir'] ) . self::ALLOWLIST_SUBDIR;
+		return \Post404Shield\shield_dir();
 	}
 
 	/**

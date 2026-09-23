@@ -99,19 +99,6 @@ define( 'POST_SHIELD_LOADED', true );
 		}
 	}
 
-	// Allowlist directory: derived from this file's location (works pre-boot and
-	// at mu-plugin load). __DIR__ = .../mu-plugins/post-404-shield ; two up =
-	// wp-content. Computed BEFORE the config load — the config artifact itself
-	// lives here.
-	//
-	// Deliberately NOT overridable. A `POST_SHIELD_ALLOWLIST_DIR` define used to
-	// redirect this reader, but every writer (config, allowlists, 404 bake)
-	// resolves the directory through wp_upload_dir() and ignored it — so setting
-	// it would have pointed the loader at a directory nothing writes to, while
-	// the settings screen still reported ACTIVE. Undocumented and unset on every
-	// environment, so it went rather than being plumbed through three writers.
-	$allowlist_dir = dirname( __DIR__, 2 ) . '/uploads/post-404-shield';
-
 	// The generated config artifact is the ONLY runtime config source. It is
 	// text-read and fully re-validated by the pure reader; missing, corrupt or
 	// invariant-violating → null → the shield is not in place (fail-open).
@@ -124,9 +111,16 @@ define( 'POST_SHIELD_LOADED', true );
 	} catch ( \Throwable ) {
 		return;
 	}
-	if ( ! function_exists( 'Post404Shield\\read_config' ) || ! function_exists( 'Post404Shield\\config_shape_is_valid' ) ) {
+	if ( ! function_exists( 'Post404Shield\\read_config' ) || ! function_exists( 'Post404Shield\\config_shape_is_valid' ) || ! function_exists( 'Post404Shield\\shield_dir' ) ) {
 		return;
 	}
+
+	// The shield's data directory — config artifact, allowlists, baked 404s,
+	// probe token. shield_dir() is the one definition every writer uses too,
+	// so the loader can never read a directory nothing writes to. Deliberately
+	// not overridable: a POST_SHIELD_ALLOWLIST_DIR define once redirected this
+	// reader while the writers ignored it.
+	$allowlist_dir = \Post404Shield\shield_dir();
 	// Decode + a types-only check first; the full (regex-heavy) validation
 	// runs below, once the pre-filter says this request is shield business.
 	// Most requests are not, and they exit without acting either way — so

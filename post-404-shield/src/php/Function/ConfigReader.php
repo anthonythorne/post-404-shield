@@ -648,6 +648,27 @@ function config_is_valid( $config ): bool {
 }
 
 /**
+ * Absolute path of the shield's data directory: `wp-content/uploads/post-404-shield`.
+ *
+ * The ONE place it is worked out. The pre-boot loader reads from it before
+ * WordPress (and wp_upload_dir()) exists, so every writer — config artifact,
+ * allowlists, baked 404 pages, probe token — must write to exactly the same
+ * place, or the loader reads a directory nothing writes to while the settings
+ * screen reports the shield active. Deriving it from this file's location
+ * works pre-boot and at mu-plugin load alike, and unlike wp_upload_dir() it
+ * neither stats nor creates the month folder on every call, and cannot be
+ * moved by a custom UPLOADS setting the loader would not see.
+ *
+ * __DIR__ is wp-content/mu-plugins/post-404-shield/src/php/Function, so
+ * wp-content is five levels up.
+ *
+ * @return string
+ */
+function shield_dir(): string {
+	return dirname( __DIR__, 5 ) . '/uploads/post-404-shield';
+}
+
+/**
  * Per-request memo slot for one artifact path.
  *
  * Holds the raw bytes last read, their decoded document and, once computed,
