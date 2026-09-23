@@ -149,7 +149,7 @@ class RootPreflight {
 			$bodies[ $post_type ] = $this->body_from_lines( $type_lines );
 			$sets[ $post_type ]   = array_fill_keys( $type_lines, true );
 		}
-		$extras_lines = $builder->has_root_entries() ? $builder->root_extras_lines() : [];
+		$extras_lines = $builder->has_root_entries() ? $builder->root_extras_sample( self::EXTRAS_SAMPLE ) : [];
 		$extras_body  = $this->body_from_lines( $extras_lines );
 		$extras_set   = array_fill_keys( $extras_lines, true );
 

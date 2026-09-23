@@ -58,8 +58,8 @@ function locale_pattern_classes_are_safe( string $pattern ): bool {
 			}
 			// `a-z` style range: a hyphen with a character on both sides.
 			if ( $j + 2 < $blen && '-' === $body[ $j + 1 ] ) {
-				$from = $c;
-				$to   = $body[ $j + 2 ];
+				$from         = $c;
+				$to           = $body[ $j + 2 ];
 				$both_letters = ctype_lower( $from ) && ctype_lower( $to );
 				$both_digits  = ctype_digit( $from ) && ctype_digit( $to );
 				if ( ( ! $both_letters && ! $both_digits ) || $from > $to ) {
@@ -208,10 +208,16 @@ function rewrite_pattern_base( string $pattern ): string {
 			break; // First path separator ends the leading segment.
 		}
 		if ( '\\' === $char ) {
-			if ( $i + 1 < $len ) {
-				$out .= $pattern[ $i + 1 ]; // Escaped literal (e.g. \. → .).
+			$next = $pattern[ $i + 1 ] ?? '';
+			if ( '' !== $next && ! ctype_alnum( $next ) ) {
+				$out .= $next; // Escaped literal (e.g. \. → .).
 				++$i;
 				continue;
+			}
+			// A class escape (\d, \w, \s, \b …) or a backreference is not a
+			// literal: the run ends here, and a cut inside a segment is a prefix.
+			if ( '' !== $out ) {
+				$out .= '*';
 			}
 			break;
 		}
@@ -282,11 +288,15 @@ function redirect_pattern_base( string $source, bool $is_regex ): string {
 	for ( $i = 0; $i < $len; $i++ ) {
 		$char = $source[ $i ];
 		if ( $is_regex && '\\' === $char ) {
-			if ( $i + 1 < $len ) {
-				$out .= $source[ $i + 1 ]; // Escaped literal (\. \/).
+			$next = $source[ $i + 1 ] ?? '';
+			if ( '' !== $next && ! ctype_alnum( $next ) ) {
+				$out .= $next; // Escaped literal (\. \/).
 				++$i;
 				continue;
 			}
+			// A class escape (\d, \w, \s, \b …) or a backreference is not a
+			// literal: the run ends here, and a cut inside a segment is a prefix.
+			$truncated = '' !== $out && '/' !== substr( $out, -1 );
 			break;
 		}
 		if ( false !== strpos( $metachars, $char ) ) {
@@ -305,6 +315,12 @@ function redirect_pattern_base( string $source, bool $is_regex ): string {
 			break;
 		}
 		$out .= $char; // '/' is a literal path separator — kept.
+		// An unanchored regex that is literal to the end matches as a PREFIX
+		// (`^/promo` matches /promotional-offer/), so it is one — unless it
+		// ended on a separator, which the loader's segment match covers.
+		if ( $is_regex && $i === $len - 1 && '/' !== $char ) {
+			$truncated = true;
+		}
 	}
 	$base = trim( $out, '/' );
 	if ( '' === $base ) {
@@ -664,6 +680,12 @@ function config_is_valid( $config ): bool {
 				return false;
 			}
 		}
+		// A cached 404 cannot be recalled from browsers: at most a day.
+		foreach ( [ 'cache_ttl', 'edge_ttl' ] as $field ) {
+			if ( isset( $entry[ $field ] ) && $entry[ $field ] > MAX_TTL ) {
+				return false;
+			}
+		}
 
 		// `reserved_derived` is machine-built from the redirect plugins and may
 		// carry a trailing `*` (a prefix family, see slug_is_reserved()); it
@@ -678,6 +700,12 @@ function config_is_valid( $config ): bool {
 
 	return true;
 }
+
+/**
+ * The longest a shield 404 may be cached, in seconds (one day). Browsers keep
+ * a cached 404 for as long as they were told, and no purge reaches them.
+ */
+const MAX_TTL = 86400;
 
 /**
  * Absolute path of the shield's data directory: `wp-content/uploads/post-404-shield`.

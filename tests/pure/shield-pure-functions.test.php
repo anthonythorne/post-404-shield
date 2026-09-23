@@ -64,7 +64,7 @@ check( [ 'a' ], Post404Shield\strip_trailing_sub_routes( [ 'a', 'feed' ], false 
 check( [ 'a' ], Post404Shield\strip_trailing_sub_routes( [ 'a', 'embed' ], false ), 'strip off: embed still strips' );
 check( [ 'about', 'team' ], Post404Shield\strip_trailing_sub_routes( [ 'about', 'team', 'rss2' ] ), 'strip: bare feed format (rss2)' );
 check( [ 'about' ], Post404Shield\strip_trailing_sub_routes( [ 'about', 'atom' ] ), 'strip: bare feed format (atom)' );
-check( [ 'rss2' ], Post404Shield\strip_trailing_sub_routes( [ 'rss2' ] ), 'strip: a lone feed-format segment is a slug, kept' );
+check( [], Post404Shield\strip_trailing_sub_routes( [ 'rss2' ] ), 'strip: a lone feed format is the site feed, stripped (passes)' );
 check( [ 'my-account' ], Post404Shield\strip_trailing_sub_routes( [ 'my-account', 'orders', '2' ], true, [ 'orders', 'amp' ] ), 'strip: endpoint with a value' );
 check( [ 'about' ], Post404Shield\strip_trailing_sub_routes( [ 'about', 'amp' ], true, [ 'amp' ] ), 'strip: bare endpoint' );
 check( [ 'amp', 'x' ], Post404Shield\strip_trailing_sub_routes( [ 'amp', 'x' ], true, [ 'amp' ] ), 'strip: endpoint name as the FIRST segment is content, kept' );
@@ -120,6 +120,7 @@ check( 'event*', Post404Shield\rewrite_pattern_base( 'events?/([^/]+)/?$' ), 're
 check( 'colo*', Post404Shield\rewrite_pattern_base( 'colou?r/(.+)$' ), 'rewrite: optional inner char dropped' );
 check( 'schema-preview', Post404Shield\rewrite_pattern_base( 'schema-preview(?:/(.*))?/?$' ), 'rewrite: non-capturing group opening with a separator is a boundary' );
 check( 'exact-route', Post404Shield\rewrite_pattern_base( 'exact-route$' ), 'rewrite: end anchor is exact, no prefix' );
+check( 'old-*', Post404Shield\rewrite_pattern_base( '^old-\\d+/?$' ), 'rewrite: a class escape is not a literal letter' );
 
 // --- redirect_pattern_base (redirect-plugin source reduction) -----------------
 
@@ -151,6 +152,10 @@ check( 'news*', Post404Shield\redirect_pattern_base( '^/news-?(.*)$', true ), 'r
 check( 'trail-*', Post404Shield\redirect_pattern_base( '^trail-+$', true ), 'redirect: `+` keeps the char (at least one)' );
 check( 'news', Post404Shield\redirect_pattern_base( '^news/?$', true ), 'redirect: `/?` after a separator drops nothing' );
 check( 'faq*', Post404Shield\redirect_pattern_base( 'faq?x=1', false ), 'redirect: plain-source `?` is not a quantifier (no char dropped)' );
+check( 'old-product-*', Post404Shield\redirect_pattern_base( '^/old-product-\\d+/?$', true ), 'redirect: \\d ends the literal run mid-segment' );
+check( 'promo*', Post404Shield\redirect_pattern_base( '^/promo', true ), 'redirect: an unanchored literal regex is a prefix' );
+check( 'promo', Post404Shield\redirect_pattern_base( '^/promo/', true ), 'redirect: an unanchored regex ending on a separator is the segment' );
+check( 'a.b', Post404Shield\redirect_pattern_base( '^/a\\.b$', true ), 'redirect: an escaped dot stays literal' );
 
 // --- redirect_source_variants (locale strip + alternation expansion) ----------
 

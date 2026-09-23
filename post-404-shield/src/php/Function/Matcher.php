@@ -187,9 +187,11 @@ function strip_trailing_sub_routes( array $segments, bool $allow_pagination = tr
 		array_splice( $segments, -2 );
 	} elseif ( in_array( $last, [ 'feed', 'embed', 'trackback' ], true ) ) {
 		array_splice( $segments, -1 );
-	} elseif ( $count > 1 && in_array( $last, [ 'rdf', 'rss', 'rss2', 'atom' ], true ) ) {
+	} elseif ( in_array( $last, [ 'rdf', 'rss', 'rss2', 'atom' ], true ) ) {
 		// WordPress routes the bare feed format too: `/{path}/rss2/` is that
-		// path's feed, as `/{path}/feed/rss2/` is.
+		// path's feed, as `/{path}/feed/rss2/` is — and a lone `/rss2/` is the
+		// site feed (core's rule wins over a page of that name). Stripped to
+		// nothing, it passes.
 		array_splice( $segments, -1 );
 	} elseif ( $allow_pagination && 1 === preg_match( '/^comment-page-\d+$/', $last ) ) {
 		array_splice( $segments, -1 );

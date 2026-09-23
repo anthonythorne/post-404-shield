@@ -138,16 +138,28 @@ $post_shield_store->set_rebuild_handler(
 	}
 );
 
-// Root mode depends on the permalink structure, which is only checked at save
-// time. When it changes, re-validate and switch root matching off if it no
-// longer holds (ConfigStore::revalidate_root()) — fail-open, never a site of
-// pre-boot 404s.
-add_action(
-	'permalink_structure_changed',
-	static function () use ( $post_shield_store ): void {
-		$post_shield_store->revalidate_root( 'the permalink structure changed' );
+// Root mode depends on the permalink structure and the category and tag bases,
+// which are only checked at save time. When any of them changes, re-validate
+// at shutdown — once, after Settings → Permalinks has written all three and
+// flushed the rewrite rules — refreshing the snapshot, or switching root
+// matching off if it no longer holds (ConfigStore::revalidate_root()).
+// Fail-open, never a site of pre-boot 404s.
+$post_shield_revalidate = static function () use ( $post_shield_store ): void {
+	static $queued = false;
+	if ( $queued ) {
+		return;
 	}
-);
+	$queued = true;
+	add_action(
+		'shutdown',
+		static function () use ( $post_shield_store ): void {
+			$post_shield_store->revalidate_root( 'the permalink settings changed' );
+		}
+	);
+};
+add_action( 'permalink_structure_changed', $post_shield_revalidate );
+add_action( 'update_option_category_base', $post_shield_revalidate );
+add_action( 'update_option_tag_base', $post_shield_revalidate );
 
 // Based-entry coverage seam: every save that enables or changes a based entry
 // replays that entry's real URLs through the loader's decision; ConfigStore::

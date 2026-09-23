@@ -28,6 +28,11 @@ class AllowlistBuilder {
 	private const LOCK_WAIT = 20;
 
 	/**
+	 * Rows per query when a list is built in batches.
+	 */
+	private const BATCH = 2000;
+
+	/**
 	 * Config entries, keyed by entry key (the artifact's or a candidate's).
 	 *
 	 * @var array<string, array<string, mixed>>
@@ -186,14 +191,23 @@ class AllowlistBuilder {
 	 * @return string `slug`, `full-path` or ''.
 	 */
 	private function live_match_for( string $post_type ): string {
+		$live = $this->live_builder();
+		return null === $live ? '' : $live->match_for( $post_type );
+	}
+
+	/**
+	 * A builder for the LIVE artifact's entries — what the loader reads right
+	 * now, which a long-running builder's own config may no longer be. Null
+	 * when there is no valid artifact or the reader is not loaded.
+	 *
+	 * @return self|null
+	 */
+	private function live_builder(): ?self {
 		if ( ! function_exists( '\Post404Shield\read_config' ) || ! function_exists( '\Post404Shield\shield_dir' ) ) {
-			return '';
+			return null;
 		}
 		$live = \Post404Shield\read_config( \Post404Shield\shield_dir() . '/config.php' );
-		if ( null === $live ) {
-			return '';
-		}
-		return ( new self( (array) $live['entries'] ) )->match_for( $post_type );
+		return null === $live ? null : new self( (array) $live['entries'] );
 	}
 
 	/**
@@ -216,8 +230,12 @@ class AllowlistBuilder {
 		}
 		$deadline = microtime( true ) + self::LOCK_WAIT;
 		do {
-			if ( flock( $handle, LOCK_EX | LOCK_NB ) ) {
+			$would_block = 0;
+			if ( flock( $handle, LOCK_EX | LOCK_NB, $would_block ) ) {
 				return $handle;
+			}
+			if ( 1 !== $would_block ) {
+				break; // Not contention: this storage cannot lock at all.
 			}
 			usleep( 50000 );
 		} while ( microtime( true ) < $deadline );
@@ -305,7 +323,32 @@ class AllowlistBuilder {
 	 * @return string[]
 	 */
 	private function post_statuses_for( string $post_type ): array {
-		return $this->allowlist_type_map()[ $post_type ] ?? [ 'publish' ];
+		$statuses = array_values( array_filter( $this->allowlist_type_map()[ $post_type ] ?? [ 'publish' ], [ self::class, 'is_servable_status' ] ) );
+		return [] !== $statuses ? $statuses : [ 'publish' ];
+	}
+
+	/**
+	 * Whether WordPress serves a post in this status at its own address, to
+	 * anyone: a public status, or private (for readers who may). Drafts,
+	 * pending and scheduled posts are not — their previews are `?p=` links —
+	 * so listing them would only let an anonymous request confirm that an
+	 * unreleased slug exists (allowed vs blocked). An unregistered status is
+	 * kept: its plugin may only be off for a moment, and dropping its posts
+	 * would 404 them once it is back, until the next rebuild.
+	 *
+	 * @param string $status Post status.
+	 *
+	 * @return bool
+	 */
+	public static function is_servable_status( string $status ): bool {
+		if ( ! function_exists( 'get_post_status_object' ) ) {
+			return true;
+		}
+		$object = get_post_status_object( $status );
+		if ( null === $object ) {
+			return true;
+		}
+		return (bool) $object->private || ( function_exists( 'is_post_status_viewable' ) && is_post_status_viewable( $object ) );
 	}
 
 	/**
@@ -592,22 +635,18 @@ class AllowlistBuilder {
 		if ( [] === $lines || ! is_file( $file ) ) {
 			return 0;
 		}
+		// Skip lines already listed: a content-only edit re-saves a post many
+		// times a day, and each duplicate is bytes the loader scans on every
+		// request until the nightly compaction. Checked once without the lock,
+		// so the common case — nothing new — never waits on a rebuild; and
+		// again under it, since a rebuild may have replaced the file meanwhile.
+		$lines = self::unlisted( array_values( array_unique( $lines ) ), $file );
+		if ( [] === $lines ) {
+			return 0;
+		}
 		$lock = $this->lock( dirname( $file ) );
 		try {
-			// Skip lines already listed: a content-only edit re-saves a post
-			// many times a day, and each duplicate is bytes the loader scans on
-			// every request until the nightly compaction.
-			$raw = file_get_contents( $file ); // phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
-			if ( is_string( $raw ) ) {
-				$lines = array_values(
-					array_filter(
-						array_unique( $lines ),
-						static function ( string $line ) use ( $raw ): bool {
-							return false === strpos( $raw, "\n" . $line . "\n" );
-						}
-					)
-				);
-			}
+			$lines = self::unlisted( $lines, $file );
 			if ( [] === $lines ) {
 				return 0;
 			}
@@ -618,6 +657,29 @@ class AllowlistBuilder {
 		} finally {
 			$this->unlock( $lock );
 		}
+	}
+
+	/**
+	 * The lines not yet in a list file (all of them when it cannot be read).
+	 *
+	 * @param string[] $lines Candidate lines.
+	 * @param string   $file  Absolute allowlist path.
+	 *
+	 * @return string[]
+	 */
+	private static function unlisted( array $lines, string $file ): array {
+		$raw = file_get_contents( $file ); // phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
+		if ( ! is_string( $raw ) ) {
+			return $lines;
+		}
+		return array_values(
+			array_filter(
+				$lines,
+				static function ( string $line ) use ( $raw ): bool {
+					return false === strpos( $raw, "\n" . $line . "\n" );
+				}
+			)
+		);
 	}
 
 	/**
@@ -858,45 +920,103 @@ class AllowlistBuilder {
 	 * request confirm the unreleased post's media exists (allowed vs blocked).
 	 * The sync controller appends a post's media when the post goes live.
 	 *
-	 * @param int|null $parent_id Only this parent's attachments; null for all.
+	 * @param int[]|null $parent_ids Only these parents' attachments; null for any.
+	 * @param int[]|null $ids        Only these attachments; null for any.
 	 *
 	 * @return string[] Attachment URI + slug lines (unvalidated).
 	 */
-	public function attachment_lines( ?int $parent_id = null ): array {
+	public function attachment_lines( ?array $parent_ids = null, ?array $ids = null ): array {
+		return $this->attachment_rows_lines( $this->attachment_rows( $parent_ids, $ids ) );
+	}
+
+	/**
+	 * The attachment rows behind attachment_lines(), optionally one keyset
+	 * window of them (`after` an ID, `limit` rows, `order` ASC or DESC), so a
+	 * large media library is read in batches rather than all at once.
+	 *
+	 * @param int[]|null           $parent_ids Only these parents' attachments; null for any.
+	 * @param int[]|null           $ids        Only these attachments; null for any.
+	 * @param array<string, mixed> $window     Optional `after`, `limit`, `order`.
+	 *
+	 * @return object[] Rows with ID, post_name, post_parent, parent_type.
+	 */
+	private function attachment_rows( ?array $parent_ids = null, ?array $ids = null, array $window = [] ): array {
 		global $wpdb;
 
+		if ( ( null !== $parent_ids && [] === $parent_ids ) || ( null !== $ids && [] === $ids ) ) {
+			return [];
+		}
 		$statuses     = $this->attachment_parent_statuses();
 		$placeholders = implode( ', ', array_fill( 0, count( $statuses ), '%s' ) );
 		$args         = $statuses;
-		$only_parent  = '';
-		if ( null !== $parent_id ) {
-			$only_parent = 'AND a.post_parent = %d';
-			$args[]      = $parent_id;
+		$only         = '';
+		$filters      = [
+			'a.post_parent' => $parent_ids,
+			'a.ID'          => $ids,
+		];
+		foreach ( $filters as $column => $list ) {
+			if ( null !== $list ) {
+				$list  = array_values( array_unique( array_map( 'intval', $list ) ) );
+				$only .= " AND $column IN (" . implode( ', ', array_fill( 0, count( $list ), '%d' ) ) . ')';
+				$args  = array_merge( $args, $list );
+			}
+		}
+		if ( isset( $window['after'] ) ) {
+			$only  .= ' AND a.ID > %d';
+			$args[] = (int) $window['after'];
+		}
+		if ( isset( $window['limit'] ) ) {
+			$only  .= ' ORDER BY a.ID ' . ( 'DESC' === ( $window['order'] ?? 'ASC' ) ? 'DESC' : 'ASC' ) . ' LIMIT %d';
+			$args[] = (int) $window['limit'];
 		}
 
+		// An `inherit` attachment takes its parent's status.
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$rows = $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT a.ID, a.post_name, a.post_parent FROM {$wpdb->posts} a
+				"SELECT a.ID, a.post_name, a.post_parent, parent.post_type AS parent_type FROM {$wpdb->posts} a
 				 LEFT JOIN {$wpdb->posts} parent ON parent.ID = a.post_parent
 				 WHERE a.post_type = 'attachment'
 				   AND a.post_status = 'inherit'
 				   AND a.post_name <> ''
 				   AND ( a.post_parent = 0 OR parent.ID IS NULL OR parent.post_status IN ($placeholders) )
-				   $only_parent",
+				   $only",
 				$args
 			)
 		);
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		return (array) $rows;
+	}
+
+	/**
+	 * Lines for attachment rows: the URL nested under the parent's own URL,
+	 * resolved per parent type (a flat parent's is its bare slug, whatever
+	 * stray post_parent it carries), and the bare slug.
+	 *
+	 * @param object[] $rows Rows from attachment_rows().
+	 *
+	 * @return string[]
+	 */
+	private function attachment_rows_lines( array $rows ): array {
+		$by_type = [];
+		foreach ( $rows as $row ) {
+			if ( null !== $row->parent_type && 0 !== (int) $row->post_parent ) {
+				$by_type[ (string) $row->parent_type ][] = (int) $row->post_parent;
+			}
+		}
+		$parent_uris = [];
+		foreach ( $by_type as $type => $parents ) {
+			$parent_uris += $this->uris_for( (string) $type, $parents );
+		}
 
 		$lines = [];
-		$uris  = $this->resolve_uris( (array) $rows );
-		foreach ( (array) $rows as $row ) {
-			$uri     = $uris[ (int) $row->ID ];
-			$lines[] = $uri;
-			if ( (string) $row->post_name !== $uri ) {
-				$lines[] = (string) $row->post_name;
+		foreach ( $rows as $row ) {
+			$name   = (string) $row->post_name;
+			$parent = $parent_uris[ (int) $row->post_parent ] ?? '';
+			if ( '' !== $parent ) {
+				$lines[] = $parent . '/' . $name;
 			}
+			$lines[] = $name;
 		}
 		return $lines;
 	}
@@ -997,20 +1117,62 @@ class AllowlistBuilder {
 	}
 
 	/**
-	 * The root-extras union lines (attachments + old slugs + unpublished
-	 * root-type URIs), validated — shared by the rebuild and the root
-	 * preflight.
+	 * A sample of the root-extras union for the root preflight — the first and
+	 * last attachments, every old slug and private URI — validated. The full
+	 * union can run to hundreds of thousands of lines on a large media
+	 * library; the preflight probes a sample of it anyway.
+	 *
+	 * @param int $attachments How many attachments, split between the oldest and newest.
 	 *
 	 * @return string[]
 	 */
-	public function root_extras_lines(): array {
+	public function root_extras_sample( int $attachments ): array {
+		$half       = max( 1, (int) ( $attachments / 2 ) );
 		$root_types = $this->root_types();
 		$lines      = array_merge(
-			$this->attachment_lines(),
+			$this->attachment_rows_lines( $this->attachment_rows( null, null, [ 'limit' => $half ] ) ),
+			$this->attachment_rows_lines(
+				$this->attachment_rows(
+					null,
+					null,
+					[
+						'limit' => $half,
+						'order' => 'DESC',
+					]
+				)
+			),
 			$this->fetch_old_slug_lines( $root_types ),
 			$this->fetch_unpublished_lines( $root_types )
 		);
 		return array_keys( $this->build_allowlist( $lines, 'full-path' ) );
+	}
+
+	/**
+	 * Every root-extras line, in batches — attachments first (keyset over
+	 * their IDs, so memory stays flat however large the media library), then
+	 * the old slugs and private URIs.
+	 *
+	 * @return \Generator<int, string>
+	 */
+	private function root_extras_stream(): \Generator {
+		$after = 0;
+		do {
+			$rows = $this->attachment_rows(
+				null,
+				null,
+				[
+					'after' => $after,
+					'limit' => self::BATCH,
+				]
+			);
+			yield from $this->attachment_rows_lines( $rows );
+			$fetched = count( $rows );
+			$after   = 0 === $fetched ? $after : (int) end( $rows )->ID;
+		} while ( self::BATCH === $fetched );
+
+		$root_types = $this->root_types();
+		yield from $this->fetch_old_slug_lines( $root_types );
+		yield from $this->fetch_unpublished_lines( $root_types );
 	}
 
 	/**
@@ -1024,9 +1186,17 @@ class AllowlistBuilder {
 		$file = $this->get_root_extras_file();
 		$lock = $this->lock( dirname( $file ) );
 		try {
-			$allow = array_fill_keys( $this->root_extras_lines(), true );
-			$this->write_or_record( $allow, $file, 'root-extras' );
-			return count( $allow );
+			// Streamed straight to the temp file: the union is never held in
+			// memory. A duplicate line (an old slug that is also a media name)
+			// is harmless — the loader matches it once.
+			$count = $this->write_lines_atomically( $this->root_extras_stream(), $file );
+			if ( null === $count ) {
+				$this->failed[ $file ] = true;
+				error_log( '[post-404-shield] rebuild: could not write the allowlist for "root-extras" (' . $file . ') — the previous list stays in place.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+				return 0;
+			}
+			unset( $this->failed[ $file ] );
+			return $count;
 		} finally {
 			$this->unlock( $lock );
 		}
@@ -1147,7 +1317,17 @@ class AllowlistBuilder {
 		if ( ! is_dir( $root ) ) {
 			return;
 		}
-		$enabled = $this->enabled_types();
+		// A long rebuild_all can outlive a save that enabled more types (or root
+		// mode) than this builder knows about: keep what either this config or
+		// the live artifact enables, so a stale run never deletes lists the
+		// live artifact reads.
+		$enabled   = $this->enabled_types();
+		$root_mode = $this->has_root_entries();
+		$live      = $this->live_builder();
+		if ( null !== $live ) {
+			$enabled  += $live->enabled_types();
+			$root_mode = $root_mode || $live->has_root_entries();
+		}
 		$entries = scandir( $root );
 		if ( false === $entries ) {
 			return;
@@ -1166,7 +1346,7 @@ class AllowlistBuilder {
 			}
 			// The root-extras union member is not a post type: kept while root
 			// mode is active, reconciled away like any other dir once it is off.
-			if ( self::ROOT_EXTRAS_DIR === $entry && $this->has_root_entries() ) {
+			if ( self::ROOT_EXTRAS_DIR === $entry && $root_mode ) {
 				continue;
 			}
 			$dir = trailingslashit( $root ) . $entry;
@@ -1255,6 +1435,53 @@ class AllowlistBuilder {
 		}
 
 		return true;
+	}
+
+	/**
+	 * Write a list from an iterable of lines, atomically, without holding the
+	 * lines in memory. Full-path charset per line, as build_allowlist() applies.
+	 *
+	 * @param iterable $lines Lines (strings).
+	 * @param string   $file  Absolute destination path.
+	 *
+	 * @return int|null Lines written, or null on failure (the old file stays).
+	 */
+	private function write_lines_atomically( iterable $lines, string $file ): ?int {
+		$dir = dirname( $file );
+		if ( ! is_dir( $dir ) && ! wp_mkdir_p( $dir ) ) {
+			return null;
+		}
+		$this->harden_directory( $dir );
+		$this->harden_directory( dirname( $dir ) );
+
+		$tmp    = \Post404Shield\temp_path( $file );
+		$handle = fopen( $tmp, 'w' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		if ( false === $handle ) {
+			return null;
+		}
+		$ok    = false !== fwrite( $handle, "<?php exit; __halt_compiler(); // post-404-shield allowlist — do not edit by hand.\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+		$count = 0;
+		foreach ( $lines as $line ) {
+			if ( ! $ok ) {
+				break;
+			}
+			if ( is_string( $line ) && 1 === preg_match( '#^[a-z0-9_-]+(?:/[a-z0-9_-]+)*$#', $line ) ) {
+				$ok = strlen( $line ) + 1 === fwrite( $handle, $line . "\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+				++$count;
+			}
+		}
+		// An empty list is the guard plus an empty line, as the loader expects.
+		if ( $ok && 0 === $count ) {
+			$ok = 1 === fwrite( $handle, "\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+		}
+		$ok = fclose( $handle ) && $ok; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		if ( ! $ok || ! rename( $tmp, $file ) ) { // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_rename
+			if ( file_exists( $tmp ) ) {
+				unlink( $tmp ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_unlink
+			}
+			return null;
+		}
+		return $count;
 	}
 
 	/**

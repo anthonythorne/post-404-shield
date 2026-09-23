@@ -208,8 +208,10 @@ class PostShieldAdminController {
 		// revert what was changed. Its edits are not kept — they were made
 		// against settings that no longer exist.
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
+		// An early check keeps the stale form's input from being re-shown as a
+		// draft; write() repeats it under its lock, where it is authoritative.
 		$revision = isset( $_POST['ps_revision'] ) ? sanitize_key( wp_unslash( $_POST['ps_revision'] ) ) : '';
-		if ( $revision !== $this->form_revision( $previous ) ) {
+		if ( $revision !== $this->store->current_revision() ) {
 			$this->set_notice(
 				[ __( 'The settings changed after this page was opened — another save, a restore or a CLI write. This page now shows the current settings; make your change again.', 'post-404-shield' ) ],
 				[],
@@ -223,6 +225,10 @@ class PostShieldAdminController {
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
 		$draft = [
 			'document'    => $candidate,
+			// The blocked-section rows as posted, rejected ones included: the
+			// candidate drops a row it refuses, and a draft without it would
+			// delete the stored entry on the corrected resubmit.
+			'blocks'      => $this->posted_block_rows(),
 			'keep'        => isset( $_POST['ps_keep'] ) ? (string) (int) $_POST['ps_keep'] : (string) ConfigStore::DEFAULT_KEEP,
 			'rootConfirm' => ! empty( $_POST['ps_root_confirm'] ), // phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
 			'revision'    => $revision,
@@ -263,9 +269,16 @@ class PostShieldAdminController {
 			$this->redirect_to_page();
 		}
 
-		$result = $this->store->write( $candidate, $this->current_user_label(), [ 'keep' => $keep ] );
+		$result = $this->store->write(
+			$candidate,
+			$this->current_user_label(),
+			[
+				'keep'            => $keep,
+				'expect_revision' => $revision,
+			]
+		);
 		if ( ! $result['ok'] ) {
-			$this->set_notice( $result['errors'], $result['warnings'], false, '', $draft );
+			$this->set_notice( $result['errors'], $result['warnings'], false, '', empty( $result['stale'] ) ? $draft : null );
 			$this->redirect_to_page();
 		}
 
@@ -273,7 +286,11 @@ class PostShieldAdminController {
 		$this->store->update_keep( $keep );
 
 		$this->queue_follow_up_jobs( $previous, $candidate );
-		delete_option( \Post404Shield\Library\ConfigStore::ROOT_OFF_OPTION );
+		// The "switched off automatically" notice stays until root matching is
+		// back on: its root settings are kept by every save until then.
+		if ( $wants_root ) {
+			delete_option( \Post404Shield\Library\ConfigStore::ROOT_OFF_OPTION );
+		}
 		$this->set_notice( [], $result['warnings'], true, __( 'Config saved — the artifact was regenerated and the shield now runs this configuration.', 'post-404-shield' ) );
 		$this->redirect_to_page();
 	}
@@ -362,6 +379,31 @@ class PostShieldAdminController {
 	}
 
 	/**
+	 * The blocked-section repeater rows as posted, in the screen's own shape,
+	 * for re-showing a rejected save — including rows the save refused.
+	 *
+	 * @return array<int, array{label: string, urlBase: string, enabled: bool, cacheTtl: string}>
+	 */
+	private function posted_block_rows(): array {
+		// phpcs:disable WordPress.Security.NonceVerification.Missing -- caller verified the nonce.
+		$posted = isset( $_POST['ps_blocks'] ) && is_array( $_POST['ps_blocks'] ) ? wp_unslash( $_POST['ps_blocks'] ) : []; // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- each field sanitised below.
+		// phpcs:enable WordPress.Security.NonceVerification.Missing
+		$rows = [];
+		foreach ( $posted as $row ) {
+			if ( ! is_array( $row ) ) {
+				continue;
+			}
+			$rows[] = [
+				'label'    => sanitize_text_field( (string) ( $row['label'] ?? '' ) ),
+				'urlBase'  => sanitize_textarea_field( (string) ( $row['url_base'] ?? '' ) ),
+				'enabled'  => ! empty( $row['enabled'] ),
+				'cacheTtl' => sanitize_text_field( (string) ( $row['cache_ttl'] ?? '' ) ),
+			];
+		}
+		return $rows;
+	}
+
+	/**
 	 * Merge the blocked-base repeater rows into the assembled entries.
 	 *
 	 * Split out of config_from_request() to keep that method under the
@@ -443,11 +485,21 @@ class PostShieldAdminController {
 		$existing = $this->current_document();
 		$entries  = is_array( $existing['entries'] ?? null ) ? $existing['entries'] : [];
 
-		// Existing entry key per effective CPT, so re-saves keep stable keys.
+		// Existing entry key per effective CPT, so re-saves keep stable keys. The
+		// FIRST entry for a type is the one its row edits (as the builder reads
+		// the first); any further entry for the same type — possible in a staged
+		// or CLI-written config, never from this screen — is kept as it is
+		// rather than dropped, since the screen has no row to show it on.
 		$key_by_cpt = [];
+		$extra_keys = [];
 		foreach ( $entries as $key => $entry ) {
-			if ( 'allowlist' === ( $entry['mode'] ?? 'allowlist' ) ) {
-				$key_by_cpt[ (string) ( $entry['post_type'] ?? $key ) ] = (string) $key;
+			if ( is_array( $entry ) && 'allowlist' === ( $entry['mode'] ?? 'allowlist' ) ) {
+				$cpt = (string) ( $entry['post_type'] ?? $key );
+				if ( isset( $key_by_cpt[ $cpt ] ) ) {
+					$extra_keys[] = (string) $key;
+				} else {
+					$key_by_cpt[ $cpt ] = (string) $key;
+				}
 			}
 		}
 
@@ -458,6 +510,7 @@ class PostShieldAdminController {
 		// per the permalink structure, and unsupported structures cannot save
 		// an enabled post entry at all (validation enforces it too).
 		$post_info = $this->store->post_base_info();
+		$root_off  = is_array( get_option( ConfigStore::ROOT_OFF_OPTION ) );
 
 		$posted_types = isset( $_POST['ps_types'] ) && is_array( $_POST['ps_types'] ) ? wp_unslash( $_POST['ps_types'] ) : []; // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- each field sanitised below.
 		foreach ( $posted_types as $raw_cpt => $row ) {
@@ -488,6 +541,12 @@ class PostShieldAdminController {
 			// decision, so residue would only confuse the S1 together-rule).
 			if ( $is_root_dweller ) {
 				if ( ! $enabled ) {
+					// Switched off automatically (ConfigStore::revalidate_root()):
+					// keep the stored root settings, as its notice promises, until
+					// an operator switches root matching back on.
+					if ( $root_off && $has_old && true === ( $entries[ $key ]['root'] ?? false ) ) {
+						$new_entries[ $key ] = array_merge( (array) $entries[ $key ], [ 'enabled' => false ] );
+					}
 					continue;
 				}
 				$new_entries[ $key ] = [
@@ -512,7 +571,17 @@ class PostShieldAdminController {
 			// "settings kept" badge promises, until the structure is supported
 			// again. Switching it on is refused by validation.
 			if ( 'post' === $cpt && ! $post_info['supported'] && $has_old ) {
-				$new_entries[ $key ] = array_merge( (array) ( $entries[ $key ] ?? [] ), [ 'enabled' => $enabled ] );
+				$new_entries[ $key ] = array_merge(
+					(array) ( $entries[ $key ] ?? [] ),
+					[
+						'enabled'            => $enabled,
+						'reserved_allowlist' => $this->lines_from_textarea( (string) ( $row['reserved'] ?? '' ) ),
+						'post_status'        => [] !== $statuses ? array_values( array_unique( $statuses ) ) : [ 'publish' ],
+						'allow_pagination'   => ! empty( $row['allow_pagination'] ),
+						'cache_ttl'          => $this->int_or_null( $row['cache_ttl'] ?? '' ),
+						'edge_ttl'           => $this->int_or_null( $row['edge_ttl'] ?? '' ),
+					]
+				);
 				continue;
 			}
 
@@ -527,6 +596,10 @@ class PostShieldAdminController {
 				continue;
 			}
 			$new_entries[ $key ] = $this->based_entry_from_row( $cpt, $row, $enabled, $entry_bases, $statuses, $has_old ? (array) ( $entries[ $key ] ?? [] ) : null );
+		}
+
+		foreach ( $extra_keys as $extra_key ) {
+			$new_entries[ $extra_key ] = $entries[ $extra_key ];
 		}
 
 		$new_entries = $this->apply_block_rows( $new_entries );
@@ -765,31 +838,6 @@ class PostShieldAdminController {
 		}
 		delete_transient( self::NOTICE_TRANSIENT . get_current_user_id() );
 		return $notice;
-	}
-
-	/**
-	 * Fingerprint of the settings a form was built from, so a save can tell
-	 * whether they changed since. Covers what the form edits — entries, locale
-	 * and the operator's excluded bases — and leaves out what write() derives
-	 * on its own (redirect-derived reserved slugs, the snapshot buckets, meta),
-	 * which the nightly redirect sync refreshes without anyone editing.
-	 *
-	 * @param array<string, mixed>|null $document Stored config document.
-	 *
-	 * @return string
-	 */
-	private function form_revision( ?array $document ): string {
-		if ( null === $document ) {
-			return 'none';
-		}
-		$entries = [];
-		foreach ( (array) ( $document['entries'] ?? [] ) as $key => $entry ) {
-			if ( is_array( $entry ) ) {
-				unset( $entry['reserved_derived'] );
-			}
-			$entries[ $key ] = $entry;
-		}
-		return md5( (string) wp_json_encode( [ $entries, $document['locale'] ?? null, $document['excluded_bases']['operator'] ?? null ] ) );
 	}
 
 	/**
@@ -1101,10 +1149,10 @@ class PostShieldAdminController {
 			'status'     => $this->status_state( $config ),
 			'form'       => [
 				'site'             => $site,
-				'types'            => $this->types_state( $form_doc ),
-				'blocks'           => $this->blocks_state( $form_doc ),
+				'types'            => $this->types_state( $form_doc, $document ),
+				'blocks'           => null !== $draft && is_array( $draft['blocks'] ?? null ) ? $draft['blocks'] : $this->blocks_state( $form_doc ),
 				'excludedOperator' => implode( "\n", array_filter( (array) ( $form_doc['excluded_bases']['operator'] ?? [] ), 'is_string' ) ),
-				'revision'         => null !== $draft ? (string) ( $draft['revision'] ?? '' ) : $this->form_revision( $this->current_document() ),
+				'revision'         => null !== $draft ? (string) ( $draft['revision'] ?? '' ) : $this->store->current_revision(),
 				'draft'            => null !== $draft,
 				'rootConfirm'      => null !== $draft && ! empty( $draft['rootConfirm'] ),
 			],
@@ -1237,14 +1285,7 @@ class PostShieldAdminController {
 			}
 		}
 
-		$stale = false;
-		if ( [] !== $root_types ) {
-			$snapshot_derived = (array) ( $config['excluded_bases']['derived'] ?? [] );
-			$live_derived     = $this->store->derived_excluded_bases( ConfigStore::locale_pattern_of( $config ) );
-			sort( $snapshot_derived );
-			sort( $live_derived );
-			$stale = $snapshot_derived !== $live_derived;
-		}
+		$stale = [] !== $root_types && null !== $config && $this->store->snapshot_is_stale( $config );
 
 		$preflight = get_option( ConfigStore::PREFLIGHT_OPTION, null );
 
@@ -1312,8 +1353,11 @@ class PostShieldAdminController {
 				continue;
 			}
 			$out[] = [
-				'name'  => (string) $name,
-				'label' => isset( $status->label ) && is_string( $status->label ) && '' !== $status->label ? $status->label : (string) $name,
+				'name'     => (string) $name,
+				'label'    => isset( $status->label ) && is_string( $status->label ) && '' !== $status->label ? $status->label : (string) $name,
+				// Only these are offered: the rest are never served at a
+				// post's own address (see AllowlistBuilder::is_servable_status()).
+				'servable' => AllowlistBuilder::is_servable_status( (string) $name ),
 			];
 		}
 		return $out;
@@ -1323,20 +1367,14 @@ class PostShieldAdminController {
 	 * One row per public post type (plus any configured entry whose post type
 	 * is no longer registered), carrying the entry's current settings.
 	 *
-	 * @param array<string, mixed>|null $document Current editable document.
+	 * @param array<string, mixed>|null $document Document the form shows (a rejected save's draft, or the stored one).
+	 * @param array<string, mixed>|null $stored   The stored document, when it differs from $document.
 	 *
 	 * @return array<int, array<string, mixed>>
 	 */
-	private function types_state( ?array $document ): array {
-		$entries = is_array( $document['entries'] ?? null ) ? $document['entries'] : [];
-
-		// Entry per effective CPT (allowlist mode only).
-		$entry_by_cpt = [];
-		foreach ( $entries as $key => $entry ) {
-			if ( 'allowlist' === ( $entry['mode'] ?? 'allowlist' ) ) {
-				$entry_by_cpt[ (string) ( $entry['post_type'] ?? $key ) ] = $entry;
-			}
-		}
+	private function types_state( ?array $document, ?array $stored = null ): array {
+		$entry_by_cpt  = $this->allowlist_entries_by_cpt( $document );
+		$stored_by_cpt = null === $stored ? $entry_by_cpt : $this->allowlist_entries_by_cpt( $stored );
 
 		// S4 (root-pages v2): a type earns a row iff it has a REAL public rewrite
 		// base OR core says it is viewable — never hand-rolled flag logic (core
@@ -1362,14 +1400,32 @@ class PostShieldAdminController {
 
 		$rows = [];
 		foreach ( $objects as $name => $type_object ) {
-			$rows[] = $this->type_state( (string) $name, $type_object, $entry_by_cpt[ $name ] ?? null, $seen[ $name ] ?? [] );
+			$rows[] = $this->type_state( (string) $name, $type_object, $entry_by_cpt[ $name ] ?? null, $seen[ $name ] ?? [], $stored_by_cpt[ $name ] ?? null );
 		}
 		// Configured entries whose CPT is not currently registered still render
 		// (with a warning) — restoring/deploy timing must not hide them.
 		foreach ( array_diff_key( $entry_by_cpt, $objects ) as $name => $entry ) {
-			$rows[] = $this->type_state( (string) $name, null, $entry, [] );
+			$rows[] = $this->type_state( (string) $name, null, $entry, [], $stored_by_cpt[ $name ] ?? null );
 		}
 		return $rows;
+	}
+
+	/**
+	 * A document's allowlist entries keyed by effective post type.
+	 *
+	 * @param array<string, mixed>|null $document Config document.
+	 *
+	 * @return array<string, array<string, mixed>>
+	 */
+	private function allowlist_entries_by_cpt( ?array $document ): array {
+		$by_cpt = [];
+		foreach ( (array) ( $document['entries'] ?? [] ) as $key => $entry ) {
+			if ( is_array( $entry ) && 'allowlist' === ( $entry['mode'] ?? 'allowlist' ) ) {
+				// The first entry per type: the one its row edits.
+				$by_cpt += [ (string) ( $entry['post_type'] ?? $key ) => $entry ];
+			}
+		}
+		return $by_cpt;
 	}
 
 	/**
@@ -1380,10 +1436,12 @@ class PostShieldAdminController {
 	 * @param \WP_Post_Type|null        $type_object Registered type object, or null.
 	 * @param array<string, mixed>|null $entry       Existing config entry, or null.
 	 * @param string[]                  $seen_bases  Bases found in this type's real URLs.
+	 * @param array<string, mixed>|null $stored      The STORED entry — differs from $entry only
+	 *                                               when a rejected save's draft is shown.
 	 *
 	 * @return array<string, mixed>
 	 */
-	private function type_state( string $cpt, ?\WP_Post_Type $type_object, ?array $entry, array $seen_bases ): array {
+	private function type_state( string $cpt, ?\WP_Post_Type $type_object, ?array $entry, array $seen_bases, ?array $stored = null ): array {
 		// A REAL rewrite base only — never invent one from the type name. Built-in
 		// `page` (and `post` under a bare /%postname%/ structure) has no URL base:
 		// its content lives at the ROOT, shielded by root mode (root-pages v2).
@@ -1413,9 +1471,27 @@ class PostShieldAdminController {
 			}
 		}
 
+		// What the page offers ($stored below) is fixed by what is STORED, so a
+		// draft re-render shows the same controls the operator edited on (a flat
+		// type switched from full-path to slug keeps its selector, and so posts
+		// its choice).
+
+		// A based entry for a type that now lives at the root (the permalink
+		// structure dropped its base): it no longer shields anything, and it is
+		// shown OFF rather than as an enabled root row, which would turn every
+		// save into a root-mode switch-on. Saving removes it; switching it on
+		// shields the type at the root, with Pages.
+		$root_moved = $is_root_dweller && null !== $stored && true !== ( $stored['root'] ?? false );
+		// Root settings kept while root matching is switched off automatically.
+		$root_kept = $is_root_dweller && null !== $stored && true === ( $stored['root'] ?? false )
+			&& isset( $stored['enabled'] ) && false === $stored['enabled']
+			&& is_array( get_option( ConfigStore::ROOT_OFF_OPTION ) );
+
 		return [
 			'cpt'             => $cpt,
 			'label'           => null !== $type_object ? (string) $type_object->labels->name : $cpt,
+			'rootMoved'       => $root_moved,
+			'rootKept'        => $root_kept,
 			'registered'      => null !== $type_object,
 			// Unknown (unregistered) types show every field rather than guess.
 			'hierarchical'    => null === $type_object || (bool) $type_object->hierarchical,
@@ -1424,20 +1500,21 @@ class PostShieldAdminController {
 			'derivedBase'     => $derived_base,
 			'rewriteSlug'     => $rewrite_slug,
 			'seenBases'       => array_values( $seen_bases ),
-			'hasEntry'        => null !== $entry,
-			'enabled'         => null !== $entry && ( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] ),
+			'hasEntry'        => null !== $stored,
+			'enabled'         => null !== $entry && ! ( $root_moved && $entry === $stored ) && ( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] ),
 			'urlBase'         => isset( $entry['url_base'] ) && is_array( $entry['url_base'] ) ? implode( "\n", $entry['url_base'] ) : $default_base,
 			'match'           => (string) ( $entry['match'] ?? 'slug' ),
 			// Matching is offered for hierarchical types, and for any type already
 			// stored as full-path (so it can be switched back). Fixed per page load:
 			// the control must not vanish mid-edit when the select changes.
-			'offerMatch'      => null === $type_object || (bool) $type_object->hierarchical || 'full-path' === ( $entry['match'] ?? 'slug' ),
+			'offerMatch'      => null === $type_object || (bool) $type_object->hierarchical || 'full-path' === ( $stored['match'] ?? 'slug' ),
 			'allowPagination' => null === $entry || ! isset( $entry['allow_pagination'] ) || false !== $entry['allow_pagination'],
 			'depthAllowed'    => isset( $entry['depth_allowed'] ) && null !== $entry['depth_allowed'] ? (string) (int) $entry['depth_allowed'] : ( null === $entry ? '0' : '' ),
 			'depthAction'     => (string) ( $entry['depth_action'] ?? ( null === $entry ? 'redirect' : 'passthrough' ) ),
 			'statuses'        => isset( $entry['post_status'] ) && is_array( $entry['post_status'] ) && [] !== $entry['post_status'] ? array_values( array_map( 'strval', $entry['post_status'] ) ) : [ 'publish' ],
 			'reserved'        => isset( $entry['reserved_allowlist'] ) && is_array( $entry['reserved_allowlist'] ) ? implode( "\n", $entry['reserved_allowlist'] ) : '',
-			'reservedDerived' => isset( $entry['reserved_derived'] ) && is_array( $entry['reserved_derived'] ) ? array_values( array_map( 'strval', $entry['reserved_derived'] ) ) : [],
+			// Derived on save, so a draft carries none yet: the stored ones.
+			'reservedDerived' => isset( $stored['reserved_derived'] ) && is_array( $stored['reserved_derived'] ) ? array_values( array_map( 'strval', $stored['reserved_derived'] ) ) : [],
 			'cacheTtl'        => isset( $entry['cache_ttl'] ) && null !== $entry['cache_ttl'] ? (string) (int) $entry['cache_ttl'] : '',
 			'edgeTtl'         => isset( $entry['edge_ttl'] ) && null !== $entry['edge_ttl'] ? (string) (int) $entry['edge_ttl'] : '',
 		];

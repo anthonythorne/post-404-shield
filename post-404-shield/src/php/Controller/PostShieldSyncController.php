@@ -62,6 +62,15 @@ class PostShieldSyncController {
 	private array $moved = [];
 
 	/**
+	 * Same-type children of a post being deleted, keyed by the deleted post's
+	 * ID: core then re-parents them with a direct query that fires no post
+	 * hook, so their URLs change unseen (before_delete_post → after_delete_post).
+	 *
+	 * @var array<int, array{0: string, 1: int[]}>
+	 */
+	private array $orphans = [];
+
+	/**
 	 * Construct the sync controller for a set of managed post types.
 	 *
 	 * @param AllowlistBuilder $builder    Shared builder.
@@ -105,6 +114,13 @@ class PostShieldSyncController {
 			add_action( 'transition_post_status', [ $this, 'handle_parent_live' ], 10, 3 );
 		}
 
+		// Children whose parent is deleted move up a level without a hook of
+		// their own, and WPML moves every translation when the original moves
+		// (after save_post priority 100) — both change real URLs unseen.
+		add_action( 'before_delete_post', [ $this, 'handle_before_delete' ], 10, 1 );
+		add_action( 'after_delete_post', [ $this, 'handle_after_delete' ], 10, 1 );
+		add_action( 'save_post', [ $this, 'handle_translations_moved' ], 200, 1 );
+
 		// Every managed type, root or based: core stores the outgoing slug in
 		// `_wp_old_slug` on a rename and 301s it. This was root-only, so on a
 		// based type the old address went straight to a pre-boot 404 until the
@@ -122,25 +138,10 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	public function handle_attachment( int $post_id ): void {
-		// Same rule as the rebuild (AllowlistBuilder::attachment_lines()): media
-		// on a post that is not live yet has no page, so listing it would
-		// reveal the unreleased post. A parent that no longer exists counts as
-		// unattached, as it does in core.
-		$parent = (int) get_post_field( 'post_parent', $post_id );
-		if ( $parent > 0 ) {
-			$parent_status = get_post_status( $parent );
-			if ( false !== $parent_status && ! in_array( $parent_status, $this->builder->attachment_parent_statuses(), true ) ) {
-				return;
-			}
-		}
-		$slug = get_post_field( 'post_name', $post_id );
-		$uri  = get_page_uri( $post_id );
-		if ( is_string( $uri ) && '' !== $uri ) {
-			$this->builder->append_root_extra( $uri );
-		}
-		if ( is_string( $slug ) && '' !== $slug && $slug !== $uri ) {
-			$this->builder->append_root_extra( $slug );
-		}
+		// Exactly the rebuild's lines for it (AllowlistBuilder::attachment_lines()),
+		// which leave out media on a post that is not live yet: it has no page,
+		// and listing it would reveal the unreleased post.
+		$this->builder->append_root_extras( $this->builder->attachment_lines( null, [ $post_id ] ) );
 	}
 
 	/**
@@ -161,7 +162,82 @@ class PostShieldSyncController {
 		if ( ! in_array( $new_status, $live, true ) || in_array( $old_status, $live, true ) ) {
 			return;
 		}
-		$this->builder->append_root_extras( $this->builder->attachment_lines( (int) $post->ID ) );
+		$this->builder->append_root_extras( $this->builder->attachment_lines( [ (int) $post->ID ] ) );
+	}
+
+	/**
+	 * A managed post is about to be deleted: note its same-type children, whose
+	 * URLs change when core moves them up to its parent.
+	 *
+	 * @param int $post_id Post being deleted.
+	 *
+	 * @return void
+	 */
+	public function handle_before_delete( int $post_id ): void {
+		$post_type = get_post_type( $post_id );
+		if ( ! is_string( $post_type ) || ! in_array( $post_type, $this->post_types, true ) || ! is_post_type_hierarchical( $post_type ) ) {
+			return;
+		}
+		$children = get_children(
+			[
+				'post_parent' => $post_id,
+				'post_type'   => $post_type,
+				'post_status' => 'any',
+				'fields'      => 'ids',
+			]
+		);
+		if ( [] !== $children ) {
+			$this->orphans[ $post_id ] = [ $post_type, array_map( 'intval', (array) $children ) ];
+		}
+	}
+
+	/**
+	 * A managed post was deleted and core moved its children up a level:
+	 * append their new addresses — each child and its subtree, as for a move.
+	 *
+	 * @param int $post_id Deleted post ID.
+	 *
+	 * @return void
+	 */
+	public function handle_after_delete( int $post_id ): void {
+		if ( ! isset( $this->orphans[ $post_id ] ) ) {
+			return;
+		}
+		[ $post_type, $children ] = $this->orphans[ $post_id ];
+		unset( $this->orphans[ $post_id ] );
+		foreach ( $children as $child ) {
+			$this->fast_append( $child, $post_type, true );
+		}
+	}
+
+	/**
+	 * WPML keeps translations' parents in sync: when an original moves, it
+	 * re-parents every translation with a direct query after save_post
+	 * priority 100. Append each translation's new address (and subtree) too.
+	 *
+	 * @param int $post_id Saved post ID.
+	 *
+	 * @return void
+	 */
+	public function handle_translations_moved( int $post_id ): void {
+		if ( ! isset( $this->moved[ $post_id ] ) ) {
+			return;
+		}
+		$post_type = get_post_type( $post_id );
+		if ( ! is_string( $post_type ) || ! in_array( $post_type, $this->post_types, true ) || ! is_post_type_hierarchical( $post_type ) ) {
+			return;
+		}
+		$element_type = 'post_' . $post_type;
+		$trid         = apply_filters( 'wpml_element_trid', null, $post_id, $element_type );
+		if ( empty( $trid ) ) {
+			return;
+		}
+		foreach ( (array) apply_filters( 'wpml_get_element_translations', null, $trid, $element_type ) as $translation ) {
+			$translation_id = (int) ( $translation->element_id ?? 0 );
+			if ( 0 !== $translation_id && $translation_id !== $post_id ) {
+				$this->fast_append( $translation_id, $post_type, true );
+			}
+		}
 	}
 
 	/**
@@ -218,8 +294,8 @@ class PostShieldSyncController {
 	 * still hours away.
 	 *
 	 * Mirrors what core records rather than guessing: it only stores (and
-	 * redirects) an old slug for a published, non-hierarchical — therefore top
-	 * level — post, so anything else is skipped here too.
+	 * redirects) an old slug for a published, non-hierarchical post, so
+	 * anything else is skipped here too.
 	 *
 	 * @param \WP_Post $post_after  Post after the update.
 	 * @param \WP_Post $post_before Post before the update.
@@ -233,7 +309,9 @@ class PostShieldSyncController {
 		if ( '' === $post_before->post_name || $post_before->post_name === $post_after->post_name ) {
 			return;
 		}
-		if ( 0 !== (int) $post_after->post_parent ) {
+		// Core records old slugs only for non-hierarchical posts, whatever
+		// stray post_parent they carry (WordPress ignores it for them).
+		if ( is_post_type_hierarchical( $post_after->post_type ) ) {
 			return;
 		}
 		if ( ! $this->builder->is_shielding_status( $post_after->post_type, (string) $post_after->post_status ) ) {
@@ -343,6 +421,11 @@ class PostShieldSyncController {
 				return;
 			}
 			$this->builder->append_slugs( $post_type, array_values( $this->builder->uris_for( $post_type, $ids ) ) );
+			// Root mode: the media of every moved post moves with it — its URL
+			// nests under the post's.
+			if ( $this->builder->has_root_entries() && ( $moved || isset( $this->moved[ $post_id ] ) ) ) {
+				$this->builder->append_root_extras( $this->builder->attachment_lines( $ids ) );
+			}
 			if ( $live ) {
 				$this->purge_page_cache( $post_id );
 			}

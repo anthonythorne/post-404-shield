@@ -129,12 +129,19 @@ final class BasedPreflight {
 			if ( ! is_array( $entry ) || ( isset( $entry['enabled'] ) && false === $entry['enabled'] ) ) {
 				continue;
 			}
-			if ( 'allowlist' !== ( $entry['mode'] ?? 'allowlist' ) || true === ( $entry['root'] ?? false ) ) {
-				continue; // Blocked bases have no real URLs; root entries have their own gate.
+			if ( true === ( $entry['root'] ?? false ) ) {
+				continue; // Root entries have their own gate.
 			}
 			$before = is_array( $current[ $key ] ?? null ) ? $current[ $key ] : null;
 			if ( null === $before || ( isset( $before['enabled'] ) && false === $before['enabled'] ) ) {
 				$keys[] = $key;
+				continue;
+			}
+			// A blocked section changes only by its bases (or by what it was).
+			if ( 'block' === ( $entry['mode'] ?? 'allowlist' ) ) {
+				if ( 'block' !== ( $before['mode'] ?? 'allowlist' ) || self::normalised( $entry, 'url_base', $key ) !== self::normalised( $before, 'url_base', $key ) ) {
+					$keys[] = $key;
+				}
 				continue;
 			}
 			foreach ( self::BEHAVIOUR_FIELDS as $field ) {
@@ -199,6 +206,26 @@ final class BasedPreflight {
 				$before = is_array( $current[ $key ] ?? null ) ? $current[ $key ] : [];
 				$type   = (string) ( $entry['post_type'] ?? $key );
 				$bases  = array_values( array_filter( (array) ( $entry['url_base'] ?? [] ), 'is_string' ) );
+
+				// A blocked section denies everything under its bases, so it must
+				// cover no real content: replay a sample of every public type's
+				// real URLs, and the pages beneath its bases, and refuse on any
+				// this block would deny. Only its own denials count — another
+				// entry's pre-existing decisions are not this save's doing.
+				if ( 'block' === ( $entry['mode'] ?? 'allowlist' ) ) {
+					foreach ( $this->every_type_paths( $bases ) as $path ) {
+						++$checked;
+						$decision = \Post404Shield\decide_based( $path, $path, $entries, $read, $pattern, $this->endpoints );
+						if ( null !== $decision && 'blocked-denied-base' === $decision['marker'] && (string) $key === (string) $decision['key'] ) {
+							$breaks[] = [
+								'url'    => $path,
+								'marker' => 'blocked-denied-base',
+								'entry'  => (string) $key,
+							];
+						}
+					}
+					continue;
+				}
 
 				$statuses = self::viewable_statuses(
 					array_merge(
@@ -272,6 +299,35 @@ final class BasedPreflight {
 	}
 
 	/**
+	 * A sample of every public post type's real, published URLs, plus the
+	 * pages beneath the given bases — what a blocked section must not cover.
+	 *
+	 * @param string[] $bases Bases the pages must sit beneath.
+	 *
+	 * @return string[] Paths.
+	 */
+	private function every_type_paths( array $bases ): array {
+		$types = function_exists( 'get_post_types' ) ? array_diff( array_values( get_post_types( [ 'public' => true ] ) ), [ 'attachment' ] ) : [];
+		$paths = [];
+		foreach ( $types as $type ) {
+			foreach ( $this->real_paths( (string) $type, 'page' === $type ? $bases : [] ) as $path ) {
+				$paths[ $path ] = true;
+			}
+		}
+		// A page AT a base (real_paths() finds the pages beneath one).
+		foreach ( $bases as $base ) {
+			$page = function_exists( 'get_page_by_path' ) ? get_page_by_path( $base ) : null;
+			if ( $page instanceof \WP_Post && 'publish' === $page->post_status ) {
+				$path = $this->public_path( (int) $page->ID, 'page' );
+				if ( null !== $path ) {
+					$paths[ $path ] = true;
+				}
+			}
+		}
+		return array_keys( $paths );
+	}
+
+	/**
 	 * Decide one real URL and file it as a break or a depth note.
 	 *
 	 * @param string                    $path    URL path.
@@ -301,8 +357,11 @@ final class BasedPreflight {
 	}
 
 	/**
-	 * The statuses whose posts anyone can view, from a list; `publish` always.
-	 * A private or draft post has no public pretty permalink to replay.
+	 * The statuses WordPress serves at a post's own address, from a list;
+	 * `publish` always. Private is one of them: the saving admin can read a
+	 * private post, so get_permalink() gives its pretty URL — which staff
+	 * open, and which a save dropping `private` would 404. A draft or
+	 * scheduled post has no such URL to replay.
 	 *
 	 * @param array<int, mixed> $statuses Candidate statuses.
 	 *
@@ -315,7 +374,8 @@ final class BasedPreflight {
 			if ( '' === $status || in_array( $status, $out, true ) ) {
 				continue;
 			}
-			if ( function_exists( 'is_post_status_viewable' ) ? is_post_status_viewable( $status ) : false ) {
+			$registered = function_exists( 'get_post_status_object' ) && null !== get_post_status_object( $status );
+			if ( $registered && AllowlistBuilder::is_servable_status( $status ) ) {
 				$out[] = $status;
 			}
 		}

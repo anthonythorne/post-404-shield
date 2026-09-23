@@ -122,11 +122,12 @@ class PostShieldBasedPreflightTest extends TestCase {
 	}
 
 	/**
-	 * Disabled entries, blocked bases and root entries are never replayed here.
+	 * Disabled and root entries are never replayed here; a blocked section is
+	 * when it is new or its bases moved.
 	 *
 	 * @return void
 	 */
-	public function test_changed_keys_ignores_what_cannot_break_real_urls_here(): void {
+	public function test_changed_keys_gates_blocked_sections(): void {
 		$candidate = [
 			'off'   => $this->entry( [ 'enabled' => false ] ),
 			'block' => [
@@ -142,7 +143,13 @@ class PostShieldBasedPreflightTest extends TestCase {
 				]
 			),
 		];
-		$this->assertSame( [], BasedPreflight::changed_keys( $candidate, null ) );
+		$this->assertSame( [ 'block' ], BasedPreflight::changed_keys( $candidate, null ), 'A new blocked section is gated: it must cover no real content.' );
+
+		// An unchanged blocked section is not re-checked; a moved one is.
+		$current = [ 'block' => $candidate['block'] ];
+		$this->assertSame( [], BasedPreflight::changed_keys( $candidate, $current ) );
+		$current['block']['url_base'] = [ 'older' ];
+		$this->assertSame( [ 'block' ], BasedPreflight::changed_keys( $candidate, $current ) );
 	}
 
 	/**

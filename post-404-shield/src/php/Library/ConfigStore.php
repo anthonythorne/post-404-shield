@@ -103,6 +103,11 @@ class ConfigStore {
 		'sitemap_index.xml',
 		// The shield's own bake probe path.
 		'post-shield-404-probe',
+		// Core's shortcut redirects (wp_redirect_admin_locations()): no
+		// rewrite rule names them, so nothing else would derive them.
+		'login',
+		'admin',
+		'dashboard',
 	];
 
 	/**
@@ -1058,7 +1063,8 @@ class ConfigStore {
 	 * full-path allowlist, a based entry for the same type a slug one, and the
 	 * builder would take whichever entry comes first — a based `page` entry
 	 * ahead of the root one would reduce the root page list to top-level slugs
-	 * and 404 every child page.
+	 * and 404 every child page. Based entries sharing a type likewise share
+	 * one list and must agree on its format.
 	 *
 	 * @param array<string, mixed> $entries Candidate entries.
 	 *
@@ -1067,6 +1073,7 @@ class ConfigStore {
 	private function shared_type_errors( array $entries ): array {
 		$root_types  = [];
 		$based_types = [];
+		$formats     = [];
 		foreach ( $entries as $key => $entry ) {
 			if ( ! is_array( $entry ) || ( isset( $entry['enabled'] ) && false === $entry['enabled'] ) || 'allowlist' !== ( $entry['mode'] ?? 'allowlist' ) ) {
 				continue;
@@ -1077,6 +1084,7 @@ class ConfigStore {
 			} else {
 				$based_types[ $type ] = true;
 			}
+			$formats[ $type ][ self::is_full_path( $entry ) ? 'full-path' : 'slug' ] = true;
 		}
 		$errors = [];
 		foreach ( array_keys( array_intersect_key( $based_types, $root_types ) ) as $type ) {
@@ -1085,6 +1093,17 @@ class ConfigStore {
 				__( '%s is shielded at the root on the Pages & posts tab, so it cannot also be shielded under a URL base. Switch one of them off.', 'post-404-shield' ),
 				$this->entry_label( (string) $type, [ 'post_type' => (string) $type ] )
 			);
+		}
+		// Entries sharing a post type share ONE list, so they must agree on its
+		// format — otherwise one of them reads lines in the other's shape.
+		foreach ( $formats as $type => $seen ) {
+			if ( count( $seen ) > 1 && ! isset( $root_types[ $type ] ) ) {
+				$errors[] = sprintf(
+					/* translators: %s: post type name and slug. */
+					__( '%s has entries with different address matching (by name and by full path). They share one list, so set them the same.', 'post-404-shield' ),
+					$this->entry_label( (string) $type, [ 'post_type' => (string) $type ] )
+				);
+			}
 		}
 		return $errors;
 	}
@@ -1223,6 +1242,10 @@ class ConfigStore {
 				// every entry.
 				$known = get_post_stati();
 				foreach ( $entry['post_status'] as $status ) {
+					if ( $entry_enabled && is_string( $status ) && isset( $known[ $status ] ) && class_exists( AllowlistBuilder::class ) && ! AllowlistBuilder::is_servable_status( $status ) ) {
+						/* translators: 1: entry name, 2: the status. */
+						$warnings[] = sprintf( __( '%1$s: posts in status "%2$s" are never served at their own address (previews use ?p= links), so it is ignored — listing it would only let anyone confirm unreleased slugs.', 'post-404-shield' ), $label, $status );
+					}
 					if ( ! is_string( $status ) || ! isset( $known[ $status ] ) ) {
 						$shown = is_scalar( $status ) ? (string) $status : gettype( $status );
 						if ( $entry_enabled ) {
@@ -1313,6 +1336,12 @@ class ConfigStore {
 			if ( isset( $entry[ $field ] ) && ( ! is_int( $entry[ $field ] ) || $entry[ $field ] < 0 ) ) {
 				/* translators: 1: entry name, 2: field name. */
 				$errors[] = sprintf( __( '%1$s: %2$s must be a whole number ≥ 0, or empty.', 'post-404-shield' ), $label, $field );
+			}
+		}
+		foreach ( [ 'cache_ttl', 'edge_ttl' ] as $field ) {
+			if ( isset( $entry[ $field ] ) && is_int( $entry[ $field ] ) && $entry[ $field ] > \Post404Shield\MAX_TTL ) {
+				/* translators: 1: entry name, 2: the longest allowed cache time in seconds. */
+				$errors[] = sprintf( __( '%1$s: a cache time can be at most %2$d seconds (a day) — browsers keep a cached 404 as long as they are told, and nothing can recall it.', 'post-404-shield' ), $label, \Post404Shield\MAX_TTL );
 			}
 		}
 		if ( isset( $entry['reserved_allowlist'] ) && is_array( $entry['reserved_allowlist'] ) ) {
@@ -1416,6 +1445,39 @@ class ConfigStore {
 	// --- Save pipeline ---------------------------------------------------------
 
 	/**
+	 * Fingerprint of the stored settings a form was built from, so a save can
+	 * tell whether they changed since. Covers what the settings screen edits —
+	 * entries, locale, the operator's excluded bases and retention — and leaves
+	 * out what write() derives on its own (redirect-derived reserved slugs, the
+	 * snapshot buckets, meta), which the nightly redirect sync refreshes
+	 * without anyone editing.
+	 *
+	 * @param array<string, mixed>|null $document Stored config document.
+	 *
+	 * @return string
+	 */
+	public function revision_of( ?array $document ): string {
+		$entries = [];
+		foreach ( (array) ( $document['entries'] ?? [] ) as $key => $entry ) {
+			if ( is_array( $entry ) ) {
+				unset( $entry['reserved_derived'] );
+			}
+			$entries[ $key ] = $entry;
+		}
+		return md5( (string) wp_json_encode( [ null === $document, $entries, $document['locale'] ?? null, $document['excluded_bases']['operator'] ?? null, $this->keep() ] ) );
+	}
+
+	/**
+	 * The revision of what the settings screen edits: the option, or the
+	 * artifact while there is no option.
+	 *
+	 * @return string
+	 */
+	public function current_revision(): string {
+		return $this->revision_of( $this->option() ?? $this->artifact() );
+	}
+
+	/**
 	 * The full save pipeline: validate → lock → stage → archive → option →
 	 * swap → prune.
 	 *
@@ -1435,9 +1497,12 @@ class ConfigStore {
 	 *                                           prune; `force_preflight` => true lets a save land despite
 	 *                                           root-preflight would-blocks (CLI --force for a knowing operator);
 	 *                                           `skip_root_preflight` => true skips the URL-walking root
-	 *                                           preflight (the self-heal republishing an already-vetted option).
+	 *                                           preflight (the self-heal republishing an already-vetted option);
+	 *                                           `expect_revision` => string refuses the save (`stale` => true)
+	 *                                           unless the stored settings still have that current_revision() —
+	 *                                           checked under the lock, so two forms cannot both pass it.
 	 *
-	 * @return array{ok: bool, errors: string[], warnings: string[]}
+	 * @return array{ok: bool, errors: string[], warnings: string[], stale?: bool}
 	 */
 	public function write( array $config, string $generated_by, array $flags = [] ): array {
 		// Root-pages v2: the floor + derived excluded-bases buckets are
@@ -1502,40 +1567,20 @@ class ConfigStore {
 					'warnings' => $validated['warnings'],
 				];
 			}
-
-			// Mode-switch ordering (SPEC §3.2c). The invariant: a FULL-PATH artifact
-			// must never read a slug-format allowlist — nested real pages would 404
-			// with a cacheable TTL. So an entry becoming full-path rebuilds its list
-			// BEFORE the artifact swap (a full-path list is harmless under the old
-			// slug artifact — top-level lines still match), and an entry leaving
-			// full-path rebuilds AFTER the swap (a slug artifact reads a full-path
-			// list safely for the instant in between). Applies to restores too —
-			// they run through this same pipeline.
-			// A list that failed to write stays in its old format, so the swap
-			// would put a full-path artifact over a slug list: refuse instead.
-			[ $rebuild_before, $rebuild_after ] = $this->match_switch_rebuilds( $config );
-			if ( null !== $this->rebuild_handler && [] !== $rebuild_before
-				&& false === ( $this->rebuild_handler )( $rebuild_before, $config['entries'] )
-			) {
+			if ( isset( $flags['expect_revision'] ) && (string) $flags['expect_revision'] !== $this->current_revision() ) {
 				return [
 					'ok'       => false,
-					'errors'   => [
-						sprintf(
-							/* translators: %s: comma-separated post type names. */
-							__( 'Nothing was saved: the allowlist for %s could not be written in the new format, so switching would 404 real URLs. Check that the uploads/post-404-shield directory is writable, then save again.', 'post-404-shield' ),
-							implode( ', ', $rebuild_before )
-						),
-					],
-					'warnings' => $validated['warnings'],
+					'stale'    => true,
+					'errors'   => [ __( 'The settings changed after this page was opened — another save, a restore or a CLI write. This page now shows the current settings; make your change again.', 'post-404-shield' ) ],
+					'warnings' => [],
 				];
 			}
 
 			// S6 — the root-preflight coverage gate. Any save that leaves root mode
 			// ACTIVE walks real URLs through the exact would-be loader decision
-			// (against the candidate config + the just-rebuilt allowlists above); a
-			// non-empty would-block list ABORTS the save. `force_preflight` (the CLI
-			// --force) is the knowing-operator override. Runs after the pre-swap
-			// rebuilds so the lists it measures are the lists the loader will read.
+			// (against the candidate config, its allowlists built in memory from
+			// the database); a non-empty would-block list ABORTS the save.
+			// `force_preflight` (the CLI --force) is the knowing-operator override.
 			if ( empty( $flags['skip_root_preflight'] ) && null !== $this->preflight_handler && $this->has_enabled_root_entries( $config['entries'] ) ) {
 				$would_block = ( $this->preflight_handler )( $config );
 				$accepted    = array_values( array_filter( (array) get_option( self::PREFLIGHT_ACCEPTED_OPTION, [] ), 'is_string' ) );
@@ -1595,7 +1640,7 @@ class ConfigStore {
 							? sprintf(
 								/* translators: %s: entry name. */
 								__( 'Coverage check FAILED: none of %s\'s real URLs sit under its URL bases, so it would shield nothing — check the URL base.', 'post-404-shield' ),
-								(string) $entry_key
+								$name( $entry_key )
 							)
 							: sprintf(
 								/* translators: 1: entry name, 2: the URL base its posts really use. */
@@ -1676,6 +1721,35 @@ class ConfigStore {
 				}
 			}
 
+			// Mode-switch ordering (SPEC §3.2c). The invariant: a FULL-PATH artifact
+			// must never read a slug-format allowlist — nested real pages would 404
+			// with a cacheable TTL. So an entry becoming full-path rebuilds its list
+			// BEFORE the artifact swap (a full-path list is harmless under the old
+			// slug artifact — top-level lines still match), and an entry leaving
+			// full-path rebuilds AFTER the swap (a slug artifact reads a full-path
+			// list safely for the instant in between). Applies to restores too —
+			// they run through this same pipeline.
+			// Runs after both gates, which measure candidate lists in memory: a
+			// save they refuse must not leave its rebuilt lists behind. A list
+			// that failed to write stays in its old format, so the swap would put
+			// a full-path artifact over a slug list: refuse instead.
+			[ $rebuild_before, $rebuild_after ] = $this->match_switch_rebuilds( $config );
+			if ( null !== $this->rebuild_handler && [] !== $rebuild_before
+				&& false === ( $this->rebuild_handler )( $rebuild_before, $config['entries'] )
+			) {
+				return [
+					'ok'       => false,
+					'errors'   => [
+						sprintf(
+							/* translators: %s: comma-separated post type names. */
+							__( 'Nothing was saved: the allowlist for %s could not be written in the new format, so switching would 404 real URLs. Check that the uploads/post-404-shield directory is writable, then save again.', 'post-404-shield' ),
+							implode( ', ', $rebuild_before )
+						),
+					],
+					'warnings' => $validated['warnings'],
+				];
+			}
+
 			// Stage the new artifact and archive the live one BEFORE anything a
 			// reader can see changes: a failure in either leaves the option and
 			// the live artifact exactly as they were.
@@ -1745,12 +1819,33 @@ class ConfigStore {
 		if ( null !== $this->rebuild_handler && [] !== $rebuild_after ) {
 			( $this->rebuild_handler )( $rebuild_after, $config['entries'] );
 		}
+		// Once more for the types that became full-path, now that the artifact
+		// saying so is live: a rebuild started from the OLD artifact (the daily
+		// run, a queued job) could have replaced the pre-swap list with slug
+		// lines between that rebuild and the swap, and the builders' guard only
+		// knows the artifact that is live. From here on the guard refuses them.
+		if ( null !== $this->rebuild_handler && [] !== $rebuild_before ) {
+			( $this->rebuild_handler )( $rebuild_before, $config['entries'] );
+		}
 
 		return [
 			'ok'       => true,
 			'errors'   => [],
 			'warnings' => $validated['warnings'],
 		];
+	}
+
+	/**
+	 * Whether an entry's list is full-path: set so, or a root entry, which is
+	 * full-path by definition (as AllowlistBuilder::match_for() and the reader
+	 * default it).
+	 *
+	 * @param array<string, mixed> $entry Entry.
+	 *
+	 * @return bool
+	 */
+	private static function is_full_path( array $entry ): bool {
+		return true === ( $entry['root'] ?? false ) || 'full-path' === ( $entry['match'] ?? 'slug' );
 	}
 
 	/**
@@ -1778,7 +1873,7 @@ class ConfigStore {
 					continue;
 				}
 				$cpt                       = (string) ( $entry['post_type'] ?? $key );
-				$current_full_path[ $cpt ] = 'full-path' === ( $entry['match'] ?? 'slug' );
+				$current_full_path[ $cpt ] = self::is_full_path( $entry );
 			}
 		}
 
@@ -1792,7 +1887,7 @@ class ConfigStore {
 				continue;
 			}
 			$cpt       = (string) ( $entry['post_type'] ?? $key );
-			$wants_fp  = 'full-path' === ( $entry['match'] ?? 'slug' );
+			$wants_fp  = self::is_full_path( $entry );
 			$serves_fp = $current_full_path[ $cpt ] ?? false;
 			if ( $wants_fp && ! $serves_fp ) {
 				$before[] = $cpt;
@@ -2081,21 +2176,24 @@ class ConfigStore {
 	// --- Legacy import -----------------------------------------------------------
 
 	/**
-	 * Switch root mode off when the stored config no longer validates with it
-	 * on — the fail-open answer to a site change nothing else would notice.
+	 * Keep root mode true to the site after a change nothing else would
+	 * notice — the fail-open answer to it.
 	 *
 	 * Root mode's rules depend on live site state: which types dwell at the
-	 * root is worked out from the permalink structure, and validate() only
-	 * sees it at save time. Change Settings → Permalinks afterwards (say from
-	 * /blog/%postname%/ to /%postname%/) and every post URL leaves its base
-	 * while the artifact still shields the root — each post becomes a fake
-	 * slug and gets a pre-boot 404. So: re-validate the stored option; if it
-	 * fails, try it with every root entry disabled (their settings kept, so
-	 * the operator can re-enable once fixed), and publish that when it
-	 * validates. A config that fails for other reasons is left alone.
+	 * root, a based post entry's base and the excluded-bases snapshot all come
+	 * from the permalink settings and rewrite rules, and validate() only sees
+	 * them at save time. Change Settings → Permalinks afterwards (say from
+	 * /blog/%postname%/ to /%postname%/, or /blog/ to /news/) and post URLs
+	 * leave what the artifact knows — each becomes a fake slug and gets a
+	 * pre-boot 404. So: when root mode still fits (root_mode_errors()), re-save
+	 * the option with the post base updated if the snapshot or base drifted,
+	 * which re-snapshots and re-runs the root preflight; when it does not fit,
+	 * or that save fails, switch every root entry off (settings kept, so the
+	 * operator can re-enable once fixed) — from the option, or from the live
+	 * artifact when the option also fails for unrelated reasons.
 	 *
-	 * Callers: the permalink_structure_changed action and the daily health
-	 * check.
+	 * Callers: the permalink settings hooks (at shutdown) and the daily
+	 * health check.
 	 *
 	 * @param string $reason Why it ran, for the log and the notice.
 	 *
@@ -2103,26 +2201,63 @@ class ConfigStore {
 	 */
 	public function revalidate_root( string $reason ): bool {
 		$option = $this->option();
-		if ( null === $option || ! $this->has_enabled_root_entries( (array) ( $option['entries'] ?? [] ) ) ) {
-			return false;
-		}
-		$errors = $this->validate( $option )['errors'];
-		if ( [] === $errors ) {
+		if ( null === $option ) {
 			return false;
 		}
 
-		$off = $option;
-		foreach ( (array) $off['entries'] as $key => $entry ) {
-			if ( is_array( $entry ) && true === ( $entry['root'] ?? false ) ) {
-				$off['entries'][ $key ]['enabled'] = false;
+		// A based `post` entry follows the permalink structure's base (the
+		// settings screen derives it the same way on every save).
+		$candidate = $this->with_current_post_base( $option );
+
+		if ( ! $this->has_enabled_root_entries( (array) ( $candidate['entries'] ?? [] ) ) ) {
+			// Based mode: the same drift, for a `post` entry — its base moved
+			// (`/blog/` → `/news/`), or the structure no longer has a fixed one
+			// (`/blog/%category%/%postname%/`), under which every post would
+			// read as a fake slug. Follow the base, or switch the entry off
+			// (settings kept); the save's coverage gate replays its posts.
+			$candidate = $this->with_unservable_post_disabled( $candidate );
+			if ( $candidate === $option ) {
+				return false;
+			}
+			$result = $this->write( $candidate, 'auto: Posts follows the permalink settings — ' . $reason );
+			if ( ! $result['ok'] ) {
+				error_log( '[post-404-shield] permalink revalidation (' . $reason . '): could not update the Posts entry: ' . implode( ' | ', $result['errors'] ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+			}
+			return false;
+		}
+
+		$errors = $this->root_mode_errors( $candidate );
+		if ( [] === $errors ) {
+			// Still valid for root mode, but the snapshot it runs on may not be:
+			// a changed post, category or tag base, or a plugin's rewrite rules,
+			// moves real URLs out from under the excluded bases, and root
+			// matching would 404 them. Re-saving re-snapshots and re-runs the
+			// root preflight; only if that fails does root matching go off.
+			if ( $candidate === $option && ! $this->snapshot_is_stale( $option ) ) {
+				return false;
+			}
+			$result = $this->write( $candidate, 'auto: root snapshot refreshed — ' . $reason );
+			if ( $result['ok'] ) {
+				return false;
+			}
+			$errors = $result['errors'];
+		}
+
+		// Switch root matching off — from the option, or, when the option also
+		// fails for unrelated reasons, from the live artifact: fail-open wins.
+		$result = [
+			'ok'     => false,
+			'errors' => [],
+		];
+		foreach ( [ $candidate, $this->artifact() ] as $base ) {
+			if ( null === $base ) {
+				continue;
+			}
+			$result = $this->write( self::root_disabled( $base ), 'auto: root matching switched off — ' . $reason, [ 'skip_root_preflight' => true ] );
+			if ( $result['ok'] ) {
+				break;
 			}
 		}
-		if ( [] !== $this->validate( $off )['errors'] ) {
-			error_log( '[post-404-shield] root revalidation (' . $reason . '): the config is invalid for reasons other than root mode; left unchanged: ' . implode( ' | ', $errors ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-			return false;
-		}
-
-		$result = $this->write( $off, 'auto: root matching switched off — ' . $reason, [ 'skip_root_preflight' => true ] );
 		if ( ! $result['ok'] ) {
 			error_log( '[post-404-shield] root revalidation (' . $reason . '): could not switch root matching off: ' . implode( ' | ', $result['errors'] ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			return false;
@@ -2138,6 +2273,127 @@ class ConfigStore {
 		);
 		error_log( '[post-404-shield] root matching switched OFF (' . $reason . '): ' . implode( ' | ', $errors ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 		return true;
+	}
+
+	/**
+	 * What makes root mode itself invalid on this site now — separate from any
+	 * other error the config may carry, so an unrelated problem (a status a
+	 * plugin stopped registering) never switches root matching off, and never
+	 * keeps it on either.
+	 *
+	 * @param array<string, mixed> $config Config document.
+	 *
+	 * @return string[] Errors; empty when root mode still fits the site.
+	 */
+	private function root_mode_errors( array $config ): array {
+		$entries      = (array) ( $config['entries'] ?? [] );
+		$enabled_root = [];
+		foreach ( $entries as $key => $entry ) {
+			if ( is_array( $entry ) && true === ( $entry['root'] ?? false )
+				&& ( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] )
+				&& 'allowlist' === ( $entry['mode'] ?? 'allowlist' )
+			) {
+				$enabled_root[] = (string) ( $entry['post_type'] ?? $key );
+			}
+		}
+		if ( [] === $enabled_root ) {
+			return [];
+		}
+
+		$errors = [];
+		if ( ! $this->post_base_info()['supported'] ) {
+			$errors[] = __( 'The permalink structure no longer gives posts a fixed shape (only static segments before %postname% are supported).', 'post-404-shield' );
+		}
+		$dwellers = $this->root_dweller_types();
+		foreach ( array_diff( $enabled_root, $dwellers ) as $type ) {
+			/* translators: %s: post type name and slug. */
+			$errors[] = sprintf( __( '%s no longer lives at the site root.', 'post-404-shield' ), $this->entry_label( $type, [ 'post_type' => $type ] ) );
+		}
+		foreach ( array_diff( $dwellers, $enabled_root ) as $type ) {
+			/* translators: %s: post type name and slug. */
+			$errors[] = sprintf( __( '%s now lives at the site root but is not shielded there.', 'post-404-shield' ), $this->entry_label( $type, [ 'post_type' => $type ] ) );
+		}
+		return array_merge( $errors, $this->shared_type_errors( $entries ) );
+	}
+
+	/**
+	 * Whether the stored snapshot of WordPress-derived excluded bases differs
+	 * from what WordPress derives now (a permalink, category or tag base, or a
+	 * plugin's rewrite rules changed since the last save).
+	 *
+	 * @param array<string, mixed> $config Config document.
+	 *
+	 * @return bool
+	 */
+	public function snapshot_is_stale( array $config ): bool {
+		$snapshot = array_values( array_filter( (array) ( $config['excluded_bases']['derived'] ?? [] ), 'is_string' ) );
+		$live     = $this->derived_excluded_bases( self::locale_pattern_of( $config ) );
+		sort( $snapshot );
+		sort( $live );
+		return $snapshot !== $live;
+	}
+
+	/**
+	 * A config with its based `post` entry's base set to the one the current
+	 * permalink structure gives posts (unchanged when there is none to set).
+	 *
+	 * @param array<string, mixed> $config Config document.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private function with_current_post_base( array $config ): array {
+		$info = $this->post_base_info();
+		if ( ! $info['supported'] || '' === $info['base'] ) {
+			return $config;
+		}
+		foreach ( (array) ( $config['entries'] ?? [] ) as $key => $entry ) {
+			if ( is_array( $entry ) && 'post' === (string) ( $entry['post_type'] ?? $key )
+				&& true !== ( $entry['root'] ?? false ) && 'allowlist' === ( $entry['mode'] ?? 'allowlist' )
+				&& ( $entry['url_base'] ?? null ) !== [ $info['base'] ]
+			) {
+				$config['entries'][ $key ]['url_base'] = [ $info['base'] ];
+			}
+		}
+		return $config;
+	}
+
+	/**
+	 * A config with its enabled based `post` entry switched off (settings
+	 * kept) when the permalink structure gives posts no fixed shape.
+	 *
+	 * @param array<string, mixed> $config Config document.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private function with_unservable_post_disabled( array $config ): array {
+		if ( $this->post_base_info()['supported'] ) {
+			return $config;
+		}
+		foreach ( (array) ( $config['entries'] ?? [] ) as $key => $entry ) {
+			if ( is_array( $entry ) && 'post' === (string) ( $entry['post_type'] ?? $key )
+				&& true !== ( $entry['root'] ?? false ) && 'allowlist' === ( $entry['mode'] ?? 'allowlist' )
+				&& ( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] )
+			) {
+				$config['entries'][ $key ]['enabled'] = false;
+			}
+		}
+		return $config;
+	}
+
+	/**
+	 * A config with every root entry switched off, settings kept.
+	 *
+	 * @param array<string, mixed> $config Config document.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private static function root_disabled( array $config ): array {
+		foreach ( (array) ( $config['entries'] ?? [] ) as $key => $entry ) {
+			if ( is_array( $entry ) && true === ( $entry['root'] ?? false ) ) {
+				$config['entries'][ $key ]['enabled'] = false;
+			}
+		}
+		return $config;
 	}
 
 	/**
@@ -2190,10 +2446,10 @@ class ConfigStore {
 			// meanwhile), validate() (reserved namespaces, overlaps, and root
 			// mode's S1 together-rule and permalink checks), the excluded-bases
 			// and derived-reserved snapshots, and the atomic swap. The one step
-			// skipped is root mode's S6 preflight, which walks every real URL —
-			// too heavy for a request; the option being healed already passed it
-			// when it was saved. The coverage gate does not run either: nothing
-			// is changing relative to the stored option.
+			// skipped is root mode's S6 preflight: a heal republishes the stored
+			// option — vetted by the save that wrote it, or by the operator who
+			// staged it — and must not stay off over it. The coverage gate does
+			// not run either: nothing changes relative to the stored option.
 			$result = $this->write( $option, 'self-heal (artifact was missing or invalid)', [ 'skip_root_preflight' => true ] );
 			if ( $result['ok'] ) {
 				delete_transient( 'post_shield_heal_backoff' );

@@ -219,6 +219,38 @@ class PostShieldAllowlistBuilderTest extends TestCase {
 	}
 
 	/**
+	 * The streaming writer (root-extras): the same file format as the map
+	 * writer, charset-filtered line by line, an empty list as the guard plus
+	 * an empty line, and no temp file left behind.
+	 *
+	 * @return void
+	 */
+	public function test_write_lines_atomically_streams_the_same_format() {
+		$builder = new AllowlistBuilder( [] );
+		$method  = new \ReflectionMethod( AllowlistBuilder::class, 'write_lines_atomically' );
+		$method->setAccessible( true );
+		$file = $this->work_dir . '/post-404-shield/root-extras/allowlist.php';
+		wp_mkdir_p( dirname( $file ) );
+
+		$lines = static function () {
+			yield 'about';
+			yield 'Bad Line';
+			yield 'about/team';
+			yield '../escape';
+		};
+		$this->assertSame( 2, $method->invoke( $builder, $lines(), $file ) );
+		$raw = (string) file_get_contents( $file );
+		$this->assertSame( [ 'about', 'about/team' ], $this->parse_slugs( $raw ) );
+		$this->assertStringContainsString( "\nabout/team\n", $raw );
+		$this->assertSame( 2, AllowlistBuilder::count_entries( $raw ) );
+
+		$this->assertSame( 0, $method->invoke( $builder, [], $file ) );
+		$this->assertSame( 0, AllowlistBuilder::count_entries( (string) file_get_contents( $file ) ) );
+		$this->assertStringEndsWith( "\n\n", (string) file_get_contents( $file ), 'Empty: guard plus an empty line.' );
+		$this->assertSame( [], $this->list_temp_files( dirname( $file ) ) );
+	}
+
+	/**
 	 * URIs are built in memory the way get_page_uri() walks them: ancestors
 	 * prepended, a slugless ancestor skipped, a missing parent or a cycle
 	 * ending the chain. Ancestors outside the rows come from one batched read.
@@ -405,7 +437,14 @@ class PostShieldAllowlistBuilderTest extends TestCase {
 	 * @return string[]
 	 */
 	private function list_temp_files( string $dir ): array {
-		return array_values( (array) glob( $dir . '/*.tmp' ) );
+		return array_values(
+			array_filter(
+				(array) glob( $dir . '/*.tmp*' ),
+				static function ( $path ): bool {
+					return is_string( $path ) && \Post404Shield\is_temp_file_name( basename( $path ) );
+				}
+			)
+		);
 	}
 
 	/**

@@ -352,26 +352,42 @@
 				'div',
 				{ className: 'post-shield-admin__checkbox-grid' },
 				data.statuses
+					.filter((status) => status.servable)
 					.map((status) => ({
 						name: status.name,
 						label: status.label,
 					}))
-					// A stored status that is no longer registered (its plugin
-					// switched off) must still be visible, or it is posted on
-					// every save with no way to untick it.
+					// A stored status that is not offered must still be visible,
+					// or it is posted on every save with no way to untick it:
+					// one no longer registered (its plugin switched off), or one
+					// never served at a post's address (draft, scheduled…).
 					.concat(
 						type.statuses
 							.filter(
 								(name) =>
-									!data.statuses.some((s) => s.name === name)
+									!data.statuses.some(
+										(s) => s.name === name && s.servable
+									)
 							)
 							.map((name) => ({
 								name,
-								label: sprintf(
-									/* translators: %s: post status name. */
-									__('%s (not registered)', 'post-404-shield'),
-									name
-								),
+								label: data.statuses.some((s) => s.name === name)
+									? sprintf(
+											/* translators: %s: post status name. */
+											__(
+												'%s (ignored — never served at its address)',
+												'post-404-shield'
+											),
+											name
+										)
+									: sprintf(
+											/* translators: %s: post status name. */
+											__(
+												'%s (not registered)',
+												'post-404-shield'
+											),
+											name
+										),
 							}))
 					)
 					.map((status) =>
@@ -822,15 +838,23 @@
 					// reserved slugs included (root on/off is a whole-set
 					// decision, see config_from_request()), so say so before the
 					// save rather than promise something the server won't keep.
+					// Two root exceptions the server keeps or explains: settings
+					// kept while root matching is switched off automatically, and
+					// a based entry left behind when the type moved to the root.
 					!type.enabled && type.hasEntry
-						? type.root
+						? type.root && !type.rootKept
 							? el(
 									Badge,
 									{ tone: 'warning' },
-									__(
-										'Off — removed when you save',
-										'post-404-shield'
-									)
+									type.rootMoved
+										? __(
+												'Moved to the site root — its old settings are removed when you save',
+												'post-404-shield'
+											)
+										: __(
+												'Off — removed when you save',
+												'post-404-shield'
+											)
 								)
 							: el(
 									Badge,
