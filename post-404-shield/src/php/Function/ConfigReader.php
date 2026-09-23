@@ -177,6 +177,20 @@ function excluded_base_is_valid( $base ): bool {
 }
 
 /**
+ * A regex with each escaped slash (`\/`) read as the `/` it is — a slash
+ * needs no escape in a `#`-delimited pattern, but plugins write it anyway
+ * (`^my-route\/([0-9]+)\/?$`). An escaped backslash before a slash (`\\/`)
+ * is left alone. Pure string logic, no WordPress.
+ *
+ * @param string $regex A regex source or rewrite rule.
+ *
+ * @return string
+ */
+function unescape_slashes( string $regex ): string {
+	return (string) preg_replace( '#(?<!\\\\)((?:\\\\\\\\)*)\\\\/#', '$1/', $regex );
+}
+
+/**
  * Extract the leading LITERAL path segment of a WordPress rewrite-rule regex
  * — the reserved-route base it claims — or '' when the rule is prefixed by a
  * capture group / wildcard (i.e. it matches the whole content namespace, not a
@@ -198,7 +212,7 @@ function excluded_base_is_valid( $base ): bool {
  * @return string The literal base, or '' when there is no literal prefix.
  */
 function rewrite_pattern_base( string $pattern ): string {
-	$pattern   = ltrim( $pattern, '^' );
+	$pattern   = ltrim( unescape_slashes( $pattern ), '^' );
 	$metachars = '()[]{}.*+?|$ ';
 	$out       = '';
 	$len       = strlen( $pattern );
@@ -276,6 +290,7 @@ function rewrite_pattern_base( string $pattern ): string {
  * @return string[] The literal paths, or [] when the rule does not start so.
  */
 function rewrite_pattern_literal_group( string $pattern ): array {
+	$pattern = unescape_slashes( $pattern );
 	$literal = '(?:[a-z0-9_-]|\\\\-)+(?:/(?:[a-z0-9_-]|\\\\-)+)*';
 	if ( 1 !== preg_match( '#^\^?\((' . $literal . '(?:\|' . $literal . ')*)\)(?:/|\$|$)#', $pattern, $group ) ) {
 		return [];
@@ -597,9 +612,7 @@ function redirect_leading_locale( string $source, callable $is_locale, array $sa
 function redirect_source_variants( string $source, bool $is_regex, string $locale_pattern = '' ): array {
 	$source = trim( $source );
 	if ( $is_regex ) {
-		// `\/` is a literal slash wherever it appears (an escaped backslash
-		// before a slash, `\\/`, is left alone).
-		$source   = (string) preg_replace( '#(?<!\\\\)((?:\\\\\\\\)*)\\\\/#', '$1/', $source );
+		$source   = unescape_slashes( $source );
 		$branches = regex_alternatives( $source );
 		if ( count( $branches ) > 1 && count( $branches ) <= 50 ) {
 			$variants = [];

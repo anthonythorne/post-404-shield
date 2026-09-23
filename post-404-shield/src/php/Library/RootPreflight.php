@@ -146,7 +146,8 @@ class RootPreflight {
 
 	/**
 	 * The allowlist line a probed URL stands for: its path without the
-	 * locale, the trailing slash or a pagination tail.
+	 * locale and the trailing sub-routes the matcher strips (`page/N`, a bare
+	 * page number, `comment-page-N`, a feed, a rewrite endpoint).
 	 *
 	 * @param string $url            URL path.
 	 * @param string $locale_pattern Locale pattern body ('' = none).
@@ -159,7 +160,7 @@ class RootPreflight {
 			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- an engine error on a config-supplied pattern must read as "no locale".
 			$path = (string) @preg_replace( '#^(?:' . $locale_pattern . ')(?:/|$)#', '', $path );
 		}
-		return (string) preg_replace( '#/page/\d+$#', '', $path );
+		return '' === $path ? '' : implode( '/', \Post404Shield\strip_trailing_sub_routes( explode( '/', $path ), true, $this->endpoints ) );
 	}
 
 	/**
@@ -339,7 +340,10 @@ class RootPreflight {
 			$root_candidates[ $root_type ] = [
 				'type'             => $root_type,
 				'allow_pagination' => ! isset( $settings['allow_pagination'] ) || false !== $settings['allow_pagination'],
-				'body'             => $bodies[ $root_type ] ?? '',
+				// An empty list is measured ARMED: the loader leaves root
+				// matching inert while one is, but the first post appended arms
+				// it for the whole site, and no preflight runs then.
+				'body'             => '' === ( $bodies[ $root_type ] ?? '' ) ? "<?php exit;\n\n" : $bodies[ $root_type ],
 				'set'              => $sets[ $root_type ] ?? [],
 			];
 		}
@@ -633,20 +637,13 @@ class RootPreflight {
 			];
 		}
 
-		// Mirror the loader's root preconditions exactly: at least one root
-		// candidate, and EVERY root type contributing a non-empty body — any
-		// empty list makes the whole root stage inert (fail-open), never a
-		// selective 404.
+		// The root stage runs whenever a root candidate exists. The loader's
+		// own precondition — every root list non-empty — is not mirrored: an
+		// empty list is measured as armed (run()), since one appended post
+		// is all it takes, and the save is the only time this walk runs.
 		$has_root = false;
 		foreach ( $match_candidates as $match_candidate ) {
-			if ( 'root-extras' === ( $match_candidate['type'] ?? '' ) ) {
-				continue;
-			}
-			if ( '' === ( $match_candidate['body'] ?? '' ) ) {
-				$has_root = false;
-				break;
-			}
-			$has_root = true;
+			$has_root = $has_root || 'root-extras' !== ( $match_candidate['type'] ?? '' );
 		}
 
 		// The based stage is the loader's own decision function, so this gate

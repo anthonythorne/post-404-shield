@@ -335,6 +335,7 @@ class PostShieldAdminController {
 				'expect_revision'   => $revision,
 				'allow_status_drop' => ! empty( $_POST['ps_status_confirm'] ), // phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
 				'shows_warnings'    => true,
+				'root_off_reason'   => __( 'a revision with it switched off was restored', 'post-404-shield' ),
 			]
 		);
 		if ( ! $result['ok'] && ! empty( $result['status_drop'] ) ) {
@@ -391,33 +392,21 @@ class PostShieldAdminController {
 			$current['entries'][ $key ]['enabled'] = false;
 		}
 
+		// Root settings switched off here are kept (the write records it), as
+		// an automatic switch-off keeps them: a later save that switches one
+		// post type back on must not delete them from the tab it was not made on.
 		$result = $this->store->write(
 			$current,
 			$this->current_user_label() . ' (disable shield)',
 			[
 				'expect_revision' => $expect,
 				'shows_warnings'  => true,
+				'root_off_reason' => __( 'the shield was disabled', 'post-404-shield' ),
 			] 
 		);
 		if ( ! $result['ok'] ) {
 			$this->set_notice( $result['errors'], $result['warnings'], false );
 			$this->redirect_to_page();
-		}
-		// Root settings switched off here are kept, as an automatic switch-off
-		// keeps them: a later save that switches one post type back on must
-		// not delete them from the tab it was not made on.
-		$had_root = [] !== array_filter( (array) $current['entries'], static fn( $entry ) => is_array( $entry ) && true === ( $entry['root'] ?? false ) );
-		if ( $had_root && ! is_array( get_option( ConfigStore::ROOT_OFF_OPTION ) ) ) {
-			update_option(
-				ConfigStore::ROOT_OFF_OPTION,
-				[
-					'at'     => gmdate( 'c' ),
-					'by'     => 'operator',
-					'reason' => __( 'the shield was disabled', 'post-404-shield' ),
-					'errors' => [],
-				],
-				false
-			);
 		}
 		$this->set_notice( [], $result['warnings'], true, __( 'Shield disabled — every entry switched off (the previous config is available as a revision).', 'post-404-shield' ) );
 		$this->redirect_to_page();
@@ -1335,10 +1324,14 @@ class PostShieldAdminController {
 			$notices[] = [
 				'status'  => 'warning',
 				'message' => 'operator' === ( $root_off['by'] ?? '' )
-					? __( 'Root matching is off because the shield was disabled. The root settings are kept — review them under Pages & posts and save to switch root matching back on.', 'post-404-shield' )
+					? sprintf(
+						/* translators: %s: why root matching is off, e.g. "the shield was disabled". */
+						__( 'Root matching is off because %s. The root settings are kept — review them under Pages & posts and save to switch root matching back on.', 'post-404-shield' ),
+						(string) ( $root_off['reason'] ?? '' )
+					)
 					: sprintf(
 						/* translators: %s: why root matching was switched off. */
-						__( 'Root matching was switched off automatically because %s: the saved root settings no longer fit the site. They are kept — review them under Pages & posts and save to switch root matching back on.', 'post-404-shield' ),
+						__( 'Root matching was switched off automatically (%s): the saved root settings no longer fit the site. They are kept — review them under Pages & posts and save to switch root matching back on.', 'post-404-shield' ),
 						(string) ( $root_off['reason'] ?? '' )
 					),
 				'list'    => array_map( 'strval', (array) ( $root_off['errors'] ?? [] ) ),

@@ -222,6 +222,27 @@ Moved out of the sites that used it into its own repository.
   their old parent, so it skipped moving their translations at all.
 - Tests: the pre-swap rebuild contract, an append during a stream (two
   processes), the redirect shapes above.
+- Rewrite rules with escaped slashes (`my-route\/([0-9]+)`) reduce like
+  unescaped ones, for excluded bases and route-reserved slugs alike.
+- Root mode warns about a regex redirect with no leading literal, or one not
+  anchored at the start: no excluded base can let it through.
+- A forced save reports every broken URL it lets through, whatever else it
+  confirmed or forced; only a clean check reads as a pass.
+- Automatic writes are labelled by what they do (the Posts entry followed the
+  permalinks, or the snapshot was refreshed) and what triggered them.
+- The root preflight measures an empty root list armed, as the first post
+  appended leaves it; a would-block is traced to its line the way the matcher
+  strips sub-routes, so a dropped status on a paginated probe is confirmable.
+- A based Posts entry is switched off, settings kept, when posts move to the
+  root (`/%postname%/`); any write leaving every root entry off keeps the root
+  settings as Disable shield does.
+- Media of a deleted post of a based full-path type are appended under their
+  new parent. A content-only PublishPress revision no longer re-walks the
+  subtree, and a walk over many posts (a parent's children, a post's WPML
+  translations) appends once per list.
+- Tests: the failed redirect read (separate processes), the forced coverage
+  verdicts, the Posts entry following the permalinks, root-mode redirect
+  warnings.
 
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing

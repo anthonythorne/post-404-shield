@@ -173,10 +173,10 @@ class PostShieldDerivedReservedTest extends TestCase {
 	 * @return void
 	 */
 	public function test_routes_under_a_base_are_reserved(): void {
-		$this->routes( [ 'stories/tips/?$', 'stories/(video|review)/?$', 'stories/([^/]+)/?$', 'blog/category/(.+?)/?$' ], 'blog' );
+		$this->routes( [ 'stories/tips/?$', 'stories/(video|review)/?$', 'stories/([^/]+)/?$', 'blog/category/(.+?)/?$', 'stories\\/guides\\/?$' ], 'blog' );
 		$derived = $this->derived( $this->store( [] ) );
 
-		$this->assertSame( [ 'review', 'tips', 'video' ], $derived['story'] );
+		$this->assertSame( [ 'guides', 'review', 'tips', 'video' ], $derived['story'], 'An escaped slash is a separator.' );
 		$this->assertContains( 'category', $derived['post'] );
 		$this->assertContains( '2*', $derived['post'], 'The front carries the date archives.' );
 		$this->assertSame( [], $derived['news'] );
@@ -329,5 +329,40 @@ class PostShieldDerivedReservedTest extends TestCase {
 			$block
 		);
 		$this->assertStringNotContainsString( 'Blocked section', $warnings );
+	}
+
+	/**
+	 * Root mode: a regex redirect with no leading literal, or unanchored,
+	 * cannot be let through by an excluded base, and the save says so; one
+	 * that starts with its path says nothing.
+	 *
+	 * @return void
+	 */
+	public function test_root_mode_warns_about_redirects_no_base_can_cover(): void {
+		$this->routes( [] );
+		$root = [
+			'page' => [
+				'root'      => true,
+				'post_type' => 'page',
+			],
+			'post' => [
+				'root'      => true,
+				'post_type' => 'post',
+			],
+		];
+		foreach ( [ '^(.*)/amp/?$' => true, 'amp/?$' => true, '^.*/legacy/(.*)$' => true, '^old-page/?$' => false, '^/?$' => false ] as $pattern => $warns ) {
+			[ , $warnings ] = $this->derive_with(
+				$this->store(
+					[
+						[
+							'pattern' => $pattern,
+							'regex'   => true,
+						],
+					]
+				),
+				$root
+			);
+			$this->assertSame( $warns, str_contains( $warnings, 'Root mode: the redirect "' . $pattern . '"' ), $pattern );
+		}
 	}
 }

@@ -90,7 +90,8 @@ class PostShieldSyncController {
 	private array $orphan_translations = [];
 
 	/**
-	 * Media of a post being deleted, keyed by its ID (root mode only).
+	 * Media of a post being deleted, keyed by its ID (root mode, or a
+	 * full-path type shielded under a base).
 	 *
 	 * @var array<int, int[]>
 	 */
@@ -104,6 +105,16 @@ class PostShieldSyncController {
 	 * @var array<string, array{0: array<int, int[]>, 1: array<int, string>}>
 	 */
 	private array $family = [];
+
+	/**
+	 * While a handler walks many posts (a parent's children, a post's WPML
+	 * translations): the lines for each list and the posts to purge, written
+	 * once at its end — one read and one locked append per list, not one per
+	 * post. Null when no batch is open.
+	 *
+	 * @var array{lists: array<string, array<string, true>>, root: array<string, true>, purge: array<int, true>}|null
+	 */
+	private ?array $batch = null;
 
 	/**
 	 * Addresses a deleted post's subtree had, or a re-parented post's WPML
@@ -238,7 +249,7 @@ class PostShieldSyncController {
 		// which leave out media on a post that is not live yet: it has no page,
 		// and listing it would reveal the unreleased post.
 		if ( $this->builder->has_root_entries() ) {
-			$this->builder->append_root_extras( $this->builder->attachment_lines( null, [ $post_id ] ) );
+			$this->append_root_lines( $this->builder->attachment_lines( null, [ $post_id ] ) );
 		}
 		$this->append_based_media( null, [ $post_id ] );
 	}
@@ -263,7 +274,7 @@ class PostShieldSyncController {
 					$lines
 				);
 			}
-			$this->builder->append_slugs( $type, $lines );
+			$this->append_lines( $type, $lines );
 		}
 	}
 
@@ -305,7 +316,7 @@ class PostShieldSyncController {
 					: in_array( $status, $this->builder->attachment_parent_statuses(), true );
 			};
 			if ( $listed( $new_status ) && ! $listed( $old_status ) ) {
-				$this->builder->append_root_extras( $this->builder->attachment_lines( [ (int) $post->ID ] ) );
+				$this->append_root_lines( $this->builder->attachment_lines( [ (int) $post->ID ] ) );
 			}
 		}
 		// A full-path type's own list, the media of posts in ITS statuses: a
@@ -331,9 +342,11 @@ class PostShieldSyncController {
 		if ( ! is_string( $post_type ) || 'attachment' === $post_type ) {
 			return;
 		}
-		// Root mode: core also moves the post's media to its parent — their
-		// URLs change the same unseen way.
-		if ( $this->builder->has_root_entries() ) {
+		// Core also moves the post's media to its parent — their URLs change
+		// the same unseen way: in root-extras (root mode), and in the list of
+		// a full-path type shielded under a base, whose lines are whole paths.
+		$based_full_path = $this->managed( $post_type ) && 'full-path' === $this->builder->match_for( $post_type ) && ! $this->builder->is_root_type( $post_type );
+		if ( $this->builder->has_root_entries() || $based_full_path ) {
 			$media = get_children(
 				[
 					'post_parent' => $post_id,
@@ -467,7 +480,10 @@ class PostShieldSyncController {
 	public function handle_after_delete( int $post_id ): void {
 		$this->family = []; // Core just moved the children up a level.
 		if ( isset( $this->orphan_media[ $post_id ] ) ) {
-			$this->builder->append_root_extras( $this->builder->attachment_lines( null, $this->orphan_media[ $post_id ] ) );
+			if ( $this->builder->has_root_entries() ) {
+				$this->append_root_lines( $this->builder->attachment_lines( null, $this->orphan_media[ $post_id ] ) );
+			}
+			$this->append_based_media( null, $this->orphan_media[ $post_id ] );
 			unset( $this->orphan_media[ $post_id ] );
 		}
 		if ( ! isset( $this->orphans[ $post_id ] ) ) {
@@ -475,9 +491,13 @@ class PostShieldSyncController {
 		}
 		[ $post_type, $children ] = $this->orphans[ $post_id ];
 		unset( $this->orphans[ $post_id ] );
-		foreach ( $children as $child ) {
-			$this->fast_append( $child, $post_type, true );
-		}
+		$this->in_batch(
+			function () use ( $children, $post_type ): void {
+				foreach ( $children as $child ) {
+					$this->fast_append( $child, $post_type, true );
+				}
+			}
+		);
 		// WordPress still 301s the addresses they left (its 404 guess finds
 		// them by name), so they are kept like any move's.
 		$this->publish_moved( 'delete-' . $post_id, $post_type );
@@ -503,9 +523,13 @@ class PostShieldSyncController {
 	private function append_moved_translations( int $post_id ): void {
 		[ $post_type, $translations, $before ] = $this->orphan_translations[ $post_id ];
 		$this->family                          = [];
-		foreach ( $translations as $translation_id ) {
-			$this->fast_append( $translation_id, $post_type, true );
-		}
+		$this->in_batch(
+			function () use ( $translations, $post_type ): void {
+				foreach ( $translations as $translation_id ) {
+					$this->fast_append( $translation_id, $post_type, true );
+				}
+			}
+		);
 		$old = [];
 		foreach ( [] === $before ? [] : $this->builder->uris_for( $post_type, array_keys( $before ) ) as $id => $uri ) {
 			if ( isset( $before[ $id ] ) && $before[ $id ] !== $uri ) {
@@ -553,9 +577,14 @@ class PostShieldSyncController {
 			return;
 		}
 		unset( $this->family[ $post_type ] ); // WPML just re-parented them.
-		foreach ( $this->translation_ids( $post_id, $post_type ) as $translation_id ) {
-			$this->fast_append( $translation_id, $post_type, true );
-		}
+		$translations = $this->translation_ids( $post_id, $post_type );
+		$this->in_batch(
+			function () use ( $translations, $post_type ): void {
+				foreach ( $translations as $translation_id ) {
+					$this->fast_append( $translation_id, $post_type, true );
+				}
+			}
+		);
 		$this->publish_moved( 'wpml-' . $post_id, $post_type );
 	}
 
@@ -618,7 +647,7 @@ class PostShieldSyncController {
 		if ( false !== strpos( $uri, '/' ) ) {
 			$lines[] = substr( $uri, 0, (int) strrpos( $uri, '/' ) ) . '/' . $old_slug;
 		}
-		$this->builder->append_root_extras( $lines );
+		$this->append_root_lines( $lines );
 	}
 
 	/**
@@ -683,7 +712,7 @@ class PostShieldSyncController {
 
 		$lines = array_values( $old );
 		if ( $this->builder->is_root_type( $type ) ) {
-			$this->builder->append_root_extras( $lines );
+			$this->append_root_lines( $lines );
 			return;
 		}
 		if ( 'full-path' !== $this->builder->match_for( $type ) ) {
@@ -696,7 +725,7 @@ class PostShieldSyncController {
 				)
 			);
 		}
-		$this->builder->append_slugs( $type, $lines );
+		$this->append_lines( $type, $lines );
 	}
 
 	/**
@@ -733,7 +762,7 @@ class PostShieldSyncController {
 		if ( 'publish' !== $post_after->post_status || ! $this->builder->is_shielding_status( $post_after->post_type, 'publish' ) ) {
 			return;
 		}
-		$this->builder->append_slug( $post_after->post_type, $post_before->post_name );
+		$this->append_lines( $post_after->post_type, [ $post_before->post_name ] );
 	}
 
 	/**
@@ -801,6 +830,8 @@ class PostShieldSyncController {
 		unset( $this->family[ $post_type ] );
 		// Addresses the revision moved (its slug applied with a direct
 		// query, so post_updated never saw it): kept like any move.
+		// Without a before address for the post itself, count it as moved.
+		$moved = true;
 		if ( isset( $this->before_revision[ $post_id ] ) ) {
 			$before = $this->before_revision[ $post_id ];
 			unset( $this->before_revision[ $post_id ] );
@@ -811,8 +842,11 @@ class PostShieldSyncController {
 				}
 			}
 			$this->publish_old_uris( $post_type, $old );
+			// A content-only revision moved nothing: its subtree (and, in
+			// root mode, their media) need not be walked again.
+			$moved = ! isset( $before[ $post_id ] ) || isset( $old[ $post_id ] );
 		}
-		$this->fast_append( $post_id, $post_type, true );
+		$this->fast_append( $post_id, $post_type, $moved );
 	}
 
 	/**
@@ -880,7 +914,7 @@ class PostShieldSyncController {
 			$cut     = strrpos( $line, '/' );
 			$lines[] = ( false === $cut ? '' : substr( $line, 0, $cut + 1 ) ) . $before->post_name;
 		}
-		$this->builder->append_root_extras( $lines );
+		$this->append_root_lines( $lines );
 	}
 
 	/**
@@ -931,16 +965,16 @@ class PostShieldSyncController {
 				return;
 			}
 			if ( [] !== $ids ) {
-				$this->builder->append_slugs( $post_type, array_values( $this->builder->uris_for( $post_type, $ids ) ) );
+				$this->append_lines( $post_type, array_values( $this->builder->uris_for( $post_type, $ids ) ) );
 			}
 			if ( [] !== $private ) {
-				$this->builder->append_root_extras( array_values( $this->builder->uris_for( $post_type, $private ) ) );
+				$this->append_root_lines( array_values( $this->builder->uris_for( $post_type, $private ) ) );
 			}
 			// The media of every moved post moves with it — its URL nests under
 			// the post's: into root-extras in root mode, into the type's own
 			// full-path list otherwise.
 			if ( $this->builder->has_root_entries() && $was_moved ) {
-				$this->builder->append_root_extras( $this->builder->attachment_lines( array_merge( $ids, $private ) ) );
+				$this->append_root_lines( $this->builder->attachment_lines( array_merge( $ids, $private ) ) );
 			}
 			if ( $was_moved && ! $root_type && [] !== $ids ) {
 				$this->append_based_media( $ids, null );
@@ -956,8 +990,78 @@ class PostShieldSyncController {
 		}
 		$slug = get_post_field( 'post_name', $post_id );
 		if ( is_string( $slug ) && '' !== $slug ) {
-			$this->builder->append_slug( $post_type, $slug );
+			$this->append_lines( $post_type, [ $slug ] );
 			$this->purge_page_cache( $post_id );
+		}
+	}
+
+	/**
+	 * Append lines to a type's list — or, in a batch, collect them.
+	 *
+	 * @param string   $type  Effective CPT.
+	 * @param string[] $lines Lines.
+	 *
+	 * @return void
+	 */
+	private function append_lines( string $type, array $lines ): void {
+		if ( null === $this->batch ) {
+			$this->builder->append_slugs( $type, $lines );
+			return;
+		}
+		foreach ( $lines as $line ) {
+			$this->batch['lists'][ $type ][ (string) $line ] = true;
+		}
+	}
+
+	/**
+	 * Append lines to root-extras — or, in a batch, collect them.
+	 *
+	 * @param string[] $lines Lines.
+	 *
+	 * @return void
+	 */
+	private function append_root_lines( array $lines ): void {
+		if ( null === $this->batch ) {
+			$this->builder->append_root_extras( $lines );
+			return;
+		}
+		foreach ( $lines as $line ) {
+			$this->batch['root'][ (string) $line ] = true;
+		}
+	}
+
+	/**
+	 * Run a walk over many posts as one batch (see $batch), then write what
+	 * it collected. A batch inside a batch joins the outer one.
+	 *
+	 * @param callable $work The walk.
+	 *
+	 * @return void
+	 */
+	private function in_batch( callable $work ): void {
+		if ( null !== $this->batch ) {
+			$work();
+			return;
+		}
+		$this->batch = [
+			'lists' => [],
+			'root'  => [],
+			'purge' => [],
+		];
+		try {
+			$work();
+		} finally {
+			$batch       = $this->batch;
+			$this->batch = null;
+			foreach ( $batch['lists'] as $type => $lines ) {
+				$this->builder->append_slugs( (string) $type, array_map( 'strval', array_keys( $lines ) ) );
+			}
+			if ( [] !== $batch['root'] ) {
+				$this->builder->append_root_extras( array_map( 'strval', array_keys( $batch['root'] ) ) );
+			}
+			foreach ( array_keys( $batch['purge'] ) as $post_id ) {
+				$this->purge_page_cache( (int) $post_id );
+			}
 		}
 	}
 
@@ -1058,6 +1162,10 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	private function purge_page_cache( int $post_id ): void {
+		if ( null !== $this->batch ) {
+			$this->batch['purge'][ $post_id ] = true;
+			return;
+		}
 		// get_permalink resolves the correct localised (WPML) URL for THIS post's
 		// language, so each translation purges its own locale on publish.
 		$permalink = get_permalink( $post_id );

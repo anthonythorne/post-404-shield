@@ -67,7 +67,8 @@ if ( ! function_exists( 'apply_filters' ) ) {
 
 if ( ! function_exists( 'get_option' ) ) {
 	/**
-	 * No options in unit tests: always the default.
+	 * Options a test puts in `$GLOBALS['post_shield_test_options']`, else the
+	 * default.
 	 *
 	 * @param string $name          Option name.
 	 * @param mixed  $default_value Default.
@@ -75,7 +76,7 @@ if ( ! function_exists( 'get_option' ) ) {
 	 * @return mixed
 	 */
 	function get_option( string $name, $default_value = false ) {
-		return $default_value;
+		return $GLOBALS['post_shield_test_options'][ $name ] ?? $default_value;
 	}
 }
 
@@ -102,5 +103,21 @@ if ( ! function_exists( 'do_action' ) ) {
 	 * @return void
 	 */
 	function do_action( string $hook ): void { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- core's signature, nothing hooked.
+	}
+}
+
+if ( ! function_exists( '_n' ) ) {
+	/**
+	 * No translations in unit tests: core's singular/plural choice.
+	 *
+	 * @param string $single Singular.
+	 * @param string $plural Plural.
+	 * @param int    $number Count.
+	 * @param string $domain Text domain.
+	 *
+	 * @return string
+	 */
+	function _n( string $single, string $plural, int $number, string $domain = 'default' ): string { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed -- core's signature.
+		return 1 === $number ? $single : $plural;
 	}
 }

@@ -59,8 +59,9 @@ preflight** automatically (S6): every real URL is walked through the would-be
 loader decision, and a non-empty would-block list **aborts the save**.
 **Disable shield** writes an artifact with every entry disabled — still a
 validated, revisioned save. On a root-mode site the Pages & posts settings are
-**kept** while it is off, as an automatic switch-off keeps them: switching one
-post type back on does not delete them. Save the Pages & posts tab to switch
+**kept** while it is off, as an automatic switch-off keeps them — and so is
+any write that leaves every root entry off (restoring such a revision, a CLI
+write): switching one post type back on does not delete them. Save the Pages & posts tab to switch
 root matching back on, or use **Discard the kept root settings** on its notice.
 
 A based row switched **off with its URL bases cleared** is the delete gesture:
@@ -289,6 +290,12 @@ registered rewrite rule and no dot in its path.
   (remedy: that entry's reserved slugs), never a root-save blocker. The
   knowing-operator escape hatch is CLI-only: `wp post-shield config write
   --force`; the UI deliberately has none.
+  A root type whose list is still empty (a site with no posts yet) is
+  measured **armed**: the loader leaves root matching inert while a list is
+  empty, but the first post published arms it for the whole site, and no
+  preflight runs then — so the save is judged by what that moment blocks.
+  A dropped status is named in each would-block line and, when it explains
+  every one, can be confirmed on the screen.
 - **Rollback is one admin action**: untick `page` + `post`, Save — root mode
   off, based entries untouched. `POST_SHIELD_DISABLED` remains the absolute
   kill switch.
@@ -550,6 +557,10 @@ redirect plugin can answer.
   segment followed by a group or class, `products/(cameras|lenses)` — but that
   none of this can place gets a save warning rather than silently reserving
   nothing.
+- **Root mode** lets a redirect through by the literal path it starts with
+  (an excluded base). A regex redirect with no leading literal
+  (`^(.*)/amp/?$`) or not anchored at the start matches addresses no
+  excluded base can stand for: the save warns about each one.
 - A **blocked section** answers its base and everything under it before any
   reserved slug is looked at, so nothing can let a redirect under it through.
   A save warns about every redirect at or under a blocked section's base (and

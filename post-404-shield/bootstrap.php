@@ -547,6 +547,7 @@ if ( defined( 'WP_CLI' ) && WP_CLI && class_exists( '\WP_CLI' ) ) {
 							'force_preflight'   => ! empty( $assoc_args['force'] ),
 							'allow_status_drop' => ! empty( $assoc_args['force'] ),
 							'shows_warnings'    => true,
+							'root_off_reason'   => 'a revision with it switched off was restored',
 						]
 					);
 					if ( ! $result['ok'] ) {

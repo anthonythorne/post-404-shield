@@ -1009,7 +1009,7 @@ class ConfigStore {
 					continue;
 				}
 				foreach ( $rules as $pattern ) {
-					$pattern = ltrim( $pattern, '^' );
+					$pattern = ltrim( \Post404Shield\unescape_slashes( $pattern ), '^' );
 					if ( 0 !== strpos( $pattern, $base . '/' ) ) {
 						continue;
 					}
@@ -1066,16 +1066,26 @@ class ConfigStore {
 	private function redirects_below_bases( array $entries, string $locale_pattern ): array {
 		$based   = $this->enabled_bases( $entries, 'allowlist' );
 		$blocked = $this->enabled_bases( $entries, 'block' );
+		$root_on = false;
+		foreach ( $entries as $settings ) {
+			$root_on = $root_on || ( is_array( $settings ) && true === ( $settings['root'] ?? false )
+				&& ( ! isset( $settings['enabled'] ) || false !== $settings['enabled'] ) );
+		}
 
 		$out = [];
 		foreach ( $this->redirect_sources() as $source ) {
 			// A regex not anchored at the start matches anywhere in the path.
-			$anchored = ! $source['regex'] || 0 === strpos( ltrim( (string) $source['pattern'] ), '^' );
+			$anchored  = ! $source['regex'] || 0 === strpos( ltrim( (string) $source['pattern'] ), '^' );
+			$root_miss = false;
 			foreach ( \Post404Shield\redirect_source_variants( $source['pattern'], $source['regex'], $locale_pattern ) as $variant ) {
 				$placed   = [];
 				$consumed = 0;
 				$reduced  = trim( rtrim( strtolower( \Post404Shield\redirect_pattern_base( $variant, $source['regex'], $consumed ) ), '*' ), '/' );
 				$goes_on  = '' !== trim( (string) substr( $variant, $consumed ), '/?$' );
+				// Root mode lets a redirect through by the literal path it
+				// starts with (an excluded base): one with none (`^(.*)/amp/?$`),
+				// or matching anywhere (unanchored), cannot be let through.
+				$root_miss = $root_miss || ( $root_on && $source['regex'] && ( ! $anchored || ( '' === $reduced && $goes_on ) ) );
 				foreach ( $based as $key => $bases ) {
 					foreach ( $bases as $base ) {
 						if ( '' !== $reduced && 0 === strpos( $reduced . '/', $base . '/' ) ) {
@@ -1124,15 +1134,17 @@ class ConfigStore {
 				}
 				$this->warn_blocked_redirect( $source, $variant, $reduced, $goes_on, $anchored, $blocked );
 			}
+			if ( $root_miss ) {
+				$this->derivation_warnings[] = sprintf(
+					/* translators: %s: the redirect source. */
+					__( 'Root mode: the redirect "%s" does not start with a literal path, so no excluded base can stand for it, and the shield may answer the addresses it matches before the redirect can. Start its pattern with the path it redirects from, add those addresses to the Pages & posts reserved slugs, or move it to the edge.', 'post-404-shield' ),
+					(string) $source['pattern']
+				);
+			}
 		}
 		// Contains / ends-with redirects match anywhere in a URL: nothing can
 		// be reserved for them. Say so when one names a shielded base, or in
 		// root mode, where every address is the shield's.
-		$root_on = false;
-		foreach ( $entries as $settings ) {
-			$root_on = $root_on || ( is_array( $settings ) && true === ( $settings['root'] ?? false )
-				&& ( ! isset( $settings['enabled'] ) || false !== $settings['enabled'] ) );
-		}
 		foreach ( $this->unmappable_redirects as $source ) {
 			$text  = strtolower( (string) $source['pattern'] );
 			$named = '';
@@ -1992,7 +2004,9 @@ class ConfigStore {
 	 *                                           write's are;
 	 *                                           `allow_status_drop` => true lets a save drop a status whose
 	 *                                           posts are live (the settings screen's confirmation);
-	 *                                           `persist_keep` => int stores that retention under the lock.
+	 *                                           `persist_keep` => int stores that retention under the lock;
+	 *                                           `root_off_reason` => string says why, when the write leaves
+	 *                                           every root entry switched off (the kept-settings notice).
 	 *
 	 * @return array{ok: bool, errors: string[], warnings: string[], stale?: bool, retry?: bool} `retry` marks
 	 *         a refusal that says nothing about the config (a busy or lost lock, a failed read).
@@ -2213,9 +2227,25 @@ class ConfigStore {
 				update_option( self::PREFLIGHT_ACCEPTED_OPTION, $accepted_after, false );
 			}
 			// Root matching is on again — by a save, a restore or the CLI — so
-			// the "switched off automatically" state is over.
+			// the "switched off" state is over. Root entries that are all off
+			// (Disable shield, a restored revision, a CLI write) are kept, as an
+			// automatic switch-off keeps them: the next save from another tab
+			// must not delete them (revalidate_root() records its own reason).
 			if ( $this->has_enabled_root_entries( $config['entries'] ) ) {
 				delete_option( self::ROOT_OFF_OPTION );
+			} elseif ( [] !== array_filter( (array) $config['entries'], static fn( $entry ) => is_array( $entry ) && true === ( $entry['root'] ?? false ) )
+				&& ! is_array( get_option( self::ROOT_OFF_OPTION ) )
+			) {
+				update_option(
+					self::ROOT_OFF_OPTION,
+					[
+						'at'     => gmdate( 'c' ),
+						'by'     => 'operator',
+						'reason' => (string) ( $flags['root_off_reason'] ?? __( 'a save switched it off', 'post-404-shield' ) ),
+						'errors' => [],
+					],
+					false
+				);
 			}
 			if ( null !== $redirect_fp ) {
 				update_option( self::REDIRECT_FP_OPTION, $redirect_fp, false );
@@ -2478,15 +2508,15 @@ class ConfigStore {
 				/* translators: 1: entry name, 2: the URL base its posts really use. */
 				: sprintf( __( 'Coverage check FAILED but the save was FORCED: none of %1$s\'s real URLs sit under its URL bases; they live under /%2$s/.', 'post-404-shield' ), $name( $entry_key ), (string) $home );
 		}
-		if ( (int) ( $coverage['checked'] ?? 0 ) > 0 && [] === $unclaimed && [] === $dropped ) {
-			if ( [] === $breaks ) {
-				/* translators: %d: number of real URLs checked. */
-				$warnings[]     = sprintf( __( 'Coverage check passed — %d real URLs of the changed post types still resolve.', 'post-404-shield' ), (int) $coverage['checked'] );
-				$this->passes[] = end( $warnings );
-			} else {
-				/* translators: %d: number of real URLs the forced save breaks. */
-				$warnings[] = sprintf( __( 'Coverage check reported %d broken real URL(s) but the save was FORCED.', 'post-404-shield' ), count( $breaks ) );
-			}
+		// Forced over broken URLs: said whatever else the save confirmed or
+		// forced. Only a clean check is a pass.
+		if ( [] !== $breaks ) {
+			/* translators: %d: number of real URLs the forced save breaks. */
+			$warnings[] = sprintf( __( 'Coverage check reported %d broken real URL(s) but the save was FORCED.', 'post-404-shield' ), count( $breaks ) );
+		} elseif ( (int) ( $coverage['checked'] ?? 0 ) > 0 && [] === $unclaimed && [] === $dropped ) {
+			/* translators: %d: number of real URLs checked. */
+			$warnings[]     = sprintf( __( 'Coverage check passed — %d real URLs of the changed post types still resolve.', 'post-404-shield' ), (int) $coverage['checked'] );
+			$this->passes[] = end( $warnings );
 		}
 		return null;
 	}
@@ -3123,7 +3153,9 @@ class ConfigStore {
 	 * Callers: the permalink settings hooks (at shutdown) and the daily
 	 * health check.
 	 *
-	 * @param string $reason Why it ran, for the log and the notice.
+	 * @param string $reason What triggered it (the permalink settings changed,
+	 *                       the daily health check), for the revision label,
+	 *                       the log and the notice.
 	 *
 	 * @return bool True when root mode was switched off.
 	 */
@@ -3156,9 +3188,11 @@ class ConfigStore {
 			// Automatic: an error the live artifact already carries does not
 			// hold it back, a new one does (a moved base still meets the
 			// coverage gate), and with no live artifact nothing is published.
+			// Say what the write does: the Posts entry followed the structure,
+			// or only the snapshot (a new redirect, a plugin's route) moved.
 			$result = $this->write(
 				$candidate,
-				'auto: config follows the permalink settings — ' . $reason,
+				( $candidate === $option ? 'auto: snapshot refreshed — ' : 'auto: the Posts entry follows the permalink settings — ' ) . $reason,
 				[
 					'expect_revision' => $this->revision_of( $option ),
 					'fail_open'       => true,
@@ -3356,14 +3390,18 @@ class ConfigStore {
 
 	/**
 	 * A config with its enabled based `post` entry switched off (settings
-	 * kept) when the permalink structure gives posts no fixed shape.
+	 * kept) when the permalink structure gives posts no fixed shape, or no
+	 * base at all (`/%postname%/`): posts then live at the root, and an entry
+	 * still claiming the old base would 404 the pages WordPress now serves
+	 * under it.
 	 *
 	 * @param array<string, mixed> $config Config document.
 	 *
 	 * @return array<string, mixed>
 	 */
 	private function with_unservable_post_disabled( array $config ): array {
-		if ( $this->post_base_info()['supported'] ) {
+		$info = $this->post_base_info();
+		if ( $info['supported'] && '' !== $info['base'] ) {
 			return $config;
 		}
 		foreach ( (array) ( $config['entries'] ?? [] ) as $key => $entry ) {

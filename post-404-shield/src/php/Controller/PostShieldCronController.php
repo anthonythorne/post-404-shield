@@ -277,7 +277,7 @@ class PostShieldCronController {
 		// runs regardless of POST_SHIELD_DISABLED, exactly as it does on
 		// admin_init; the loader ignores the artifact while disabled anyway.
 		$this->store->self_heal();
-		$this->store->revalidate_root( 'the daily health check found root mode no longer valid' );
+		$this->store->revalidate_root( 'the daily health check' );
 
 		if ( defined( 'POST_SHIELD_DISABLED' ) && POST_SHIELD_DISABLED ) {
 			return;

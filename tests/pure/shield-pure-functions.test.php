@@ -108,6 +108,9 @@ check( 'schema-preview', Post404Shield\rewrite_pattern_base( 'schema-preview(/(.
 check( 'schema-preview', Post404Shield\rewrite_pattern_base( '^schema-preview(/(.*))?/?$' ), 'rewrite: leading caret stripped' );
 check( 'category', Post404Shield\rewrite_pattern_base( 'category/(.+?)/schema-preview/?$' ), 'rewrite: literal first segment before slash' );
 check( 'robots.txt', Post404Shield\rewrite_pattern_base( 'robots\.txt$' ), 'rewrite: escaped dot = literal file route' );
+check( 'my-route', Post404Shield\rewrite_pattern_base( 'my-route\/([0-9]+)\/?$' ), 'rewrite: escaped slash = separator' );
+check( 'api', Post404Shield\rewrite_pattern_base( '^api\/v1\/(.*)' ), 'rewrite: escaped slash ends the leading segment' );
+check( [ 'news', 'tips' ], Post404Shield\rewrite_pattern_literal_group( '(news|tips)\/?$' ), 'rewrite: literal group before an escaped slash' );
 check( 'index.php', Post404Shield\rewrite_pattern_base( 'index\.php/foo' ), 'rewrite: escaped-dot core route' );
 check( 'sitemap_index.xml', Post404Shield\rewrite_pattern_base( 'sitemap_index\.xml$' ), 'rewrite: underscore + escaped dot' );
 check( 'amp', Post404Shield\rewrite_pattern_base( 'amp/?$' ), 'rewrite: AMP endpoint' );
