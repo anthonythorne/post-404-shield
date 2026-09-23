@@ -44,6 +44,32 @@ class AllowlistBuilder {
 	}
 
 	/**
+	 * Number of slugs in an allowlist file's raw contents.
+	 *
+	 * Counts the non-blank lines after the guard line. Counting newlines is
+	 * wrong at exactly the case that matters: an empty list is written as
+	 * `guard\n\n` (the guard, an empty implode, the trailing newline), which a
+	 * newline count reports as one slug — hiding the empty allowlist an admin
+	 * checks for after a rebuild, since an empty list makes the type fail open.
+	 *
+	 * @param string $raw File contents, guard line included.
+	 *
+	 * @return int
+	 */
+	public static function count_entries( string $raw ): int {
+		$lines = explode( "\n", $raw );
+		array_shift( $lines );
+
+		$count = 0;
+		foreach ( $lines as $line ) {
+			if ( '' !== trim( $line ) ) {
+				++$count;
+			}
+		}
+		return $count;
+	}
+
+	/**
 	 * Directory name of the root-extras union member (attachment URIs + old
 	 * slugs) — NOT a post type; built only while root mode is active.
 	 */

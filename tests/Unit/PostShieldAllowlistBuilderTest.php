@@ -186,6 +186,39 @@ class PostShieldAllowlistBuilderTest extends TestCase {
 	}
 
 	/**
+	 * The count reports the slugs the real writer put in the file —
+	 * including zero for an empty list, which a newline count reported as one.
+	 *
+	 * @return void
+	 */
+	public function test_count_entries_matches_what_the_writer_wrote() {
+		$builder = new AllowlistBuilder( [] );
+		$file    = $this->work_dir . '/post-404-shield/member/allowlist.php';
+
+		$builder->write_allowlist_atomically( [], $file );
+		$this->assertSame( 0, AllowlistBuilder::count_entries( (string) file_get_contents( $file ) ), 'Empty list is 0, not 1.' );
+
+		$builder->write_allowlist_atomically( [ 'jane-doe' => true ], $file );
+		$this->assertSame( 1, AllowlistBuilder::count_entries( (string) file_get_contents( $file ) ) );
+
+		$builder->write_allowlist_atomically(
+			[
+				'jane-doe'    => true,
+				'eric-bouvet' => true,
+				'ana-ruiz'    => true,
+			],
+			$file
+		);
+		$this->assertSame( 3, AllowlistBuilder::count_entries( (string) file_get_contents( $file ) ) );
+
+		// The fast-path append keeps the count exact too.
+		$builder->append_slug_to_file( $file, 'li-wei' );
+		$this->assertSame( 4, AllowlistBuilder::count_entries( (string) file_get_contents( $file ) ) );
+
+		$this->assertSame( 0, AllowlistBuilder::count_entries( '' ), 'No guard, no content.' );
+	}
+
+	/**
 	 * is_shielding_status() reflects the type's post_status config (default
 	 * `publish`), driving when the sync controller fast-appends a slug.
 	 *

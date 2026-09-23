@@ -1632,8 +1632,8 @@ class PostShieldAdminController {
 		if ( false === $raw ) {
 			return [ '—', __( 'unreadable', 'post-404-shield' ) ];
 		}
-		// Guard line + one slug per line; duplicates count until the nightly rebuild.
-		$entries = max( 0, substr_count( $raw, "\n" ) - 1 );
+		// Duplicates count until the nightly rebuild.
+		$entries = \Post404Shield\Library\AllowlistBuilder::count_entries( $raw );
 
 		/* translators: %s: human-readable time difference. */
 		return [ (string) $entries, sprintf( __( '%s ago', 'post-404-shield' ), human_time_diff( (int) filemtime( $file ) ) ) ];
