@@ -776,12 +776,26 @@
 								__('Shielded', 'post-404-shield')
 							)
 						: null,
+					// Based rows keep their settings when switched off; root rows
+					// do not. Saving an unticked root row REMOVES the entry,
+					// reserved slugs included (root on/off is a whole-set
+					// decision, see config_from_request()), so say so before the
+					// save rather than promise something the server won't keep.
 					!type.enabled && type.hasEntry
-						? el(
-								Badge,
-								null,
-								__('Off — settings kept', 'post-404-shield')
-							)
+						? type.root
+							? el(
+									Badge,
+									{ tone: 'warning' },
+									__(
+										'Off — removed when you save',
+										'post-404-shield'
+									)
+								)
+							: el(
+									Badge,
+									null,
+									__('Off — settings kept', 'post-404-shield')
+								)
 						: null,
 					el(
 						'span',
