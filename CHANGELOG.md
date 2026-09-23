@@ -155,6 +155,30 @@ Moved out of the sites that used it into its own repository.
 - Old-slug appends mirror core (published only); an append during a rebuild
   re-checks every line; a save no longer evicts site-wide option caches; a
   move walks the type's family once.
+- Statuses: a row starts with Published only (another status is listed on
+  purpose, since listing it lets anyone confirm its slugs exist, and a site may
+  hide it); every row flags public statuses its posts are in but it leaves out,
+  in wording that no longer assumes WordPress serves them; a save that newly
+  lists a status warns; a refusal over a dropped status can be confirmed on the
+  screen (CLI `--force` as before).
+- Redirect derivation (version 5): an unanchored optional separator (`old/?`)
+  is a prefix; redirects whose literal stops above a multi-segment base, and
+  unanchored regexes naming a base, warn; derived slugs that changed, from any
+  cause, make the snapshot stale; readers need their plugin active; warnings
+  from automatic writes are logged and kept on the settings screen until the
+  next save.
+- Full-path lists keep renamed media's old pages; media of a post that goes
+  live in its type's statuses are appended; root-extras is rebuilt again after
+  a root-enabling swap; a mid-stream read failure is a retry.
+- The root preflight measures against the live artifact; writes are refused
+  when the loader's shape check would reject them; hooks contain failed reads;
+  restores, Disable shield and discarding root settings check the revision;
+  same_document() is type-strict; a hook fires just before the save lock.
+- Tests: the pre-boot loader (non-canonical paths, half deploys) and the append
+  lock protocol run in child processes.
+- A logged-in preview (`?preview=` with the login cookie) goes to WordPress, so
+  a post in an unlisted public status (a pre-launch one) can be previewed at
+  its own address.
 
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing

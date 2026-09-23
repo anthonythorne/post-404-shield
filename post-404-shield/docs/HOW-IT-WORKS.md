@@ -123,6 +123,13 @@ a backslash — is never judged: a cache that normalises paths stores the
 response under the canonical URL it resolves to while PHP sees the raw one, so
 a shield 404 there would poison the real page. WordPress answers it instead.
 
+A logged-in preview is never judged either: a request carrying the
+`wordpress_logged_in_` cookie and `preview=` in its query goes to WordPress,
+which decides who may see the post. A post in a public custom status (a
+pre-launch "embargoed" one) previews at its own address plus `?preview=true`,
+and the shield often does not list its slug. Without the cookie the same
+request is shielded as usual.
+
 For `/{locale}/{base}/{slug}[/extra…]` — where the `{locale}` prefix segment is
 defined by the config's **locale option** (`wpml-directory` here: `xx-xx` or
 `global`, and the prefix is REQUIRED; a bare `/{base}/…` falls through to

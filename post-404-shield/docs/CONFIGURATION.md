@@ -479,15 +479,16 @@ support/compatibility/accessories
 ```
 
 **Include a non-standard public status** (e.g. discontinued products): tick
-`discontinued` in the type's *Shielded post statuses*. A new row starts with
-every status the type's posts are in that WordPress serves at their address.
-A row whose posts are in a public status it does not tick says so, and so do
-the save and the daily health check: WordPress serves those posts to anyone,
-and the shield answers them with a 404. It is a warning, not a refusal — a
-status registered public but meant to hide pre-launch content (an "embargoed"
-workflow status) would be published by ticking it; register such a status as
-private instead. Dropping a status the entry did list is refused while posts
-are in it.
+`discontinued` in the type's *Shielded post statuses*. A row starts with
+Published only: listing another status lets anyone confirm its posts' slugs
+exist (`allowed-known-slug`), and a site may hide posts in a status it
+registers public (a pre-launch "embargoed" status stripped from queries), so
+each is ticked on purpose — the save warns when one is newly listed. A row
+whose posts are in a public status it does not tick says so, and so do the
+save and the daily health check: the shield answers those posts with a 404,
+which is right only if the site hides them. Dropping a status the entry did
+list is refused while posts are in it; the settings screen then offers to
+drop it anyway (CLI: `--force`).
 
 **Reserve a page that lives under a CPT base**: add the slug to the type's
 *Reserved slugs*, and remember the shield is only half of it — WordPress needs
