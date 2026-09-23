@@ -328,9 +328,9 @@ class PostShieldCronController {
 	}
 	/**
 	 * Log each shielded type whose posts are in a public status its entry
-	 * does not list: WordPress serves them to anyone, the shield 404s them.
-	 * Logged, not changed — listing one can publish what a site relies on
-	 * the shield to hide.
+	 * does not list: the shield 404s them, which is right only if the site
+	 * hides them. Logged, not changed — a site may register a status public
+	 * and hide its posts itself.
 	 *
 	 * @param array<string, mixed> $entries Live entries.
 	 *
@@ -347,7 +347,7 @@ class PostShieldCronController {
 				}
 			}
 			if ( [] !== $unlisted ) {
-				error_log( '[post-404-shield] health: ' . $type . ' has posts in public statuses its entry does not list, answered with a 404: ' . implode( ', ', $unlisted ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+				error_log( '[post-404-shield] health: ' . $type . ' has posts in public statuses its entry does not list (a 404 from the shield, which is only right if the site hides them): ' . implode( ', ', $unlisted ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			}
 		}
 	}

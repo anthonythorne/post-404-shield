@@ -355,8 +355,8 @@
 	// ── Post type rows ─────────────────────────────────────────────────────
 
 	function StatusChecklist({ type, onChange }) {
-		// Public statuses the type's posts are in that are still unticked:
-		// WordPress serves those posts to anyone, and the shield 404s them.
+		// Public statuses the type's posts are in that are still unticked: the
+		// shield 404s those posts, which is right only if the site hides them.
 		const unticked = (type.unlisted || []).filter(
 			(u) => !type.statuses.includes(u.status)
 		);
@@ -376,7 +376,7 @@
 								sprintf(
 									/* translators: 1: post status label, 2: number of posts. */
 									__(
-										'WordPress serves the %2$d posts in "%1$s" to anyone, but they are not ticked, so the shield answers them with a 404. Tick it — unless the site relies on the shield to hide them; then register the status as private instead.',
+										'%2$d posts are in the public status "%1$s", which is not ticked, so the shield answers them with a 404. If the site shows them to visitors, tick it; if it hides them (a pre-launch status), leave it unticked — ticking lets anyone confirm their addresses exist.',
 										'post-404-shield'
 									),
 									u.label,
@@ -1895,7 +1895,14 @@
 
 	// ── The app ────────────────────────────────────────────────────────────
 
-	function HiddenFields({ site, types, blocks, operator, rootConfirm }) {
+	function HiddenFields({
+		site,
+		types,
+		blocks,
+		operator,
+		rootConfirm,
+		statusConfirm,
+	}) {
 		const inputs = [
 			el(Hidden, {
 				key: 'action',
@@ -1941,6 +1948,15 @@
 				el(Hidden, {
 					key: 'confirm',
 					name: 'ps_root_confirm',
+					value: '1',
+				})
+			);
+		}
+		if (statusConfirm) {
+			inputs.push(
+				el(Hidden, {
+					key: 'status-confirm',
+					name: 'ps_status_confirm',
 					value: '1',
 				})
 			);
@@ -2090,6 +2106,11 @@
 		const [rootConfirm, setRootConfirm] = useState(
 			Boolean(data.form.rootConfirm)
 		);
+		// Offered after a save refused only for dropping a status its posts
+		// are in: the operator can confirm the drop on purpose.
+		const [statusConfirm, setStatusConfirm] = useState(
+			Boolean(data.form.statusConfirm)
+		);
 		// A rejected save re-renders the operator's input: still unsaved.
 		const [dirty, setDirty] = useState(Boolean(data.form.draft));
 		const [submitting, setSubmitting] = useState(false);
@@ -2204,6 +2225,22 @@
 								},
 								__('Save configuration', 'post-404-shield')
 							),
+							data.form.offerStatusConfirm
+								? el(CheckboxControl, {
+										...MODERN,
+										className:
+											'post-shield-admin__status-confirm',
+										label: __(
+											'Drop the status anyway — its posts listed above get a 404 from the shield',
+											'post-404-shield'
+										),
+										checked: statusConfirm,
+										onChange: (checked) => {
+											touch();
+											setStatusConfirm(checked);
+										},
+									})
+								: null,
 							el(
 								'span',
 								{
@@ -2251,6 +2288,7 @@
 					blocks,
 					operator,
 					rootConfirm,
+					statusConfirm,
 				}),
 				el(
 					TabPanel,

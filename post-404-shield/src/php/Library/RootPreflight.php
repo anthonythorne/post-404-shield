@@ -59,7 +59,7 @@ class RootPreflight {
 
 	/**
 	 * Per root type, the PUBLIC statuses to measure: `publish`, plus every
-	 * registered public status the stored or the candidate config lists for
+	 * registered public status the live or the candidate config lists for
 	 * it — so a save that drops one (an archive status) is measured against
 	 * the posts it would stop serving, as the based coverage gate does.
 	 *
@@ -68,8 +68,16 @@ class RootPreflight {
 	 * @return array<string, string[]> Effective CPT => statuses.
 	 */
 	private function corpus_statuses( array $entries ): array {
-		$stored  = function_exists( 'get_option' ) ? get_option( ConfigStore::OPTION, null ) : null;
-		$sources = [ $entries, is_array( $stored['entries'] ?? null ) ? $stored['entries'] : [] ];
+		// What is LIVE, as the based gate measures: an option edited over
+		// WP-CLI and published with `config write` equals the candidate, so
+		// only the artifact still knows the statuses it is about to drop.
+		$live = function_exists( '\Post404Shield\read_config' ) && function_exists( '\Post404Shield\shield_dir' )
+			? \Post404Shield\read_config( \Post404Shield\shield_dir() . '/config.php' )
+			: null;
+		if ( null === $live && function_exists( 'get_option' ) ) {
+			$live = get_option( ConfigStore::OPTION, null );
+		}
+		$sources = [ $entries, is_array( $live['entries'] ?? null ) ? $live['entries'] : [] ];
 		$out     = [];
 		foreach ( $sources as $source ) {
 			foreach ( $source as $key => $settings ) {
@@ -315,7 +323,7 @@ class RootPreflight {
 		}
 
 		// The probe corpus's root-type lines come from live content in every
-		// PUBLIC status the stored or the candidate config lists for the type —
+		// PUBLIC status the live or the candidate config lists for the type —
 		// a misconfigured entry (a status dropped, a wrong match) must shrink
 		// the allowlist it is measured AGAINST, never the corpus it is measured
 		// WITH. Private posts are root-extras lines, measured there.

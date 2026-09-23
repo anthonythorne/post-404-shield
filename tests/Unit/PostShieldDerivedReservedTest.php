@@ -41,8 +41,8 @@ class PostShieldDerivedReservedTest extends TestCase {
 	/**
 	 * A store whose redirect read found these sources (and these unmappable ones).
 	 *
-	 * @param array<int, array{pattern: string, regex: bool}>               $sources    Readable sources.
-	 * @param array<int, array{pattern: string, comparison: string}>        $unmappable Contains / ends-with ones.
+	 * @param array<int, array{pattern: string, regex: bool}>        $sources    Readable sources.
+	 * @param array<int, array{pattern: string, comparison: string}> $unmappable Contains / ends-with ones.
 	 *
 	 * @return ConfigStore
 	 */

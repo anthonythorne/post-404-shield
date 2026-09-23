@@ -225,14 +225,15 @@ class PostShieldAdminController {
 		$candidate            = $this->config_from_request();
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
 		$draft = [
-			'document'    => $candidate,
+			'document'      => $candidate,
 			// The blocked-section rows as posted, rejected ones included: the
 			// candidate drops a row it refuses, and a draft without it would
 			// delete the stored entry on the corrected resubmit.
-			'blocks'      => $this->posted_block_rows(),
-			'keep'        => isset( $_POST['ps_keep'] ) ? (string) (int) $_POST['ps_keep'] : (string) ConfigStore::DEFAULT_KEEP,
-			'rootConfirm' => ! empty( $_POST['ps_root_confirm'] ), // phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
-			'revision'    => $revision,
+			'blocks'        => $this->posted_block_rows(),
+			'keep'          => isset( $_POST['ps_keep'] ) ? (string) (int) $_POST['ps_keep'] : (string) ConfigStore::DEFAULT_KEEP,
+			'rootConfirm'   => ! empty( $_POST['ps_root_confirm'] ), // phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
+			'statusConfirm' => ! empty( $_POST['ps_status_confirm'] ), // phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
+			'revision'      => $revision,
 		];
 		if ( [] !== $this->request_errors ) {
 			$this->set_notice( $this->request_errors, [], false, '', $draft );
@@ -274,12 +275,14 @@ class PostShieldAdminController {
 			$candidate,
 			$this->current_user_label(),
 			[
-				'keep'            => $keep,
-				'persist_keep'    => $keep,
-				'expect_revision' => $revision,
+				'keep'              => $keep,
+				'persist_keep'      => $keep,
+				'expect_revision'   => $revision,
+				'allow_status_drop' => ! empty( $draft['statusConfirm'] ),
 			]
 		);
 		if ( ! $result['ok'] ) {
+			$draft['offerStatusConfirm'] = ! empty( $result['status_drop'] );
 			$this->set_notice( $result['errors'], $result['warnings'], false, '', empty( $result['stale'] ) ? $draft : null );
 			$this->redirect_to_page();
 		}
@@ -353,11 +356,13 @@ class PostShieldAdminController {
 			$this->redirect_to_page();
 		}
 
+		// Never over a save that committed after these settings were read.
+		$expect = $this->store->revision_of( $current );
 		foreach ( $current['entries'] as $key => $entry ) {
 			$current['entries'][ $key ]['enabled'] = false;
 		}
 
-		$result = $this->store->write( $current, $this->current_user_label() . ' (disable shield)' );
+		$result = $this->store->write( $current, $this->current_user_label() . ' (disable shield)', [ 'expect_revision' => $expect ] );
 		if ( ! $result['ok'] ) {
 			$this->set_notice( $result['errors'], $result['warnings'], false );
 			$this->redirect_to_page();
@@ -379,12 +384,13 @@ class PostShieldAdminController {
 
 		$current = $this->current_document();
 		if ( null !== $current ) {
+			$expect = $this->store->revision_of( $current );
 			foreach ( (array) ( $current['entries'] ?? [] ) as $key => $entry ) {
 				if ( is_array( $entry ) && true === ( $entry['root'] ?? false ) && false === ( $entry['enabled'] ?? true ) ) {
 					unset( $current['entries'][ $key ] );
 				}
 			}
-			$result = $this->store->write( $current, $this->current_user_label() . ' (discard switched-off root settings)' );
+			$result = $this->store->write( $current, $this->current_user_label() . ' (discard switched-off root settings)', [ 'expect_revision' => $expect ] );
 			if ( ! $result['ok'] ) {
 				$this->set_notice( $result['errors'], $result['warnings'], false );
 				$this->redirect_to_page();
@@ -1215,13 +1221,15 @@ class PostShieldAdminController {
 			'notices'    => $this->notices_state( $notice ),
 			'status'     => $this->status_state( $config ),
 			'form'       => [
-				'site'             => $site,
-				'types'            => $this->types_state( $form_doc, $document ),
-				'blocks'           => null !== $draft && is_array( $draft['blocks'] ?? null ) ? $draft['blocks'] : $this->blocks_state( $form_doc ),
-				'excludedOperator' => implode( "\n", array_filter( (array) ( $form_doc['excluded_bases']['operator'] ?? [] ), 'is_string' ) ),
-				'revision'         => null !== $draft ? (string) ( $draft['revision'] ?? '' ) : $this->store->current_revision(),
-				'draft'            => null !== $draft,
-				'rootConfirm'      => null !== $draft && ! empty( $draft['rootConfirm'] ),
+				'site'               => $site,
+				'types'              => $this->types_state( $form_doc, $document ),
+				'blocks'             => null !== $draft && is_array( $draft['blocks'] ?? null ) ? $draft['blocks'] : $this->blocks_state( $form_doc ),
+				'excludedOperator'   => implode( "\n", array_filter( (array) ( $form_doc['excluded_bases']['operator'] ?? [] ), 'is_string' ) ),
+				'revision'           => null !== $draft ? (string) ( $draft['revision'] ?? '' ) : $this->store->current_revision(),
+				'draft'              => null !== $draft,
+				'rootConfirm'        => null !== $draft && ! empty( $draft['rootConfirm'] ),
+				'statusConfirm'      => null !== $draft && ! empty( $draft['statusConfirm'] ),
+				'offerStatusConfirm' => null !== $draft && ! empty( $draft['offerStatusConfirm'] ),
 			],
 			'statuses'   => $this->statuses_state(),
 			'excluded'   => [
@@ -1278,6 +1286,19 @@ class PostShieldAdminController {
 						admin_url( 'admin-post.php' )
 					),
 				],
+			];
+		}
+		$automatic = get_option( ConfigStore::AUTO_WARNINGS_OPTION );
+		if ( is_array( $automatic ) && [] !== (array) ( $automatic['warnings'] ?? [] ) ) {
+			$notices[] = [
+				'status'  => 'warning',
+				'message' => sprintf(
+					/* translators: 1: what wrote the config, 2: when (ISO 8601). */
+					__( 'An automatic update (%1$s, %2$s) reported the following. It stays here until the settings are saved:', 'post-404-shield' ),
+					(string) ( $automatic['by'] ?? '' ),
+					(string) ( $automatic['at'] ?? '' )
+				),
+				'list'    => array_map( 'strval', (array) $automatic['warnings'] ),
 			];
 		}
 		if ( is_array( $notice ) ) {
@@ -1521,8 +1542,8 @@ class PostShieldAdminController {
 	private function type_state( string $cpt, ?\WP_Post_Type $type_object, ?array $entry, array $seen_bases, ?array $stored = null ): array {
 		$in_use   = AllowlistBuilder::in_use_statuses( $cpt );
 		$unlisted = [];
-		if ( null !== $entry && ( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] ) ) {
-			$listed = array_map( 'strval', (array) ( $entry['post_status'] ?? [ 'publish' ] ) );
+		if ( null === $entry || ! isset( $entry['enabled'] ) || false !== $entry['enabled'] ) {
+			$listed = isset( $entry['post_status'] ) && is_array( $entry['post_status'] ) && [] !== $entry['post_status'] ? array_map( 'strval', $entry['post_status'] ) : [ 'publish' ];
 			foreach ( $in_use as $in_use_status => $posts ) {
 				$object = get_post_status_object( $in_use_status );
 				if ( ! in_array( $in_use_status, $listed, true ) && null !== $object && empty( $object->private ) ) {
@@ -1536,6 +1557,8 @@ class PostShieldAdminController {
 		}
 		$depth_kept = null !== $entry && null !== $stored && 'full-path' === ( $entry['match'] ?? 'slug' ) && 'full-path' !== ( $stored['match'] ?? 'slug' )
 			&& isset( $stored['depth_allowed'] ) && null !== $stored['depth_allowed'];
+		// The same for a new row: its draft keeps the new-row default rule.
+		$depth_new = null !== $entry && null === $stored && 'full-path' === ( $entry['match'] ?? 'slug' ) && ! isset( $entry['depth_allowed'] );
 		// A REAL rewrite base only — never invent one from the type name. Built-in
 		// `page` (and `post` under a bare /%postname%/ structure) has no URL base:
 		// its content lives at the ROOT, shielded by root mode (root-pages v2).
@@ -1614,15 +1637,15 @@ class PostShieldAdminController {
 			// back in the draft restores it rather than saving "unlimited".
 			'depthAllowed'    => isset( $entry['depth_allowed'] ) && null !== $entry['depth_allowed']
 				? (string) (int) $entry['depth_allowed']
-				: ( $depth_kept ? (string) (int) $stored['depth_allowed'] : ( null === $entry ? '0' : '' ) ),
-			'depthAction'     => (string) ( $depth_kept && ! isset( $entry['depth_action'] ) ? $stored['depth_action'] ?? 'passthrough' : ( $entry['depth_action'] ?? ( null === $entry ? 'redirect' : 'passthrough' ) ) ),
-			// A new row starts with every status the type's posts are in that
-			// WordPress serves at their address — what is live today, unshielded.
+				: ( $depth_kept ? (string) (int) $stored['depth_allowed'] : ( null === $entry || $depth_new ? '0' : '' ) ),
+			'depthAction'     => (string) ( $depth_kept && ! isset( $entry['depth_action'] ) ? $stored['depth_action'] ?? 'passthrough' : ( $depth_new ? 'redirect' : ( $entry['depth_action'] ?? ( null === $entry ? 'redirect' : 'passthrough' ) ) ) ),
+			// Published unless the entry says otherwise — the loader's default.
+			// Other statuses are ticked on purpose: listing one lets anyone
+			// confirm its posts' slugs exist, and a site may hide them.
 			'statuses'        => isset( $entry['post_status'] ) && is_array( $entry['post_status'] ) && [] !== $entry['post_status']
 				? array_values( array_map( 'strval', $entry['post_status'] ) )
-				: array_values( array_unique( array_merge( [ 'publish' ], array_keys( $in_use ) ) ) ),
-			// Public statuses the type's posts are in that the entry leaves out:
-			// WordPress serves those posts to anyone, and the shield 404s them.
+				: [ 'publish' ],
+			// Public statuses the type's posts are in that the row leaves out.
 			'unlisted'        => $unlisted,
 			'reserved'        => isset( $entry['reserved_allowlist'] ) && is_array( $entry['reserved_allowlist'] ) ? implode( "\n", $entry['reserved_allowlist'] ) : '',
 			// Derived on save, so a draft carries none yet: the stored ones.

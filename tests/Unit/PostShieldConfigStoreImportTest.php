@@ -188,6 +188,7 @@ class PostShieldConfigStoreImportTest extends TestCase {
 		$history = [
 			3 => 'cca3e5ba921bf138e780eab3d1583dc5', // Round 3; round 4 changed shapes not in this table.
 			4 => '0bc27ca5d83125a18dd4731b02b502f6', // Round 5: escaped slashes, top-level alternation, any locale form.
+			5 => '9c9ff4bbfaebc567185879c94028faf9', // Round 7: an optional separator not end-anchored is a prefix.
 		];
 		$pattern = '[a-z]{2}-[a-z]{2}|global';
 		$table   = [
@@ -218,6 +219,10 @@ class PostShieldConfigStoreImportTest extends TestCase {
 			[ '^(ja-jp)x/news/q', true, [ 'ja-jpx/news/q*' ] ],
 			[ '^(en-us|news)/x', true, [ 'en-us/x*', 'news/x*' ] ],
 			[ '^(.*)/old', true, [ '' ] ],
+			// Version 5: an optional separator not end-anchored is a prefix.
+			[ '^/global/news/old-post/?', true, [ 'news/old-post*' ] ],
+			[ '^/global/news/old-post/?$', true, [ 'news/old-post' ] ],
+			[ '^/news/?(.*)$', true, [ 'news*' ] ],
 		];
 		$out = [];
 		foreach ( $table as [ $source, $regex, $expected ] ) {

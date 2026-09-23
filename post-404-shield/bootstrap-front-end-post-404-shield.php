@@ -95,6 +95,17 @@ define( 'POST_SHIELD_LOADED', true );
 	if ( 0 === strpos( $uri, '//' ) ) {
 		return;
 	}
+	// A logged-in preview goes to WordPress, which decides who may see it: a
+	// post in a public custom status (a pre-launch "embargoed" one) previews
+	// at its own address plus `?preview=true`, and its slug is often one the
+	// shield does not list. A request without the login cookie is shielded as
+	// usual, so a bot adding `?preview=` gains nothing.
+	$cookie_header = $_SERVER['HTTP_COOKIE'] ?? ''; // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- presence check only, never output.
+	if ( is_string( $cookie_header ) && false !== strpos( $cookie_header, 'wordpress_logged_in_' )
+		&& 1 === preg_match( '/(?:^|&)preview=/', (string) parse_url( $uri, PHP_URL_QUERY ) ) // phpcs:ignore WordPress.WP.AlternativeFunctions.parse_url_parse_url -- wp_parse_url() does not exist pre-boot.
+	) {
+		return;
+	}
 	$early_path = parse_url( $uri, PHP_URL_PATH ); // phpcs:ignore WordPress.WP.AlternativeFunctions.parse_url_parse_url -- wp_parse_url() does not exist pre-boot.
 	if ( is_string( $early_path ) ) {
 		$first_segment = explode( '/', ltrim( $early_path, '/' ), 2 )[0];
@@ -314,8 +325,8 @@ define( 'POST_SHIELD_LOADED', true );
 	// otherwise capture a traversal-shaped string.
 	$emit_404 = static function ( string $marker, string $locale, int $ttl = 0, ?int $edge_ttl = null ) use ( $allowlist_dir ): void {
 		// No purge reaches a browser's cached 404: never longer than a day.
-		$max_ttl = defined( 'Post404Shield\\MAX_TTL' ) ? \Post404Shield\MAX_TTL : 86400;
-		$ttl     = min( $ttl, $max_ttl );
+		$max_ttl  = defined( 'Post404Shield\\MAX_TTL' ) ? \Post404Shield\MAX_TTL : 86400;
+		$ttl      = min( $ttl, $max_ttl );
 		$edge_ttl = null === $edge_ttl ? null : min( $edge_ttl, $max_ttl );
 		if ( ! headers_sent() ) {
 			http_response_code( 404 );

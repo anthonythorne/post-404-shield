@@ -205,6 +205,12 @@ function rewrite_pattern_base( string $pattern ): string {
 	for ( $i = 0; $i < $len; $i++ ) {
 		$char = $pattern[ $i ];
 		if ( '/' === $char ) {
+			// An optional separator not followed by the end anchor (`route/?`)
+			// matches `routes` too: a prefix.
+			$next = $pattern[ $i + 1 ] ?? '';
+			if ( ( '?' === $next || '*' === $next ) && '$' !== ltrim( substr( $pattern, $i + 2 ), '?+' ) && '' !== $out ) {
+				return $out . '*';
+			}
 			break; // First path separator ends the leading segment.
 		}
 		if ( '\\' === $char ) {
@@ -339,6 +345,15 @@ function redirect_pattern_base( string $source, bool $is_regex, ?int &$consumed 
 			break;
 		}
 		if ( false !== strpos( $metachars, $char ) ) {
+			// An optional separator (`old-post/?`, `/*`) not followed by the end
+			// anchor matches `old-post-2019` too: the run is a prefix of its
+			// last segment, not the whole segment.
+			if ( $is_regex && in_array( $char, [ '?', '*' ], true ) && '/' === substr( $out, -1 ) && '$' !== ltrim( substr( $source, $i + 1 ), '?+' ) ) {
+				$out = substr( $out, 0, -1 );
+				array_pop( $ends );
+				$truncated = '' !== trim( $out, '/' );
+				break;
+			}
 			// A regex quantifier that can match ZERO times (`?`, `*`, `{0,…}`)
 			// makes the character before it optional: `colou?r` must reduce to
 			// `colo*`, not `colou*`, or `/color…` is never reserved.
@@ -795,6 +810,11 @@ function based_entry_bases_are_valid( array $entry ): bool {
  */
 function config_is_valid( $config ): bool {
 	if ( ! is_array( $config ) || 1 !== ( $config['version'] ?? null ) ) {
+		return false;
+	}
+	// Never looser than the loader's own first check: a document that passed
+	// here but failed that one would publish a shield that never runs.
+	if ( ! config_shape_is_valid( $config ) ) {
 		return false;
 	}
 	if ( ! isset( $config['entries'] ) || ! is_array( $config['entries'] ) ) {

@@ -70,6 +70,13 @@ class AllowlistBuilder {
 	private array $failed_reads = [];
 
 	/**
+	 * Whether the last streamed write stopped at a failed database read.
+	 *
+	 * @var bool
+	 */
+	private bool $stream_read_failed = false;
+
+	/**
 	 * Construct the builder for a set of managed post types.
 	 *
 	 * @param array<string, array<string, mixed>> $config Managed post-type config.
@@ -658,7 +665,8 @@ class AllowlistBuilder {
 
 	/**
 	 * `{post-path}/{media}` lines for the attachments of one type's live
-	 * posts — the address WordPress serves an attachment's page at.
+	 * posts — the address WordPress serves an attachment's page at — and
+	 * `{post-path}/{former-media-slug}` for renamed ones it 301s.
 	 *
 	 * @param string     $post_type  Effective CPT.
 	 * @param string[]   $statuses   The type's statuses (its posts that are live).
@@ -700,9 +708,26 @@ class AllowlistBuilder {
 		);
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		self::assert_query();
-		$parents = $this->uris_for( $post_type, array_values( array_unique( array_map( static fn( $row ) => (int) $row->post_parent, (array) $rows ) ) ) );
+		// A renamed attachment's former slug: WordPress 301s its old page
+		// (`_wp_old_slug`), so the list keeps it the way root-extras does.
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$old = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT pm.meta_value AS post_name, a.post_parent FROM {$wpdb->posts} a
+				 INNER JOIN {$wpdb->posts} parent ON parent.ID = a.post_parent
+				 INNER JOIN {$wpdb->postmeta} pm ON pm.post_id = a.ID AND pm.meta_key = '_wp_old_slug'
+				 WHERE a.post_type = 'attachment' AND a.post_status = 'inherit' AND pm.meta_value <> ''
+				   AND parent.post_type = %s AND parent.post_status IN ($in)
+				   $only",
+				$args
+			)
+		);
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		self::assert_query();
+		$rows    = array_merge( (array) $rows, (array) $old );
+		$parents = $this->uris_for( $post_type, array_values( array_unique( array_map( static fn( $row ) => (int) $row->post_parent, $rows ) ) ) );
 		$lines   = [];
-		foreach ( (array) $rows as $row ) {
+		foreach ( $rows as $row ) {
 			$parent = $parents[ (int) $row->post_parent ] ?? '';
 			if ( '' !== $parent ) {
 				$lines[] = $parent . '/' . (string) $row->post_name;
@@ -1599,6 +1624,12 @@ class AllowlistBuilder {
 			// memory. A duplicate line (an old slug that is also a media name)
 			// is harmless — the loader matches it once.
 			$count = $this->write_lines_atomically( $this->root_extras_stream(), $file );
+			if ( null === $count && $this->stream_read_failed ) {
+				// A failed read, not a failed write: a retry, as rebuild_type() says.
+				$this->failed[ $file ]                       = true;
+				$this->failed_reads[ self::ROOT_EXTRAS_DIR ] = true;
+				return 0;
+			}
 			if ( null === $count ) {
 				$this->failed[ $file ] = true;
 				error_log( '[post-404-shield] rebuild: could not write the allowlist for "root-extras" (' . $file . ') — the previous list stays in place.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
@@ -1856,7 +1887,8 @@ class AllowlistBuilder {
 	 * @return int|null Lines written, or null on failure (the old file stays).
 	 */
 	private function write_lines_atomically( iterable $lines, string $file ): ?int {
-		$dir = dirname( $file );
+		$this->stream_read_failed = false;
+		$dir                      = dirname( $file );
 		if ( ! is_dir( $dir ) && ! wp_mkdir_p( $dir ) ) {
 			return null;
 		}
@@ -1883,7 +1915,8 @@ class AllowlistBuilder {
 		} catch ( \RuntimeException $e ) {
 			// A read failed mid-stream: a truncated list must not go live.
 			error_log( '[post-404-shield] rebuild: ' . $e->getMessage() . ' — the previous list stays in place.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-			$ok = false;
+			$ok                       = false;
+			$this->stream_read_failed = true;
 		}
 		// An empty list is the guard plus an empty line, as the loader expects.
 		if ( $ok && 0 === $count ) {

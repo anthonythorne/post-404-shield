@@ -92,3 +92,15 @@ if ( ! function_exists( '__' ) ) {
 		return $text;
 	}
 }
+
+if ( ! function_exists( 'do_action' ) ) {
+	/**
+	 * No hooks in unit tests.
+	 *
+	 * @param string $hook Hook name.
+	 *
+	 * @return void
+	 */
+	function do_action( string $hook ): void { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- core's signature, nothing hooked.
+	}
+}

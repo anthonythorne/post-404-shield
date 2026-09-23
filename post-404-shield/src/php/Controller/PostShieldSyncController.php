@@ -125,15 +125,15 @@ class PostShieldSyncController {
 		// Fires on any update to a post, including a slug rename. Every type is
 		// hooked and filtered when it fires: a type enabled by a save in another
 		// request while this one runs (a long import) is managed from then on.
-		add_action( 'save_post', [ $this, 'handle_saved_post' ], 10, 1 );
-		add_action( 'transition_post_status', [ $this, 'handle_transition_post_status' ], 10, 3 );
+		add_action( 'save_post', $this->guarded( 'handle_saved_post' ), 10, 1 );
+		add_action( 'transition_post_status', $this->guarded( 'handle_transition_post_status' ), 10, 3 );
 
 		// PublishPress Revisions renames the live post via a direct $wpdb->update()
 		// that bypasses save_post, then fires these — with the live post ID first,
 		// after cleaning the post cache. Harmless no-ops if the plugin is absent.
-		add_action( 'revision_applied', [ $this, 'handle_revision_applied' ], 10, 1 );
-		add_action( 'revision_published', [ $this, 'handle_revision_applied' ], 10, 1 );
-		add_filter( 'revisionary_apply_revision_data', [ $this, 'snapshot_before_revision' ], 10, 3 );
+		add_action( 'revision_applied', $this->guarded( 'handle_revision_applied' ), 10, 1 );
+		add_action( 'revision_published', $this->guarded( 'handle_revision_applied' ), 10, 1 );
+		add_filter( 'revisionary_apply_revision_data', $this->guarded( 'snapshot_before_revision' ), 10, 3 );
 
 		// Root mode only (root-pages v2): attachments join the root union the
 		// instant they upload (S2 — their URLs are real, and status `inherit`
@@ -143,29 +143,51 @@ class PostShieldSyncController {
 		// redirects). Priority 20 on post_updated: after core's
 		// wp_check_for_changed_slugs (12) has stored the meta. Hooked always,
 		// and each handler checks root mode is on when it fires.
-		add_action( 'add_attachment', [ $this, 'handle_attachment' ], 10, 1 );
-		add_action( 'edit_attachment', [ $this, 'handle_attachment' ], 10, 1 );
+		add_action( 'add_attachment', $this->guarded( 'handle_attachment' ), 10, 1 );
+		add_action( 'edit_attachment', $this->guarded( 'handle_attachment' ), 10, 1 );
 		// Attach / Detach in the Media Library re-parents with a direct query.
-		add_action( 'wp_media_attach_action', [ $this, 'handle_media_attach' ], 10, 2 );
-		add_action( 'attachment_updated', [ $this, 'handle_attachment_renamed' ], 10, 3 );
+		add_action( 'wp_media_attach_action', $this->guarded( 'handle_media_attach' ), 10, 2 );
+		add_action( 'attachment_updated', $this->guarded( 'handle_attachment_renamed' ), 10, 3 );
 		// Media on a draft is left out of the union (no public page yet);
 		// it joins the instant its post goes live.
-		add_action( 'transition_post_status', [ $this, 'handle_parent_live' ], 10, 3 );
+		add_action( 'transition_post_status', $this->guarded( 'handle_parent_live' ), 10, 3 );
 
 		// Children whose parent is deleted move up a level without a hook of
 		// their own, and WPML moves every translation when the original moves
 		// (after save_post priority 100) — both change real URLs unseen.
-		add_action( 'before_delete_post', [ $this, 'handle_before_delete' ], 10, 1 );
-		add_action( 'after_delete_post', [ $this, 'handle_after_delete' ], 10, 1 );
-		add_action( 'save_post', [ $this, 'handle_translations_moved' ], 200, 1 );
+		add_action( 'before_delete_post', $this->guarded( 'handle_before_delete' ), 10, 1 );
+		add_action( 'after_delete_post', $this->guarded( 'handle_after_delete' ), 10, 1 );
+		add_action( 'save_post', $this->guarded( 'handle_translations_moved' ), 200, 1 );
 
 		// Every managed type, root or based: core stores the outgoing slug in
 		// `_wp_old_slug` on a rename and 301s it. This was root-only, so on a
 		// based type the old address went straight to a pre-boot 404 until the
 		// nightly rebuild picked the meta up. Priority 20: after core's
 		// wp_check_for_changed_slugs (12) has written it.
-		add_action( 'post_updated', [ $this, 'handle_post_updated' ], 20, 3 );
+		add_action( 'post_updated', $this->guarded( 'handle_post_updated' ), 20, 3 );
 	}
+	/**
+	 * A hook callback that runs a handler and contains a failed database read:
+	 * the builder's reads throw rather than build from "no rows", which suits a
+	 * rebuild but would turn an optional append into a fatal inside an
+	 * editor's save or a cron publish. The append is skipped (the nightly
+	 * rebuild restores the line); a filter's value passes through unchanged.
+	 *
+	 * @param string $method Handler method name.
+	 *
+	 * @return \Closure
+	 */
+	private function guarded( string $method ): \Closure {
+		return function ( ...$args ) use ( $method ) {
+			try {
+				return $this->$method( ...$args );
+			} catch ( \RuntimeException $e ) {
+				error_log( '[post-404-shield] ' . $method . ': ' . $e->getMessage() . ' — skipped; the nightly rebuild restores the list.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+				return $args[0] ?? null;
+			}
+		};
+	}
+
 
 	/**
 	 * A media item was uploaded or edited — append its resolved URI and bare
@@ -235,14 +257,19 @@ class PostShieldSyncController {
 		if ( 'attachment' === $post->post_type ) {
 			return;
 		}
+		// Root-extras lists the media of posts in any served status.
 		$live = $this->builder->attachment_parent_statuses();
-		if ( ! in_array( $new_status, $live, true ) || in_array( $old_status, $live, true ) ) {
-			return;
-		}
-		if ( $this->builder->has_root_entries() ) {
+		if ( $this->builder->has_root_entries() && in_array( $new_status, $live, true ) && ! in_array( $old_status, $live, true ) ) {
 			$this->builder->append_root_extras( $this->builder->attachment_lines( [ (int) $post->ID ] ) );
 		}
-		$this->append_based_media( [ (int) $post->ID ], null );
+		// A full-path type's own list, the media of posts in ITS statuses: a
+		// private post published is live to it, though not to root-extras.
+		$type = $post->post_type;
+		if ( $this->managed( $type ) && 'full-path' === $this->builder->match_for( $type ) && ! $this->builder->is_root_type( $type )
+			&& $this->builder->is_shielding_status( $type, $new_status ) && ! $this->builder->is_shielding_status( $type, $old_status )
+		) {
+			$this->append_based_media( [ (int) $post->ID ], null );
+		}
 	}
 
 	/**
@@ -577,6 +604,8 @@ class PostShieldSyncController {
 		if ( ! is_string( $post_type ) || ! $this->managed( $post_type ) ) {
 			return;
 		}
+		// The revision rewrote the post with a query no hook saw.
+		unset( $this->family[ $post_type ] );
 		// Addresses the revision moved (its slug applied with a direct
 		// query, so post_updated never saw it): kept like any move.
 		if ( isset( $this->before_revision[ $post_id ] ) ) {
