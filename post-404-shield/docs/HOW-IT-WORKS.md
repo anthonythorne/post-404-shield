@@ -115,6 +115,11 @@ daily health) run only in wp-admin, on a cron run or under WP-CLI.
 
 ## A request's journey
 
+A path that is not in canonical form — a `.` or `..` segment, a percent escape,
+a backslash — is never judged: a cache that normalises paths stores the
+response under the canonical URL it resolves to while PHP sees the raw one, so
+a shield 404 there would poison the real page. WordPress answers it instead.
+
 For `/{locale}/{base}/{slug}[/extra…]` — where the `{locale}` prefix segment is
 defined by the config's **locale option** (`wpml-directory` here: `xx-xx` or
 `global`, and the prefix is REQUIRED; a bare `/{base}/…` falls through to
@@ -210,7 +215,10 @@ the attachment's URI + slug to root-extras (`add_attachment` /
 `edit_attachment`) when its post is live, a post going live adds its media, and
 a root-type slug/parent change appends the OLD address (bare + in both parent
 contexts) so WordPress keeps serving its 301 (`post_updated`, after core stores
-`_wp_old_slug`). An append skips lines already listed, and it and a rebuild take
+`_wp_old_slug`). A hierarchical post that moves — core keeps no old slug for
+it, but WordPress's 404 guess still 301s the old address — has its former
+address, and its live descendants', kept in `_post_shield_old_uri` meta, which
+the rebuild reads too. An append skips lines already listed, and it and a rebuild take
 the same per-list lock (`.lock` in the list's directory) from the rebuild's
 SELECT to its rename — so an append can never land on a file the rename then
 replaces, and concurrent publishes, including many translations sharing a slug,

@@ -75,6 +75,24 @@ Moved out of the sites that used it into its own repository.
   `/login`, `/admin` and `/dashboard`.
 - The list lock gives up at once where the filesystem cannot lock, and a
   content-only save no longer waits on it.
+- Permalink changes are re-checked again a minute later, once the rules are
+  flushed; the snapshot's staleness covers the floor and endpoints too; a based
+  Posts entry beside root Pages no longer blocks the switch-off; the
+  "switched off automatically" state ends with any write that turns root on,
+  and its kept settings can be discarded.
+- Reserved slugs are also derived from WordPress's routes under a base
+  (archives, `with_front` types, date archives at the front); redirect
+  derivation re-runs on existing sites (version 3).
+- A path with `.`/`..` segments, a percent escape or a backslash is left to
+  WordPress (no cacheable shield answer under a normalised URL); depth
+  decisions ignore non-canonical segments; the deep-path 301 is cached briefly.
+- Moved hierarchical posts keep their former addresses (`_post_shield_old_uri`);
+  private root pages, re-attached media and media of deleted posts are appended
+  at once; the first append to an empty list is read as a list.
+- The stale-form check reads the option fresh under the lock, and the nightly
+  redirect sync and permalink re-check use it too.
+- A cache time over a day saves with a warning and is capped when served (an
+  older artifact keeps working).
 
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing

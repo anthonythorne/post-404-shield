@@ -148,8 +148,8 @@ Notes on the shape:
 | `depth_action` | string | `'passthrough'` | What a too-deep URL under a **real** slug does: `passthrough`, `404`, or `redirect` (301 to the truncation). |
 | `post_type` | string\|null | *(the entry key)* | The registered CPT this entry queries; `null` for `mode: block`. An unregistered CPT is a save-time **warning** (not a block) and is flagged on the page — never a silent empty allowlist. |
 | `mode` | string | `'allowlist'` | `'block'` marks a base with **no real content at all**: the bare base and anything under it, at any depth, gets the themed pre-boot 404 (`blocked-denied-base`). Loader-only — no allowlist, no hooks, no rebuilds. |
-| `cache_ttl` | int\|null | *(per-outcome default)* | Seconds a pre-boot 404 from this entry may be cached (origin `s-maxage` + browser/CDN `max-age` unless `edge_ttl` splits them). Defaults: **60s** allowlist entries, **3600s** blocks. `0` = `no-store`. At most **86400** (a day): no purge reaches a browser's cached 404. Global overrides: `POST_SHIELD_404_TTL`, `POST_SHIELD_BLOCKED_BASE_TTL`. |
-| `edge_ttl` | int\|null | *(none)* | **Publishable outcomes only.** Caps the CDN edge via `CDN-Cache-Control` — the only TTL that actually reaches the wire on WPE prod. At most **86400**. Global override: `POST_SHIELD_404_EDGE_TTL`. See [Caching & invalidation](#caching--invalidation). |
+| `cache_ttl` | int\|null | *(per-outcome default)* | Seconds a pre-boot 404 from this entry may be cached (origin `s-maxage` + browser/CDN `max-age` unless `edge_ttl` splits them). Defaults: **60s** allowlist entries, **3600s** blocks. `0` = `no-store`. At most **86400** (a day) is served — a longer value saves with a warning and is capped: no purge reaches a browser's cached 404. Global overrides: `POST_SHIELD_404_TTL`, `POST_SHIELD_BLOCKED_BASE_TTL`. |
+| `edge_ttl` | int\|null | *(none)* | **Publishable outcomes only.** Caps the CDN edge via `CDN-Cache-Control` — the only TTL that actually reaches the wire on WPE prod. Capped at **86400** likewise. Global override: `POST_SHIELD_404_EDGE_TTL`. See [Caching & invalidation](#caching--invalidation). |
 
 ## The locale option
 
@@ -503,6 +503,11 @@ redirect plugin can answer.
 - Stored per entry as `reserved_derived`, **separate from** the operator's
   `reserved_allowlist`, so a rebuild replaces the derived bucket wholesale and
   can never clobber a hand-typed slug.
+- The same bucket takes **WordPress's own routes** under a base: every rewrite
+  rule that starts `{base}/{literal}` — a category, tag or author archive and
+  any `with_front` post type under a front like `/blog/`, an archive's
+  pagination or feed — reserves that literal. An entry whose base is the
+  permalink front also passes digit-led segments (the date archives).
 - Shown read-only under each type's Reserved slugs box. Do not copy them into
   that box — they are maintained for you.
 - An **exact** source yields an exact slug. A **regex or starts-with** source
@@ -597,10 +602,13 @@ current rewrite slugs for exactly this reason. Structural caveats:
   the structure has no fixed base), and with root mode on the option is
   re-saved — re-snapshotting the excluded bases and re-running the preflight —
   or, when root mode no longer fits or that save fails, root matching is
-  switched off with a notice. The daily health check does the same. A
-  plugin's rewrite routes changing (activated, deactivated) is only caught by
-  the health check; the root-mode tile flags the stale snapshot meanwhile,
-  and a re-save fixes it.
+  switched off with a notice. A minute later a follow-up runs from cron —
+  the saving request still holds the old rewrite rules and no endpoints, so
+  only then is the snapshot true. The daily health check does the same; a
+  plugin's rewrite routes changing (activated, deactivated) is caught there,
+  and the root-mode tile flags the stale snapshot meanwhile. When root mode
+  was switched off and will not come back, the notice's **Discard the kept
+  root settings** removes them.
 - **Root mode: unticking one root type is refused** (the S1 together-rule) —
   root mode is all root-dwellers or none. Untick both to switch it off.
 - **A pre-root revision restores cleanly**: restore re-runs the save pipeline,
