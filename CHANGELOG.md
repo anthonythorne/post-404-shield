@@ -59,6 +59,22 @@ Moved out of the sites that used it into its own repository.
 - A redirect source deeper than one segment reserves its first segment, so its
   301 fires; the bake refuses the shield's own probe 404; `import-legacy` needs
   a path.
+- Permalink settings are followed: a based Posts entry takes the new post base
+  (or switches off when there is none), and root mode re-snapshots or switches
+  off — on the structure, category or tag base changing, and daily.
+- Saves: the stale-form check runs under the save lock and covers retention; a
+  refused save leaves no rebuilt list behind; lists that became full-path are
+  rebuilt again after the swap; a blocked section over real content is refused;
+  cache times are capped at a day; entries sharing a post type must share its
+  matching; a rejected save keeps its blocked-section rows.
+- Allowlists: draft, pending and scheduled statuses are ignored (never served
+  at their address); the coverage gate replays private posts; children moved
+  by a deleted parent or by WPML's parent sync, and the media of a moved post,
+  are appended at once; regex redirects with `\d`-style escapes or no end
+  anchor reduce to prefixes; root mode passes `/rss2/`-style feeds and core's
+  `/login`, `/admin` and `/dashboard`.
+- The list lock gives up at once where the filesystem cannot lock, and a
+  content-only save no longer waits on it.
 
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing

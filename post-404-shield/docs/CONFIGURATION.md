@@ -148,8 +148,8 @@ Notes on the shape:
 | `depth_action` | string | `'passthrough'` | What a too-deep URL under a **real** slug does: `passthrough`, `404`, or `redirect` (301 to the truncation). |
 | `post_type` | string\|null | *(the entry key)* | The registered CPT this entry queries; `null` for `mode: block`. An unregistered CPT is a save-time **warning** (not a block) and is flagged on the page — never a silent empty allowlist. |
 | `mode` | string | `'allowlist'` | `'block'` marks a base with **no real content at all**: the bare base and anything under it, at any depth, gets the themed pre-boot 404 (`blocked-denied-base`). Loader-only — no allowlist, no hooks, no rebuilds. |
-| `cache_ttl` | int\|null | *(per-outcome default)* | Seconds a pre-boot 404 from this entry may be cached (origin `s-maxage` + browser/CDN `max-age` unless `edge_ttl` splits them). Defaults: **60s** allowlist entries, **3600s** blocks. `0` = `no-store`. Global overrides: `POST_SHIELD_404_TTL`, `POST_SHIELD_BLOCKED_BASE_TTL`. |
-| `edge_ttl` | int\|null | *(none)* | **Publishable outcomes only.** Caps the CDN edge via `CDN-Cache-Control` — the only TTL that actually reaches the wire on WPE prod. Global override: `POST_SHIELD_404_EDGE_TTL`. See [Caching & invalidation](#caching--invalidation). |
+| `cache_ttl` | int\|null | *(per-outcome default)* | Seconds a pre-boot 404 from this entry may be cached (origin `s-maxage` + browser/CDN `max-age` unless `edge_ttl` splits them). Defaults: **60s** allowlist entries, **3600s** blocks. `0` = `no-store`. At most **86400** (a day): no purge reaches a browser's cached 404. Global overrides: `POST_SHIELD_404_TTL`, `POST_SHIELD_BLOCKED_BASE_TTL`. |
+| `edge_ttl` | int\|null | *(none)* | **Publishable outcomes only.** Caps the CDN edge via `CDN-Cache-Control` — the only TTL that actually reaches the wire on WPE prod. At most **86400**. Global override: `POST_SHIELD_404_EDGE_TTL`. See [Caching & invalidation](#caching--invalidation). |
 
 ## The locale option
 
@@ -219,7 +219,12 @@ the design is about COMPLETENESS, enforced rather than documented:
   confirm an unreleased slug exists by comparing allowed with blocked. They
   are appended the moment they publish — and media on them the moment their
   post goes live. Core's `attachment/{name}` URL marker
-  (`/{parent}/attachment/1/`) is stripped structurally, like `feed`.
+  (`/{parent}/attachment/1/`) is stripped structurally, like `feed`. The
+  extras list is one file, built in batches (memory stays flat) and read whole
+  by a request that misses the page and post lists — about a millisecond per
+  10k media items, still far below a WordPress render. The core shortcuts
+  `/login`, `/admin` and `/dashboard` and the bare feeds (`/rss2/`, `/atom/`…)
+  always reach WordPress.
 - **Redirect plugins**: active redirect SOURCES are ingested into the DERIVED
   exclusions so WordPress keeps serving those 301s — root mode 404s pre-boot,
   before any in-WordPress redirect could fire, so a source that isn't excluded
@@ -460,7 +465,9 @@ next full rebuild removes its uploads dir.
 
 **Block a base that has no content at all** (bot-enumerated paths like
 `/de-de/old-section/…`): add a row in **Blocked bases** (label + base) → Save. No
-rebuild needed.
+rebuild needed. The save replays a sample of every public type's real URLs, and
+the pages at and beneath the base, and is refused if the block would deny any
+of them — a block over live content would 404 it for an hour.
 
 **Several bases, one CPT** (category-segmented types): put every base on its own
 line in the type's *URL bases* box — one entry, one shared allowlist:
@@ -547,6 +554,12 @@ current rewrite slugs for exactly this reason. Structural caveats:
 - **Private posts** usually link as `?p=` URLs, but a logged-in editor can still
   open one at its pretty permalink — the shield does not exempt logged-in users,
   so add `private` to the statuses of any type whose private posts staff view.
+  The trade-off: a listed private slug answers `allowed-known-slug` to anyone,
+  so its existence (not its content) can be confirmed by probing. Draft,
+  pending and scheduled statuses are never offered and are ignored if stored:
+  WordPress never serves those posts at their own address, so listing them
+  would only reveal unreleased slugs. The coverage gate replays private posts
+  too, so a save that drops `private` is refused when it would 404 them.
 - Some types allow **2-segment slugs** (`{base}/{a}/{b}`) — those need
   `match: full-path` (or stay unshielded) rather than a slug allowlist.
 
@@ -578,11 +591,16 @@ current rewrite slugs for exactly this reason. Structural caveats:
   migrating from the old committed-array format run
   `wp post-shield config import-legacy <path-to-that-file>` once. All of these
   are explicit operator actions.
-- **Root mode: the excluded-bases snapshot goes stale silently.** Changing
-  permalinks, category/tag bases, or (de)activating a plugin that registers
-  rewrite bases changes the DERIVED exclusions — but the loader reads the
-  snapshot taken at the last save. The root-mode status tile compares live vs snapshot
-  and flags staleness; the fix is always just a re-save.
+- **Permalink changes are followed.** Saving Settings → Permalinks (structure,
+  category or tag base) re-checks the shield once the page has saved: a based
+  Posts entry follows the new post base (or is switched off, settings kept, when
+  the structure has no fixed base), and with root mode on the option is
+  re-saved — re-snapshotting the excluded bases and re-running the preflight —
+  or, when root mode no longer fits or that save fails, root matching is
+  switched off with a notice. The daily health check does the same. A
+  plugin's rewrite routes changing (activated, deactivated) is only caught by
+  the health check; the root-mode tile flags the stale snapshot meanwhile,
+  and a re-save fixes it.
 - **Root mode: unticking one root type is refused** (the S1 together-rule) —
   root mode is all root-dwellers or none. Untick both to switch it off.
 - **A pre-root revision restores cleanly**: restore re-runs the save pipeline,
