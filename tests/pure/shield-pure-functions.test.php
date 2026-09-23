@@ -65,6 +65,8 @@ check( [ 'a' ], Post404Shield\strip_trailing_sub_routes( [ 'a', 'embed' ], false
 check( [ 'about', 'team' ], Post404Shield\strip_trailing_sub_routes( [ 'about', 'team', 'rss2' ] ), 'strip: bare feed format (rss2)' );
 check( [ 'about' ], Post404Shield\strip_trailing_sub_routes( [ 'about', 'atom' ] ), 'strip: bare feed format (atom)' );
 check( [], Post404Shield\strip_trailing_sub_routes( [ 'rss2' ] ), 'strip: a lone feed format is the site feed, stripped (passes)' );
+check( [ 'about' ], Post404Shield\strip_trailing_sub_routes( [ 'about', 'attachment', '1234', 'embed' ] ), 'strip: an attachment page embed' );
+check( [ 'about' ], Post404Shield\strip_trailing_sub_routes( [ 'about', 'attachment', '1234', 'feed' ] ), 'strip: an attachment page comments feed' );
 check( [ 'my-account' ], Post404Shield\strip_trailing_sub_routes( [ 'my-account', 'orders', '2' ], true, [ 'orders', 'amp' ] ), 'strip: endpoint with a value' );
 check( [ 'about' ], Post404Shield\strip_trailing_sub_routes( [ 'about', 'amp' ], true, [ 'amp' ] ), 'strip: bare endpoint' );
 check( [ 'amp', 'x' ], Post404Shield\strip_trailing_sub_routes( [ 'amp', 'x' ], true, [ 'amp' ] ), 'strip: endpoint name as the FIRST segment is content, kept' );

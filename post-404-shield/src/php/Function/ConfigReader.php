@@ -366,6 +366,10 @@ function redirect_pattern_base( string $source, bool $is_regex ): string {
  */
 function redirect_source_variants( string $source, bool $is_regex, string $locale_pattern = '' ): array {
 	$source = ltrim( ltrim( trim( $source ), '^' ), '/' );
+	// A regex's optional leading slash (`^/?…`, `^\/?…`) leaves a stray `?`.
+	if ( $is_regex ) {
+		$source = (string) preg_replace( '#^(?:\\\\/)?\?#', '', $source );
+	}
 
 	if ( '' !== $locale_pattern ) {
 		$is_locale = static function ( string $token ) use ( $locale_pattern ): bool {
@@ -395,10 +399,11 @@ function redirect_source_variants( string $source, bool $is_regex, string $local
 
 		// Any other leading group that is a locale in its own words — a
 		// capture reused as `$1` (`([a-z]{2}-[a-z]{2})`, `(\w{2}-\w{2})`), a
-		// reordered alternation: stripped when EVERY alternative matches a
-		// locale this site uses, and the group can never match across a `/`.
-		// Only ever wider, in the fail-open direction.
-		if ( $is_regex && 1 === preg_match( '#^\((?:\?:)?((?:[^()\\\\]|\\\\.)+)\)(\?)?/#', $source, $group ) ) {
+		// reordered alternation, an optional one (`(…)?/?`, `(?:…/)?`):
+		// stripped when EVERY alternative matches a locale this site uses,
+		// and the group can never match across a `/`. Only ever wider, in the
+		// fail-open direction.
+		if ( $is_regex && 1 === preg_match( '#^\((?:\?:)?((?:[^()\\\\]|\\\\.)+?)(?:\\\\?/)?\)\??(?:\\\\?/)?\??#', $source, $group ) ) {
 			$samples = array_values( array_filter( array_merge( [ 'en-us', 'ja-jp', 'en-gb', 'de-de', 'global' ], explode( '|', $locale_pattern ) ), $is_locale ) );
 			$matches = static function ( string $regex, string $subject ): bool {
 				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- an engine error on a plugin-supplied pattern must read as "no match".

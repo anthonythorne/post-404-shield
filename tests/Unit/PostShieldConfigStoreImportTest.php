@@ -195,6 +195,10 @@ class PostShieldConfigStoreImportTest extends TestCase {
 			[ '/old-page/', false ],
 			[ 'faq?x=1', false ],
 			[ 'ja-jp/special/x/', false ],
+			[ '^/?products/cameras/old-model/?$', true ],
+			[ '^([a-z]{2}-[a-z]{2}|global)?/?products/cameras/old-model/?$', true ],
+			[ '^(?:[a-z]{2}-[a-z]{2}/)?products/cameras/old-model/?$', true ],
+			[ '^/(en-us|Nope1)/x', true ],
 		];
 		$out = [];
 		foreach ( $sources as [ $source, $regex ] ) {
@@ -204,7 +208,7 @@ class PostShieldConfigStoreImportTest extends TestCase {
 		}
 		$version = ( new \ReflectionClassConstant( ConfigStore::class, 'REDIRECT_DERIVATION_VERSION' ) )->getValue();
 		$this->assertSame(
-			[ 3, '141ef53dee96ec7eec5642e9110ee919' ],
+			[ 3, 'cca3e5ba921bf138e780eab3d1583dc5' ],
 			[ $version, md5( implode( '|', $out ) ) ],
 			'The reducers changed: bump REDIRECT_DERIVATION_VERSION and update this hash. Outputs: ' . implode( ' | ', $out )
 		);

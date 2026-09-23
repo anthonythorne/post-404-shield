@@ -62,6 +62,22 @@ class PostShieldSyncController {
 	private array $moved = [];
 
 	/**
+	 * Posts re-parented in this request (post_updated), whose WPML
+	 * translations are re-parented after them.
+	 *
+	 * @var array<int, true>
+	 */
+	private array $reparented = [];
+
+	/**
+	 * Live addresses of a post and its live descendants, taken just before
+	 * PublishPress Revisions applies a revision to it.
+	 *
+	 * @var array<int, array<int, string>>
+	 */
+	private array $before_revision = [];
+
+	/**
 	 * Same-type children of a post being deleted, keyed by the deleted post's
 	 * ID: core then re-parents them with a direct query that fires no post
 	 * hook, so their URLs change unseen (before_delete_post → after_delete_post).
@@ -105,6 +121,7 @@ class PostShieldSyncController {
 		// after cleaning the post cache. Harmless no-ops if the plugin is absent.
 		add_action( 'revision_applied', [ $this, 'handle_revision_applied' ], 10, 1 );
 		add_action( 'revision_published', [ $this, 'handle_revision_applied' ], 10, 1 );
+		add_filter( 'revisionary_apply_revision_data', [ $this, 'snapshot_before_revision' ], 10, 3 );
 
 		// Root mode only (root-pages v2): attachments join the root union the
 		// instant they upload (S2 — their URLs are real, and status `inherit`
@@ -118,6 +135,7 @@ class PostShieldSyncController {
 			add_action( 'edit_attachment', [ $this, 'handle_attachment' ], 10, 1 );
 			// Attach / Detach in the Media Library re-parents with a direct query.
 			add_action( 'wp_media_attach_action', [ $this, 'handle_media_attach' ], 10, 2 );
+			add_action( 'attachment_updated', [ $this, 'handle_attachment_renamed' ], 10, 3 );
 			// Media on a draft is left out of the union (no public page yet);
 			// it joins the instant its post goes live.
 			add_action( 'transition_post_status', [ $this, 'handle_parent_live' ], 10, 3 );
@@ -263,7 +281,8 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	public function handle_translations_moved( int $post_id ): void {
-		if ( ! isset( $this->moved[ $post_id ] ) ) {
+		// WPML syncs parents, not slugs: only a re-parent moves translations.
+		if ( ! isset( $this->reparented[ $post_id ] ) ) {
 			return;
 		}
 		$post_type = get_post_type( $post_id );
@@ -301,6 +320,9 @@ class PostShieldSyncController {
 			$this->moved[ $post_id ] = true;
 			$this->remember_old_uris( $post_id, $post_after, $post_before );
 		}
+		if ( $post_before->post_parent !== $post_after->post_parent ) {
+			$this->reparented[ $post_id ] = true;
+		}
 		if ( ! $this->builder->is_root_type( $post_after->post_type ) ) {
 			$this->append_based_old_slug( $post_after, $post_before );
 			return;
@@ -310,7 +332,9 @@ class PostShieldSyncController {
 		if ( ! $slug_changed && ! $parent_changed ) {
 			return;
 		}
-		if ( ! $this->builder->is_shielding_status( $post_after->post_type, (string) $post_after->post_status ) ) {
+		if ( ! $this->builder->is_shielding_status( $post_after->post_type, (string) $post_after->post_status )
+			|| ! $this->was_served( $post_after->post_type, (string) $post_before->post_status )
+		) {
 			return;
 		}
 
@@ -357,8 +381,10 @@ class PostShieldSyncController {
 			return;
 		}
 
+		// The post's own old address only if it was served there: a draft or
+		// scheduled slug never was, and listing it would reveal it.
 		$old = [];
-		if ( $this->builder->is_shielding_status( $type, (string) $after->post_status ) ) {
+		if ( $this->was_served( $type, (string) $before->post_status ) && $this->builder->is_shielding_status( $type, (string) $after->post_status ) ) {
 			$old[ $post_id ] = $old_uri;
 		}
 		$live = [];
@@ -372,6 +398,19 @@ class PostShieldSyncController {
 				$old[ $child_id ] = $old_uri . substr( $uri, strlen( $new_uri ) );
 			}
 		}
+		$this->publish_old_uris( $type, $old );
+	}
+
+	/**
+	 * Keep and append addresses posts just left (see remember_old_uris()),
+	 * in the format the type's list uses.
+	 *
+	 * @param string             $type Post type.
+	 * @param array<int, string> $old  Post ID => the address it left.
+	 *
+	 * @return void
+	 */
+	private function publish_old_uris( string $type, array $old ): void {
 		if ( [] === $old ) {
 			return;
 		}
@@ -486,7 +525,80 @@ class PostShieldSyncController {
 		if ( ! is_string( $post_type ) || ! in_array( $post_type, $this->post_types, true ) ) {
 			return;
 		}
+		// Addresses the revision moved (its slug applied with a direct
+		// query, so post_updated never saw it): kept like any move.
+		if ( isset( $this->before_revision[ $post_id ] ) ) {
+			$before = $this->before_revision[ $post_id ];
+			unset( $this->before_revision[ $post_id ] );
+			$old = [];
+			foreach ( $this->builder->uris_for( $post_type, array_keys( $before ) ) as $id => $uri ) {
+				if ( isset( $before[ $id ] ) && $before[ $id ] !== $uri ) {
+					$old[ $id ] = $before[ $id ];
+				}
+			}
+			$this->publish_old_uris( $post_type, $old );
+		}
 		$this->fast_append( $post_id, $post_type, true );
+	}
+
+	/**
+	 * PublishPress Revisions is about to apply a revision to a live post:
+	 * note its and its live descendants' addresses, which the revision's
+	 * slug may change. A filter used only as a hook — the data passes
+	 * through untouched.
+	 *
+	 * @param mixed $update    Revision data about to be written.
+	 * @param mixed $revision  The revision.
+	 * @param mixed $published The live post.
+	 *
+	 * @return mixed
+	 */
+	public function snapshot_before_revision( $update, $revision = null, $published = null ) {
+		if ( $published instanceof \WP_Post && in_array( $published->post_type, $this->post_types, true ) && is_post_type_hierarchical( $published->post_type ) ) {
+			$ids = $this->builder->is_shielding_status( $published->post_type, (string) $published->post_status ) ? [ (int) $published->ID ] : [];
+			foreach ( $this->descendant_statuses( (int) $published->ID, $published->post_type ) as $child_id => $child_status ) {
+				if ( $this->builder->is_shielding_status( $published->post_type, $child_status ) ) {
+					$ids[] = $child_id;
+				}
+			}
+			$this->before_revision[ (int) $published->ID ] = $this->builder->uris_for( $published->post_type, $ids );
+		}
+		return $update;
+	}
+
+	/**
+	 * Whether a post in this status was served at its address before: a
+	 * shielded status, or private for a root type (staff open it there).
+	 *
+	 * @param string $type   Post type.
+	 * @param string $status Status before the update.
+	 *
+	 * @return bool
+	 */
+	private function was_served( string $type, string $status ): bool {
+		return $this->builder->is_shielding_status( $type, $status ) || ( 'private' === $status && $this->builder->is_root_type( $type ) );
+	}
+
+	/**
+	 * A media item's slug changed (Media → Edit): core 301s its old URL from
+	 * `_wp_old_slug`; append the old lines at once (the rebuild keeps them).
+	 *
+	 * @param int      $post_id Attachment ID.
+	 * @param \WP_Post $after   After the update.
+	 * @param \WP_Post $before  Before the update.
+	 *
+	 * @return void
+	 */
+	public function handle_attachment_renamed( int $post_id, \WP_Post $after, \WP_Post $before ): void {
+		if ( '' === $before->post_name || $before->post_name === $after->post_name ) {
+			return;
+		}
+		$lines = [];
+		foreach ( $this->builder->attachment_lines( null, [ $post_id ] ) as $line ) {
+			$cut     = strrpos( $line, '/' );
+			$lines[] = ( false === $cut ? '' : substr( $line, 0, $cut + 1 ) ) . $before->post_name;
+		}
+		$this->builder->append_root_extras( $lines );
 	}
 
 	/**

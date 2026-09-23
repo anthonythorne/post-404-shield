@@ -275,6 +275,7 @@ class PostShieldAdminController {
 			$this->current_user_label(),
 			[
 				'keep'            => $keep,
+				'persist_keep'    => $keep,
 				'expect_revision' => $revision,
 			]
 		);
@@ -282,9 +283,6 @@ class PostShieldAdminController {
 			$this->set_notice( $result['errors'], $result['warnings'], false, '', empty( $result['stale'] ) ? $draft : null );
 			$this->redirect_to_page();
 		}
-
-		// Only now that the config actually landed does retention change.
-		$this->store->update_keep( $keep );
 
 		$this->queue_follow_up_jobs( $previous, $candidate );
 		$this->set_notice( [], $result['warnings'], true, __( 'Config saved — the artifact was regenerated and the shield now runs this configuration.', 'post-404-shield' ) );
@@ -468,6 +466,16 @@ class PostShieldAdminController {
 			if ( '' === $label || [] === $bases ) {
 				continue; // A cleared/blank repeater row deletes the entry.
 			}
+			// An all-digit name would become an integer array key, which no
+			// entry may have.
+			if ( ctype_digit( $label ) ) {
+				$this->request_errors[] = sprintf(
+					/* translators: %s: the name as typed. */
+					__( 'Blocked base name "%s" needs a letter, hyphen or underscore — a name of digits only cannot be used.', 'post-404-shield' ),
+					$label
+				);
+				continue;
+			}
 			// A blocked-base label is an ENTRY KEY. Writing it blindly would
 			// silently replace a same-named post-type entry — its bases,
 			// reserved slugs, statuses, depth policy and TTLs — with a blanket
@@ -491,6 +499,25 @@ class PostShieldAdminController {
 			];
 		}
 		return $new_entries;
+	}
+
+	/**
+	 * The key for a new type row: its post type name, unless an entry (a
+	 * legacy import keeps keys that differ from their post types) already
+	 * uses it — then the first free `{name}-{n}`, never an overwrite.
+	 *
+	 * @param string               $cpt         Post type.
+	 * @param array<string, mixed> $entries     Stored entries.
+	 * @param array<string, mixed> $new_entries Entries built so far.
+	 *
+	 * @return string
+	 */
+	private static function free_key( string $cpt, array $entries, array $new_entries ): string {
+		$key = $cpt;
+		for ( $n = 2; isset( $entries[ $key ] ) || isset( $new_entries[ $key ] ); $n++ ) {
+			$key = $cpt . '-' . $n;
+		}
+		return $key;
 	}
 
 	/**
@@ -558,7 +585,7 @@ class PostShieldAdminController {
 					$statuses[] = $status;
 				}
 			}
-			$key = $has_old ? $key_by_cpt[ $cpt ] : $cpt;
+			$key = $has_old ? $key_by_cpt[ $cpt ] : self::free_key( $cpt, $entries, $new_entries );
 
 			// Root entries (root-pages v2): no base, full-path matching implied,
 			// no depth policy. Unticked = REMOVE (the same deletion gesture as a

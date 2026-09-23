@@ -152,6 +152,14 @@ class ConfigStore {
 	private $rebuild_handler = null;
 
 	/**
+	 * Warnings from deriving reserved slugs in the current write(), shown
+	 * with its result.
+	 *
+	 * @var string[]
+	 */
+	private array $derivation_warnings = [];
+
+	/**
 	 * Optional preflight seam (S6, root-pages v2). Signature:
 	 * fn( array $candidate ): string[] — walk real URLs through the would-be
 	 * loader decision against the CANDIDATE config and return every URL that
@@ -635,7 +643,7 @@ class ConfigStore {
 				// `start` is a string-prefix match — append a `*` so the
 				// reducer treats it as a within-segment prefix (`/promo` start
 				// must cover `/promotional/`, not just `/promo/`).
-				$pattern = 'start' === $comparison ? $source['pattern'] . '*' : $source['pattern'];
+				$pattern   = 'start' === $comparison ? $source['pattern'] . '*' : $source['pattern'];
 				$sources[] = [
 					'pattern' => $pattern,
 					'regex'   => 'regex' === $comparison,
@@ -932,9 +940,16 @@ class ConfigStore {
 					if ( 0 !== strpos( $pattern, $base . '/' ) ) {
 						continue;
 					}
-					$slug = \Post404Shield\rewrite_pattern_base( substr( $pattern, strlen( $base ) + 1 ) );
+					$rest = substr( $pattern, strlen( $base ) + 1 );
+					$slug = \Post404Shield\rewrite_pattern_base( $rest );
 					if ( '' !== $slug && 1 === preg_match( '/^[a-z0-9_-]+\*?$/', $slug ) ) {
 						$slugs[ $slug ] = true;
+					} elseif ( 1 === preg_match( '#^\(?(?:\?:)?(?:\\\\d|\[0-9\])#', $rest ) ) {
+						// A route led by a number (`(\d{4})/…`, legacy dated
+						// URLs): every digit-led segment is WordPress's.
+						foreach ( range( 0, 9 ) as $digit ) {
+							$slugs[ $digit . '*' ] = true;
+						}
 					}
 				}
 				if ( '' !== $front && $base === $front ) {
@@ -944,7 +959,57 @@ class ConfigStore {
 				}
 			}
 			if ( [] !== $slugs ) {
-				$out[ (string) $key ] = array_keys( $slugs );
+				// Keys like '2019' become ints: cast back, or the document
+				// fails the reader's string-list check.
+				$out[ (string) $key ] = array_map( 'strval', array_keys( $slugs ) );
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Redirect sources whose literal part ends exactly at an entry's base and
+	 * go on below it (`^/stories/(\d+)/?$`, `/stories/*`): no single slug to
+	 * reserve. A digit-led remainder reserves every digit-led slug; anything
+	 * else is a save warning (derivation_warnings), since the shield would
+	 * answer those addresses before the redirect can.
+	 *
+	 * @param array<string, mixed> $entries        Candidate entries.
+	 * @param string               $locale_pattern Locale pattern body ('' = none).
+	 *
+	 * @return array<string, string[]> Entry key => reserved slugs.
+	 */
+	private function redirects_below_bases( array $entries, string $locale_pattern ): array {
+		$out = [];
+		foreach ( $this->redirect_sources() as $source ) {
+			foreach ( \Post404Shield\redirect_source_variants( $source['pattern'], $source['regex'], $locale_pattern ) as $variant ) {
+				$reduced = trim( rtrim( strtolower( \Post404Shield\redirect_pattern_base( $variant, $source['regex'] ) ), '*' ), '/' );
+				foreach ( $entries as $key => $settings ) {
+					if ( ! is_array( $settings ) || ( isset( $settings['enabled'] ) && false === $settings['enabled'] )
+						|| 'allowlist' !== ( $settings['mode'] ?? 'allowlist' ) || true === ( $settings['root'] ?? false )
+						|| ! in_array( $reduced, (array) ( $settings['url_base'] ?? [] ), true )
+					) {
+						continue;
+					}
+					$rest = ltrim( (string) substr( $variant, strlen( $reduced ) ), '/' );
+					// Only the base itself (`stories/?$`): nothing below it.
+					if ( 1 === preg_match( '#^(?:\?|\$|\?\$)?$#', $rest ) ) {
+						continue;
+					}
+					if ( 1 === preg_match( '#^\(?(?:\?:)?(?:\\\\d|\[0-9\])#', $rest ) ) {
+						foreach ( range( 0, 9 ) as $digit ) {
+							$out[ (string) $key ][] = $digit . '*';
+						}
+						continue;
+					}
+					$this->derivation_warnings[] = sprintf(
+						/* translators: 1: entry name, 2: the redirect source, 3: the URL base. */
+						__( '%1$s: the redirect "%2$s" covers addresses under /%3$s/ that cannot be reserved one by one, so the shield answers them before the redirect can. Add the slugs it redirects from to Reserved slugs, or move the redirect to the edge.', 'post-404-shield' ),
+						$this->entry_label( (string) $key, $settings ),
+						(string) $source['pattern'],
+						$reduced
+					);
+				}
 			}
 		}
 		return $out;
@@ -961,6 +1026,9 @@ class ConfigStore {
 	 */
 	public function apply_derived_reserved( array $entries, string $locale_pattern ): array {
 		$derived = $this->derived_reserved_slugs( $entries, $locale_pattern );
+		foreach ( $this->redirects_below_bases( $entries, $locale_pattern ) as $key => $slugs ) {
+			$derived[ $key ] = array_merge( $derived[ $key ] ?? [], $slugs );
+		}
 		foreach ( $this->route_reserved_slugs( $entries ) as $key => $slugs ) {
 			$merged = array_values( array_unique( array_merge( $derived[ $key ] ?? [], $slugs ) ) );
 			sort( $merged );
@@ -970,7 +1038,8 @@ class ConfigStore {
 			if ( ! is_array( $settings ) ) {
 				continue;
 			}
-			$slugs = $derived[ $key ] ?? [];
+			$slugs = array_values( array_unique( array_map( 'strval', $derived[ $key ] ?? [] ) ) );
+			sort( $slugs );
 			if ( [] === $slugs ) {
 				unset( $entries[ $key ]['reserved_derived'] );
 				continue;
@@ -1234,7 +1303,7 @@ class ConfigStore {
 		// Root-dweller facts (root-pages v2, S1). Only resolvable inside a booted
 		// WordPress; in pure unit contexts the structural checks still run but
 		// the permalink-derived rules are skipped.
-		$in_wp        = function_exists( 'get_option' );
+		$in_wp         = function_exists( 'get_option' );
 		$root_dwellers = $in_wp ? $this->root_dweller_types() : null;
 		$post_info     = $in_wp ? $this->post_base_info() : null;
 
@@ -1588,7 +1657,10 @@ class ConfigStore {
 	 *                                           preflight (the self-heal republishing an already-vetted option);
 	 *                                           `expect_revision` => string refuses the save (`stale` => true)
 	 *                                           unless the stored settings still have that current_revision() —
-	 *                                           checked under the lock, so two forms cannot both pass it.
+	 *                                           checked under the lock, so two forms cannot both pass it;
+	 *                                           `fail_open` => true (an automatic switch-off that only disables
+	 *                                           entries) turns validation errors into warnings;
+	 *                                           `persist_keep` => int stores that retention under the lock.
 	 *
 	 * @return array{ok: bool, errors: string[], warnings: string[], stale?: bool}
 	 */
@@ -1598,34 +1670,19 @@ class ConfigStore {
 		// from the candidate) — restores therefore refresh a stale snapshot
 		// automatically, and only the pre-boot loader ever reads the stored
 		// copy. Skipped in pure unit contexts (no WordPress to derive from).
-		$redirect_fp = null;
-		if ( function_exists( 'get_option' ) ) {
-			$locale_pattern           = self::locale_pattern_of( $config );
-			$operator                 = (array) ( $config['excluded_bases']['operator'] ?? [] );
-			$stored                   = $this->option();
-			$config['excluded_bases'] = $this->excluded_bases_snapshot(
-				$operator,
-				$locale_pattern,
-				(array) ( $config['excluded_bases']['endpoints'] ?? $stored['excluded_bases']['endpoints'] ?? [] )
-			);
+		$this->derivation_warnings = [];
+		$redirect_fp               = function_exists( 'get_option' ) ? $this->take_snapshots( $config ) : null;
 
-			// Reserved slugs derived from the site's redirect plugins are
-			// snapshotted the same way and for the same reason: the pre-boot
-			// loader can only read what the artifact carries. Replaced
-			// wholesale, so a removed redirect drops out; operator-typed
-			// reserved slugs live in a different key and are never touched.
-			$config['entries'] = $this->apply_derived_reserved( (array) ( $config['entries'] ?? [] ), $locale_pattern );
-
-			// What the derived bucket was built from. Persisted ONLY once the
-			// artifact carrying it has actually been written (see below): a
-			// save rejected by validation, refused by the lock, or failing at
-			// the artifact write must not record a sync that never happened —
-			// the nightly job would then treat the stale bucket as current and
-			// skip the new redirect indefinitely.
-			$redirect_fp = $this->redirect_fingerprint();
+		$validated             = $this->validate( $config );
+		$validated['warnings'] = array_merge( $validated['warnings'], $this->derivation_warnings );
+		// A fail-open write (an automatic switch-off) only disables entries
+		// relative to what is live, whose problems the live artifact already
+		// carries: they must not keep the switch-off from landing. The
+		// runtime invariant below still holds.
+		if ( ! empty( $flags['fail_open'] ) && [] !== $validated['errors'] ) {
+			$validated['warnings'] = array_merge( $validated['warnings'], $validated['errors'] );
+			$validated['errors']   = [];
 		}
-
-		$validated = $this->validate( $config );
 		if ( [] !== $validated['errors'] ) {
 			return [
 				'ok'       => false,
@@ -1857,6 +1914,12 @@ class ConfigStore {
 			}
 			$staged = null; // Renamed into place; nothing left to clean up.
 
+			// Retention too, under the lock: a concurrent save's early check
+			// read it, so it must change only with the config it belongs to.
+			if ( isset( $flags['persist_keep'] ) ) {
+				$this->update_keep( (int) $flags['persist_keep'] );
+			}
+
 			// The artifact now carries the derived bucket, so it is now true
 			// that it was built from these redirect sources.
 			if ( isset( $accepted_after ) ) {
@@ -1872,6 +1935,14 @@ class ConfigStore {
 			}
 
 			$this->prune_revisions( isset( $flags['keep'] ) ? (int) $flags['keep'] : null );
+		} catch ( \RuntimeException $e ) {
+			// A database read inside a gate or rebuild failed: never judge,
+			// or swap, on a list built from "no rows".
+			return [
+				'ok'       => false,
+				'errors'   => [ __( 'Nothing was saved: a database read failed while checking the change. Try again.', 'post-404-shield' ) . ' (' . $e->getMessage() . ')' ],
+				'warnings' => $validated['warnings'],
+			];
 		} finally {
 			if ( null !== $staged && file_exists( $staged ) ) {
 				unlink( $staged ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_unlink
@@ -1943,9 +2014,10 @@ class ConfigStore {
 				$block_errors[] = sprintf( __( 'Would block: %s', 'post-404-shield' ), $blocked_url );
 			}
 			return [
-				'ok'       => false,
-				'errors'   => $block_errors,
-				'warnings' => $warnings,
+				'ok'           => false,
+				'root_refused' => true,
+				'errors'       => $block_errors,
+				'warnings'     => $warnings,
 			];
 		}
 		if ( [] === $would_block ) {
@@ -1961,6 +2033,76 @@ class ConfigStore {
 	}
 
 	/**
+	 * Refresh everything write() derives from live WordPress into the
+	 * candidate: the excluded-bases snapshot and each entry's derived
+	 * reserved slugs. Returns the redirect fingerprint to record once the
+	 * save lands (null to record nothing).
+	 *
+	 * @param array<string, mixed> $config Candidate document, updated.
+	 *
+	 * @return string|null
+	 */
+	private function take_snapshots( array &$config ): ?string {
+		$locale_pattern           = self::locale_pattern_of( $config );
+		$operator                 = (array) ( $config['excluded_bases']['operator'] ?? [] );
+		$stored                   = $this->option();
+		$config['excluded_bases'] = $this->excluded_bases_snapshot(
+			$operator,
+			$locale_pattern,
+			(array) ( $config['excluded_bases']['endpoints'] ?? $stored['excluded_bases']['endpoints'] ?? [] )
+		);
+
+		// Reserved slugs derived from the site's redirect plugins are
+		// snapshotted the same way and for the same reason: the pre-boot
+		// loader can only read what the artifact carries. Replaced
+		// wholesale, so a removed redirect drops out; operator-typed
+		// reserved slugs live in a different key and are never touched.
+		$config['entries'] = $this->apply_derived_reserved( (array) ( $config['entries'] ?? [] ), $locale_pattern );
+
+		// What the derived bucket was built from. Persisted ONLY once the
+		// artifact carrying it has actually been written (see below): a
+		// save rejected by validation, refused by the lock, or failing at
+		// the artifact write must not record a sync that never happened —
+		// the nightly job would then treat the stale bucket as current and
+		// skip the new redirect indefinitely.
+		$redirect_fp = $this->redirect_fingerprint();
+
+		// Redirects read as NONE where some were read before: almost always
+		// a failed read (the plugin mid-update, its module toggled), not
+		// every redirect deleted at once. Keep what the stored config
+		// derived from them — the union, fail-open — and record nothing.
+		if ( '' === $redirect_fp && '' !== (string) get_option( self::REDIRECT_FP_OPTION, '' ) && is_array( $stored ) ) {
+			$config      = self::with_stored_derivations( $config, $stored );
+			$redirect_fp = null;
+		}
+		return $redirect_fp;
+	}
+
+	/**
+	 * A config with the stored one's derived buckets folded back in — the
+	 * excluded bases and each entry's derived reserved slugs, as a union.
+	 *
+	 * @param array<string, mixed> $config Candidate document.
+	 * @param array<string, mixed> $stored Stored document.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private static function with_stored_derivations( array $config, array $stored ): array {
+		$config['excluded_bases']['derived'] = array_values(
+			array_unique( array_merge( (array) ( $config['excluded_bases']['derived'] ?? [] ), (array) ( $stored['excluded_bases']['derived'] ?? [] ) ) )
+		);
+		foreach ( (array) ( $config['entries'] ?? [] ) as $key => $entry ) {
+			$kept = (array) ( $stored['entries'][ $key ]['reserved_derived'] ?? [] );
+			if ( is_array( $entry ) && [] !== $kept ) {
+				$merged = array_values( array_unique( array_merge( (array) ( $entry['reserved_derived'] ?? [] ), $kept ) ) );
+				sort( $merged );
+				$config['entries'][ $key ]['reserved_derived'] = $merged;
+			}
+		}
+		return $config;
+	}
+
+	/**
 	 * The `expect_revision` check, under the save lock: null when the save may
 	 * go on, else the refusal. Reads the option fresh — this request's copy
 	 * predates the lock, and a save that committed meanwhile is exactly what
@@ -1973,6 +2115,8 @@ class ConfigStore {
 	private function stale_result( array $flags ): ?array {
 		if ( function_exists( 'wp_cache_delete' ) ) {
 			wp_cache_delete( self::OPTION, 'options' );
+			wp_cache_delete( self::KEEP_OPTION, 'options' );
+			wp_cache_delete( 'alloptions', 'options' );
 		}
 		if ( ! isset( $flags['expect_revision'] ) || (string) $flags['expect_revision'] === $this->current_revision() ) {
 			return null;
@@ -2018,8 +2162,10 @@ class ConfigStore {
 	private function match_switch_rebuilds( array $candidate ): array {
 		$current = $this->artifact();
 
-		// The loader's current per-CPT format: only enabled allowlist entries count.
+		// The loader's current per-CPT format and statuses: only enabled
+		// allowlist entries count.
 		$current_full_path = [];
+		$current_statuses  = [];
 		if ( null !== $current ) {
 			foreach ( $current['entries'] as $key => $entry ) {
 				if ( isset( $entry['enabled'] ) && false === $entry['enabled'] ) {
@@ -2030,6 +2176,7 @@ class ConfigStore {
 				}
 				$cpt                       = (string) ( $entry['post_type'] ?? $key );
 				$current_full_path[ $cpt ] = self::is_full_path( $entry );
+				$current_statuses[ $cpt ]  = array_merge( $current_statuses[ $cpt ] ?? [], (array) ( $entry['post_status'] ?? [ 'publish' ] ) );
 			}
 		}
 
@@ -2045,10 +2192,18 @@ class ConfigStore {
 			$cpt       = (string) ( $entry['post_type'] ?? $key );
 			$wants_fp  = self::is_full_path( $entry );
 			$serves_fp = $current_full_path[ $cpt ] ?? false;
+			// A type the live artifact does not shield, or shields with fewer
+			// statuses, has a list on disk that is stale or missing: rebuild it
+			// before the swap. Safe then — the old artifact does not read that
+			// list, or reads a superset of what it needs.
+			$widened = ! isset( $current_full_path[ $cpt ] )
+				|| [] !== array_diff( (array) ( $entry['post_status'] ?? [ 'publish' ] ), $current_statuses[ $cpt ] ?? [] );
 			if ( $wants_fp && ! $serves_fp ) {
 				$before[] = $cpt;
 			} elseif ( ! $wants_fp && $serves_fp ) {
 				$after[] = $cpt;
+			} elseif ( $widened ) {
+				$before[] = $cpt;
 			}
 		}
 
@@ -2235,7 +2390,7 @@ class ConfigStore {
 		usort(
 			$files,
 			static function ( string $a, string $b ): int {
-				$key = static function ( string $path ): array {
+				$key   = static function ( string $path ): array {
 					$matched = [];
 					preg_match( '/^config-(\d{8}-\d{6})(?:-(\w+))?\.php$/', basename( $path ), $matched );
 					$suffix = $matched[2] ?? '';
@@ -2375,7 +2530,13 @@ class ConfigStore {
 			if ( $candidate === $option && ! $this->snapshot_is_stale( $option ) ) {
 				return false;
 			}
-			$result = $this->write( $candidate, 'auto: config follows the permalink settings — ' . $reason, [ 'expect_revision' => $this->revision_of( $option ) ] );
+			// Switching Posts off must land whatever else the stored config gets
+			// wrong; following a moved base is validated as any save is.
+			$flags = [ 'expect_revision' => $this->revision_of( $option ) ];
+			if ( $this->with_current_post_base( $option ) === $option ) {
+				$flags['fail_open'] = true;
+			}
+			$result = $this->write( $candidate, 'auto: config follows the permalink settings — ' . $reason, $flags );
 			if ( ! $result['ok'] ) {
 				error_log( '[post-404-shield] permalink revalidation (' . $reason . '): could not update the Posts entry: ' . implode( ' | ', $result['errors'] ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			}
@@ -2400,23 +2561,30 @@ class ConfigStore {
 			if ( $result['ok'] || ! empty( $result['stale'] ) ) {
 				return false;
 			}
+			// Only a refusal about root mode itself switches it off. A busy
+			// lock, a failed read or an unrelated error is retried by the
+			// follow-up or the next daily check.
+			if ( empty( $result['root_refused'] ) ) {
+				error_log( '[post-404-shield] root revalidation (' . $reason . '): the refresh did not land, retried later: ' . implode( ' | ', $result['errors'] ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+				return false;
+			}
 			$errors = $result['errors'];
 		}
 
-		// Switch root matching off — from the option, or, when the option also
-		// fails for unrelated reasons, from the live artifact: fail-open wins.
-		$result = [
-			'ok'     => false,
-			'errors' => [],
-		];
-		foreach ( [ $candidate, $this->artifact() ] as $base ) {
-			if ( null === $base ) {
-				continue;
-			}
-			$result = $this->write( self::root_disabled( $this->with_unservable_post_disabled( $base ) ), 'auto: root matching switched off — ' . $reason, [ 'skip_root_preflight' => true ] );
-			if ( $result['ok'] ) {
-				break;
-			}
+		// Switch root matching off: a write that only disables entries, so it
+		// lands whatever else the stored config gets wrong (fail_open) — and
+		// never over a save that committed after the option was read here.
+		$result = $this->write(
+			self::root_disabled( $candidate ),
+			'auto: root matching switched off — ' . $reason,
+			[
+				'skip_root_preflight' => true,
+				'fail_open'           => true,
+				'expect_revision'     => $this->revision_of( $option ),
+			]
+		);
+		if ( ! empty( $result['stale'] ) ) {
+			return false; // A save landed meanwhile; the next check judges it.
 		}
 		if ( ! $result['ok'] ) {
 			error_log( '[post-404-shield] root revalidation (' . $reason . '): could not switch root matching off: ' . implode( ' | ', $result['errors'] ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
@@ -2477,10 +2645,11 @@ class ConfigStore {
 	}
 
 	/**
-	 * Whether the stored excluded-bases snapshot — the floor, the
-	 * WordPress-derived bases and the rewrite endpoints — differs from what
-	 * would be taken now (a permalink, category or tag base, a plugin's
-	 * rewrite rules, or this plugin's own floor changed since the last save).
+	 * Whether the stored snapshot — the floor, the WordPress-derived bases,
+	 * the rewrite endpoints and the routes reserved under each base — differs
+	 * from what would be taken now (a permalink, category or tag base, a
+	 * plugin's rewrite rules, or this plugin's own floor changed since the
+	 * last save).
 	 *
 	 * @param array<string, mixed> $config Config document.
 	 *
@@ -2495,6 +2664,13 @@ class ConfigStore {
 			sort( $a );
 			sort( $b );
 			if ( $a !== $b ) {
+				return true;
+			}
+		}
+		// A route WordPress now serves under a base (a new rewrite rule) that
+		// the entry does not reserve yet.
+		foreach ( $this->route_reserved_slugs( (array) ( $config['entries'] ?? [] ) ) as $key => $slugs ) {
+			if ( [] !== array_diff( $slugs, (array) ( $config['entries'][ $key ]['reserved_derived'] ?? [] ) ) ) {
 				return true;
 			}
 		}
@@ -2610,16 +2786,24 @@ class ConfigStore {
 			set_transient( 'post_shield_heal_backoff', 1, MINUTE_IN_SECONDS );
 
 			// The full save pipeline, not a bare file write, for root mode too:
-			// the lock (so a heal can never publish over a save that committed
-			// meanwhile), validate() (reserved namespaces, overlaps, and root
+			// the lock and the revision check (so a heal can never publish the
+			// option it read over a save that committed meanwhile), validate() (reserved namespaces, overlaps, and root
 			// mode's S1 together-rule and permalink checks), the excluded-bases
 			// and derived-reserved snapshots, and the atomic swap. The one step
 			// skipped is root mode's S6 preflight: a heal republishes the stored
 			// option — vetted by the save that wrote it, or by the operator who
 			// staged it — and must not stay off over it. The coverage gate does
 			// not run either: nothing changes relative to the stored option.
-			$result = $this->write( $option, 'self-heal (artifact was missing or invalid)', [ 'skip_root_preflight' => true ] );
-			if ( $result['ok'] ) {
+			$result = $this->write(
+				$option,
+				'self-heal (artifact was missing or invalid)',
+				[
+					'skip_root_preflight' => true,
+					'expect_revision'     => $this->revision_of( $option ),
+				]
+			);
+			// Stale: a save committed meanwhile, and wrote a valid artifact.
+			if ( $result['ok'] || ! empty( $result['stale'] ) ) {
 				delete_transient( 'post_shield_heal_backoff' );
 				error_log( '[post-404-shield] self-heal: regenerated the config artifact through the full save pipeline.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			} else {

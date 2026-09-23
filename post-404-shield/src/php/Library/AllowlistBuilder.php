@@ -159,11 +159,34 @@ class AllowlistBuilder {
 			}
 
 			$statuses = $this->post_statuses_for( $post_type );
-			$allow    = $this->build_allowlist( $this->raw_lines( $post_type, $match, $statuses ), $match );
+			try {
+				$allow = $this->build_allowlist( $this->raw_lines( $post_type, $match, $statuses ), $match );
+			} catch ( \RuntimeException $e ) {
+				// The previous list stays: a failed read is not an empty type.
+				$this->failed[ $file ] = true;
+				error_log( '[post-404-shield] rebuild: ' . $post_type . ' not rebuilt — ' . $e->getMessage() . '; the previous list stays in place.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+				return 0;
+			}
 			$this->write_or_record( $allow, $file, $post_type );
 			return count( $allow );
 		} finally {
 			$this->unlock( $lock );
+		}
+	}
+
+	/**
+	 * Throw when the query just run failed. A failed read returns no rows,
+	 * and a list built from "no rows" would drop every real address — so a
+	 * failure must never look like an empty result.
+	 *
+	 * @return void
+	 *
+	 * @throws \RuntimeException On a database error.
+	 */
+	private static function assert_query(): void {
+		global $wpdb;
+		if ( isset( $wpdb ) && is_string( $wpdb->last_error ?? null ) && '' !== $wpdb->last_error ) {
+			throw new \RuntimeException( 'database query failed: ' . $wpdb->last_error ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- caught and logged, never printed.
 		}
 	}
 
@@ -254,6 +277,30 @@ class AllowlistBuilder {
 		} while ( microtime( true ) < $deadline );
 		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		return null;
+	}
+
+	/**
+	 * Whether a writer holds a list directory's lock right now (a rebuild).
+	 *
+	 * @param string $dir List directory.
+	 *
+	 * @return bool
+	 */
+	private function rebuild_in_flight( string $dir ): bool {
+		if ( ! is_file( $dir . '/.lock' ) ) {
+			return false;
+		}
+		$handle = fopen( $dir . '/.lock', 'c' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		if ( false === $handle ) {
+			return false;
+		}
+		$would_block = 0;
+		$free        = flock( $handle, LOCK_EX | LOCK_NB, $would_block );
+		if ( $free ) {
+			flock( $handle, LOCK_UN );
+		}
+		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		return ! $free && 1 === $would_block;
 	}
 
 	/**
@@ -522,6 +569,7 @@ class AllowlistBuilder {
 			)
 		);
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		self::assert_query();
 		$lines = [];
 		foreach ( (array) $rows as $row ) {
 			if ( $this->is_shielding_status( (string) $row->post_type, (string) $row->post_status ) ) {
@@ -540,14 +588,52 @@ class AllowlistBuilder {
 	 * @return void
 	 */
 	public function record_old_uris( array $uris ): void {
+		global $wpdb;
+		$uris = array_filter(
+			$uris,
+			static function ( $uri ): bool {
+				return is_string( $uri ) && '' !== $uri;
+			}
+		);
+		if ( [] === $uris || ! isset( $wpdb ) ) {
+			return;
+		}
+		// One read, one insert and one delete for the whole subtree, however
+		// large — never a meta load per post inside the editor's save.
+		$ids          = array_map( 'intval', array_keys( $uris ) );
+		$placeholders = implode( ', ', array_fill( 0, count( $ids ), '%d' ) );
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$rows = (array) $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT meta_id, post_id, meta_value FROM {$wpdb->postmeta} WHERE meta_key = %s AND post_id IN ($placeholders) ORDER BY meta_id ASC",
+				array_merge( [ self::OLD_URI_META ], $ids )
+			)
+		);
+		$known = [];
+		foreach ( $rows as $row ) {
+			$known[ (int) $row->post_id ][ (int) $row->meta_id ] = (string) $row->meta_value;
+		}
+		$insert = [];
+		$drop   = [];
 		foreach ( $uris as $id => $uri ) {
-			$known = array_values( array_filter( (array) get_post_meta( (int) $id, self::OLD_URI_META, false ), 'is_string' ) );
-			if ( '' === $uri || in_array( $uri, $known, true ) ) {
+			$have = $known[ (int) $id ] ?? [];
+			if ( in_array( $uri, $have, true ) ) {
 				continue;
 			}
-			add_post_meta( (int) $id, self::OLD_URI_META, $uri );
-			if ( count( $known ) >= self::OLD_URI_KEEP ) {
-				delete_post_meta( (int) $id, self::OLD_URI_META, $known[0] );
+			$insert[] = $wpdb->prepare( '(%d, %s, %s)', (int) $id, self::OLD_URI_META, $uri );
+			// Keep the newest OLD_URI_KEEP: drop the oldest beyond it.
+			$drop = array_merge( $drop, array_slice( array_keys( $have ), 0, max( 0, count( $have ) + 1 - self::OLD_URI_KEEP ) ) );
+		}
+		if ( [] !== $insert ) {
+			$wpdb->query( "INSERT INTO {$wpdb->postmeta} (post_id, meta_key, meta_value) VALUES " . implode( ', ', $insert ) );
+		}
+		if ( [] !== $drop ) {
+			$wpdb->query( "DELETE FROM {$wpdb->postmeta} WHERE meta_id IN (" . implode( ', ', array_map( 'intval', $drop ) ) . ')' );
+		}
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( function_exists( 'wp_cache_delete' ) ) {
+			foreach ( $ids as $id ) {
+				wp_cache_delete( $id, 'post_meta' );
 			}
 		}
 	}
@@ -597,6 +683,7 @@ class AllowlistBuilder {
 			)
 		);
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		self::assert_query();
 
 		return (array) $slugs;
 	}
@@ -716,9 +803,16 @@ class AllowlistBuilder {
 		// request until the nightly compaction. Checked once without the lock,
 		// so the common case — nothing new — never waits on a rebuild; and
 		// again under it, since a rebuild may have replaced the file meanwhile.
-		$lines = self::unlisted( array_values( array_unique( $lines ) ), $file );
-		if ( [] === $lines ) {
+		$candidates = array_values( array_unique( $lines ) );
+		$lines      = self::unlisted( $candidates, $file );
+		if ( [] === $lines && ! $this->rebuild_in_flight( dirname( $file ) ) ) {
 			return 0;
+		}
+		// Nothing new in the file as it stands, but a rebuild holds the lock
+		// and is about to replace it: its read may predate this post, so wait
+		// for it and check its file instead.
+		if ( [] === $lines ) {
+			$lines = $candidates;
 		}
 		$lock = $this->lock( dirname( $file ) );
 		try {
@@ -794,6 +888,7 @@ class AllowlistBuilder {
 			)
 		);
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		self::assert_query();
 
 		return $slugs;
 	}
@@ -833,6 +928,7 @@ class AllowlistBuilder {
 			)
 		);
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		self::assert_query();
 
 		if ( ! $this->is_hierarchical( $post_type ) ) {
 			return array_map(
@@ -977,6 +1073,7 @@ class AllowlistBuilder {
 				)
 			);
 			// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			self::assert_query();
 			foreach ( (array) $rows as $row ) {
 				$nodes[ (int) $row->ID ] = [ (string) $row->post_name, (int) $row->post_parent ];
 			}
@@ -1067,6 +1164,7 @@ class AllowlistBuilder {
 			)
 		);
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		self::assert_query();
 		return (array) $rows;
 	}
 
@@ -1145,6 +1243,7 @@ class AllowlistBuilder {
 			)
 		);
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		self::assert_query();
 
 		$lines  = [];
 		$nested = [];
@@ -1168,7 +1267,36 @@ class AllowlistBuilder {
 				$lines[] = substr( $uri, 0, (int) strrpos( $uri, '/' ) ) . '/' . $row->old_slug;
 			}
 		}
-		return array_merge( $lines, $this->old_uri_lines( $root_types ) );
+		return array_merge( $lines, $this->old_uri_lines( $root_types ), $this->attachment_old_slug_lines() );
+	}
+
+	/**
+	 * Media renamed in the library: core records the old slug and 301s the
+	 * old attachment URL, nested under its (live) parent as the current one
+	 * is. The old slug's lines, as attachment_rows_lines() builds them.
+	 *
+	 * @return string[]
+	 */
+	private function attachment_old_slug_lines(): array {
+		global $wpdb;
+		$statuses     = $this->attachment_parent_statuses();
+		$placeholders = implode( ', ', array_fill( 0, count( $statuses ), '%s' ) );
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$rows = (array) $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT a.ID, pm.meta_value AS post_name, a.post_parent, parent.post_type AS parent_type
+				 FROM {$wpdb->postmeta} pm
+				 INNER JOIN {$wpdb->posts} a ON a.ID = pm.post_id
+				 LEFT JOIN {$wpdb->posts} parent ON parent.ID = a.post_parent
+				 WHERE pm.meta_key = '_wp_old_slug' AND pm.meta_value <> ''
+				   AND a.post_type = 'attachment' AND a.post_status = 'inherit'
+				   AND ( a.post_parent = 0 OR parent.ID IS NULL OR parent.post_status IN ($placeholders) )",
+				$statuses
+			)
+		);
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		self::assert_query();
+		return $this->attachment_rows_lines( $rows );
 	}
 
 	/**
@@ -1543,14 +1671,20 @@ class AllowlistBuilder {
 		}
 		$ok    = false !== fwrite( $handle, "<?php exit; __halt_compiler(); // post-404-shield allowlist — do not edit by hand.\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
 		$count = 0;
-		foreach ( $lines as $line ) {
-			if ( ! $ok ) {
-				break;
+		try {
+			foreach ( $lines as $line ) {
+				if ( ! $ok ) {
+					break;
+				}
+				if ( is_string( $line ) && 1 === preg_match( '#^[a-z0-9_-]+(?:/[a-z0-9_-]+)*$#', $line ) ) {
+					$ok = strlen( $line ) + 1 === fwrite( $handle, $line . "\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+					++$count;
+				}
 			}
-			if ( is_string( $line ) && 1 === preg_match( '#^[a-z0-9_-]+(?:/[a-z0-9_-]+)*$#', $line ) ) {
-				$ok = strlen( $line ) + 1 === fwrite( $handle, $line . "\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
-				++$count;
-			}
+		} catch ( \RuntimeException $e ) {
+			// A read failed mid-stream: a truncated list must not go live.
+			error_log( '[post-404-shield] rebuild: ' . $e->getMessage() . ' — the previous list stays in place.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+			$ok = false;
 		}
 		// An empty list is the guard plus an empty line, as the loader expects.
 		if ( $ok && 0 === $count ) {

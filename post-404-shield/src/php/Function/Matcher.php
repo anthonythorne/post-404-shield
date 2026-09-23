@@ -218,6 +218,14 @@ function strip_trailing_sub_routes( array $segments, bool $allow_pagination = tr
 		array_splice( $segments, -1 );
 	}
 
+	// An attachment page has sub-routes of its own (`…/attachment/{name}/embed/`,
+	// its comments feed): once one is stripped, a preceding `attachment/{name}`
+	// marker goes too.
+	$left = count( $segments );
+	if ( $left < $count && $left >= 3 && 'attachment' === $segments[ $left - 2 ] ) {
+		array_splice( $segments, -2 );
+	}
+
 	return $segments;
 }
 
