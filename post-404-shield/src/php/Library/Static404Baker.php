@@ -9,7 +9,7 @@
  * `uploads/post-404-shield/404/<locale>.html`. The loader then serves that markup
  * for a shielded 404, so it is indistinguishable from a real one.
  *
- * `default.html` (baked from the `global` locale) is the fallback the loader uses
+ * `default.html` (baked from the default language) is the fallback the loader uses
  * when a request's own locale has not been baked.
  *
  * File Path: wp-content/mu-plugins/post-404-shield/src/php/Library/Static404Baker.php
@@ -68,21 +68,105 @@ class Static404Baker {
 	private ?string $locale_mode;
 
 	/**
+	 * Locale pattern body from the config artifact ('' = none/unknown).
+	 *
+	 * @var string
+	 */
+	private string $locale_pattern;
+
+	/**
 	 * Construct the baker.
 	 *
-	 * @param string|null $locale_mode Locale mode from the config artifact, or
-	 *                                 null to auto-detect from WPML presence.
+	 * @param string|null $locale_mode    Locale mode from the config artifact, or
+	 *                                    null to auto-detect from WPML presence.
+	 * @param string      $locale_pattern Locale pattern body from the config
+	 *                                    artifact; '' when none or not yet known.
 	 */
-	public function __construct( ?string $locale_mode = null ) {
-		$this->locale_mode = $locale_mode;
+	public function __construct( ?string $locale_mode = null, string $locale_pattern = '' ) {
+		$this->locale_mode    = $locale_mode;
+		$this->locale_pattern = $locale_pattern;
+	}
+
+	/**
+	 * Whether a language code may be used as a locale segment: path-safe, and —
+	 * when the site's locale pattern is known — one the loader will match.
+	 *
+	 * The loader looks up `404/{locale}.html` using the locale IT matched, so a
+	 * file baked for a code the pattern rejects is never served, and a code the
+	 * pattern accepts but this filter rejected falls back to the default page:
+	 * a visitor gets the 404 in the wrong language. The pattern is therefore
+	 * the only correct filter — never a hard-coded shape.
+	 *
+	 * @param string $code           Candidate language code.
+	 * @param string $locale_pattern Locale pattern body ('' = path-safety only).
+	 *
+	 * @return bool
+	 */
+	public static function segment_ok( string $code, string $locale_pattern ): bool {
+		if ( 1 !== preg_match( '/^[a-z0-9-]+$/', $code ) ) {
+			return false;
+		}
+		if ( '' === $locale_pattern ) {
+			return true;
+		}
+		// Compiled as the matchers compile it; validation rules out delimiter breakout.
+		return 1 === @preg_match( '#^(?:' . $locale_pattern . ')$#', $code ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- an operator pattern; a bad one must fail closed, not warn.
+	}
+
+	/**
+	 * The language codes to bake a page for, in order, de-duplicated.
+	 *
+	 * @param string[] $codes          Active language codes.
+	 * @param string   $locale_pattern Locale pattern body.
+	 *
+	 * @return string[]
+	 */
+	public static function select_locales( array $codes, string $locale_pattern ): array {
+		$locales = [];
+		foreach ( $codes as $code ) {
+			$code = (string) $code;
+			if ( self::segment_ok( $code, $locale_pattern ) && ! in_array( $code, $locales, true ) ) {
+				$locales[] = $code;
+			}
+		}
+		return $locales;
+	}
+
+	/**
+	 * The locale segment for the DEFAULT bake's probe.
+	 *
+	 * The site's default language when the pattern accepts it; otherwise the
+	 * first active language it accepts; otherwise the pattern's first literal
+	 * branch (so a WPML hiccup still yields the same probe shape); otherwise no
+	 * segment.
+	 *
+	 * @param string|null $default        WPML default language, if known.
+	 * @param string[]    $active         Active language codes.
+	 * @param string      $locale_pattern Locale pattern body.
+	 *
+	 * @return string|null
+	 */
+	public static function pick_default_segment( ?string $default, array $active, string $locale_pattern ): ?string {
+		if ( null !== $default && self::segment_ok( $default, $locale_pattern ) ) {
+			return $default;
+		}
+		$accepted = self::select_locales( $active, $locale_pattern );
+		if ( [] !== $accepted ) {
+			return $accepted[0];
+		}
+		foreach ( explode( '|', $locale_pattern ) as $branch ) {
+			if ( 1 === preg_match( '/^[a-z0-9-]+$/', $branch ) ) {
+				return $branch;
+			}
+		}
+		return null;
 	}
 
 	/**
 	 * URL language segment for the DEFAULT bake's probe, or null for none.
 	 * Resolved lazily (bakes run post-init, when WPML is loaded — the
 	 * constructor runs at mu-plugin load, when it is not): mode `none` → no
-	 * segment; otherwise the WPML default language directory, falling back to
-	 * the historical `global` so a WPML hiccup cannot change the probe shape.
+	 * segment; otherwise pick_default_segment().
 	 *
 	 * @return string|null
 	 */
@@ -95,10 +179,24 @@ class Static404Baker {
 			return null;
 		}
 		$default = function_exists( 'apply_filters' ) ? apply_filters( 'wpml_default_language', null ) : null;
-		if ( is_string( $default ) && 1 === preg_match( '/^[a-z0-9-]+$/', $default ) ) {
-			return $default;
+		return self::pick_default_segment( is_string( $default ) ? $default : null, $this->active_codes(), $this->locale_pattern );
+	}
+
+	/**
+	 * Active WPML language codes, unfiltered. Empty when WPML is not present.
+	 *
+	 * @return string[]
+	 */
+	private function active_codes(): array {
+		$langs = function_exists( 'apply_filters' ) ? apply_filters( 'wpml_active_languages', null ) : null;
+		if ( ! is_array( $langs ) ) {
+			return [];
 		}
-		return 'global';
+		$codes = [];
+		foreach ( $langs as $key => $lang ) {
+			$codes[] = is_array( $lang ) && isset( $lang['code'] ) ? (string) $lang['code'] : (string) $key;
+		}
+		return $codes;
 	}
 
 	/**
@@ -119,33 +217,23 @@ class Static404Baker {
 	}
 
 	/**
-	 * Active WPML language codes, which are also the URL locale segments
-	 * (`xx-xx`, plus `global`). Filtered to the segments the loader accepts, so a
-	 * code can never introduce anything unexpected into a file path. Empty when
-	 * WPML is not present.
+	 * Active WPML language codes, which are also the URL locale segments,
+	 * filtered to the ones the site's locale pattern accepts (see segment_ok())
+	 * so a code can never introduce anything unexpected into a file path, and
+	 * no page is baked that the loader would never serve. Empty when WPML is
+	 * not present.
 	 *
 	 * @return string[]
 	 */
 	public function get_locales(): array {
-		$locales = [];
-		$langs   = function_exists( 'apply_filters' ) ? apply_filters( 'wpml_active_languages', null ) : null;
-		if ( ! is_array( $langs ) ) {
-			return $locales;
-		}
-		foreach ( $langs as $key => $lang ) {
-			$code = is_array( $lang ) && isset( $lang['code'] ) ? (string) $lang['code'] : (string) $key;
-			if ( 1 === preg_match( '/^([a-z]{2}-[a-z]{2}|global)$/', $code ) ) {
-				$locales[] = $code;
-			}
-		}
-		return $locales;
+		return self::select_locales( $this->active_codes(), $this->locale_pattern );
 	}
 
 	/**
 	 * Bake the themed 404 for a locale.
 	 *
-	 * @param string $locale URL locale (`xx-xx`), or `default` to capture the
-	 *                       `global` locale into the fallback file.
+	 * @param string $locale URL locale, or `default` to capture the default
+	 *                       language into the fallback file.
 	 *
 	 * @return bool True when a page was captured and written.
 	 */
@@ -241,7 +329,7 @@ class Static404Baker {
 
 	/**
 	 * Loopback URL for a neutral 404 in the given locale. A cache-buster keeps the
-	 * edge from returning a cached 404. `default` captures the `global` locale.
+	 * edge from returning a cached 404. `default` captures the default language.
 	 *
 	 * Built from the RAW `home` option, deliberately NOT home_url(): WPML filters
 	 * home_url() to the CURRENT request's language, and in a cron/web context

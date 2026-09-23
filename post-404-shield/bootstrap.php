@@ -242,7 +242,10 @@ require_once POST_SHIELD_PLUGIN_DIR . '/src/php/Library/Static404Baker.php';
 $post_shield_locale_mode = null !== $post_shield_config && isset( $post_shield_config['locale']['mode'] )
 	? (string) $post_shield_config['locale']['mode']
 	: null;
-$post_shield_baker       = new \Post404Shield\Library\Static404Baker( $post_shield_locale_mode );
+$post_shield_baker       = new \Post404Shield\Library\Static404Baker(
+	$post_shield_locale_mode,
+	\Post404Shield\Library\ConfigStore::locale_pattern_of( $post_shield_config )
+);
 
 // 404 controller — weekly re-bake schedule + the on-demand bake worker. ALWAYS
 // wired: the settings page queues bakes even while types are being set up.
