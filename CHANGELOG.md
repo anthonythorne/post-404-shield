@@ -179,6 +179,25 @@ Moved out of the sites that used it into its own repository.
 - A logged-in preview (`?preview=` with the login cookie) goes to WordPress, so
   a post in an unlisted public status (a pre-launch one) can be previewed at
   its own address.
+- The sync hooks coerce a hook's scalar arguments as WordPress's dispatch does
+  and contain a mistyped one: PublishPress passes save_post a numeric-string ID.
+- Temp files are unique per call, not only per process (containers share PIDs).
+- Derivation version 6: `{0,1}` / `{0,}` on a separator reads like `?` / `*`.
+- A forced save says which coverage checks failed; a document without entries
+  is refused before its snapshots; root mode is switched off only over errors
+  about root mode; an entry without statuses lists Published beside others.
+- Warnings are kept for the settings screen from automatic writes and the
+  self-heal, and cleared only by a write that shows its own; the CLI restore
+  and import print theirs; `config restore --force` exists.
+- A status-drop confirmation lasts only while offered, and the restore screen
+  offers one too; a pre-swap refusal names the lists that failed.
+- Root-extras lists nested media lines only under root-type posts in the
+  statuses that type serves, and streams without the list's lock, committing
+  what was appended meanwhile under a short one.
+- Children moved by a parent's deletion, and WPML translations moved with a
+  re-parented post, keep the addresses they left.
+- Tests: the failed-read path (child processes), the hook guard, loader cases
+  that each depend on one guard.
 
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing
