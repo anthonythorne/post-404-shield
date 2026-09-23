@@ -882,7 +882,8 @@
 					// decision, see config_from_request()), so say so before the
 					// save rather than promise something the server won't keep.
 					// Two root exceptions the server keeps or explains: settings
-					// kept while root matching is switched off automatically, and
+					// kept while root matching is switched off (automatically, or by
+					// Disable shield), and
 					// a based entry left behind when the type moved to the root.
 					// A based row switched off with its URL bases cleared is the
 					// delete gesture: the server removes it too.

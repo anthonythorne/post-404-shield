@@ -662,10 +662,10 @@ class PostShieldAdminController {
 			// decision, so residue would only confuse the S1 together-rule).
 			if ( $is_root_dweller ) {
 				if ( ! $enabled ) {
-					// Switched off automatically (ConfigStore::revalidate_root()):
-					// keep the stored root settings, as its notice promises, with the
-					// row's edits, until root matching is back on. An entry the
-					// operator switched off themselves is removed as usual.
+					// Switched off automatically (ConfigStore::revalidate_root()) or
+					// by Disable shield: keep the stored root settings, as the notice
+					// promises, with the row's edits, until root matching is back on.
+					// An entry the operator unticked themselves is removed as usual.
 					if ( $root_off && $has_old && true === ( $entries[ $key ]['root'] ?? false ) && false === ( $entries[ $key ]['enabled'] ?? true ) ) {
 						$new_entries[ $key ] = array_merge(
 							(array) $entries[ $key ],
@@ -1665,7 +1665,8 @@ class PostShieldAdminController {
 		// save into a root-mode switch-on. Saving removes it; switching it on
 		// shields the type at the root, with Pages.
 		$root_moved = $is_root_dweller && null !== $stored && true !== ( $stored['root'] ?? false );
-		// Root settings kept while root matching is switched off automatically.
+		// Root settings kept while root matching is switched off (automatically,
+		// or by Disable shield).
 		$root_kept = $is_root_dweller && null !== $stored && true === ( $stored['root'] ?? false )
 			&& isset( $stored['enabled'] ) && false === $stored['enabled']
 			&& is_array( get_option( ConfigStore::ROOT_OFF_OPTION ) );
