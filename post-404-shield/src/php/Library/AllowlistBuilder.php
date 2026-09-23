@@ -697,11 +697,19 @@ class AllowlistBuilder {
 	/**
 	 * Build the membership map, re-filtering each line defensively.
 	 *
-	 * Pure: no WordPress, unit-testable in isolation. The SQL already restricts
-	 * slug-mode lines to `[a-z0-9-]+`, but the filter is repeated here so a
-	 * hand-written or future data source cannot introduce a non-ASCII key into
-	 * the loader map. Full-path lines allow internal slashes but never a
-	 * leading/trailing slash, an empty segment or a traversal.
+	 * Pure: no WordPress, unit-testable in isolation. Lines are `[a-z0-9_-]`
+	 * (the SQL restricts slug-mode lines the same way); the filter is repeated
+	 * here so a hand-written or future data source cannot introduce a
+	 * non-ASCII key into the loader map. Full-path lines allow internal
+	 * slashes but never a leading/trailing slash, an empty segment or a
+	 * traversal.
+	 *
+	 * The underscore is deliberate and asymmetric with the BASED matcher,
+	 * which only recognises `[a-z0-9-]` slugs: an underscore slug under a
+	 * base never matches, so it falls through to WordPress unshielded
+	 * (fail-open) and its line is simply unused. The ROOT matcher does
+	 * evaluate underscore segments, so for root and full-path types the line
+	 * must be present or root mode would 404 a real URL.
 	 *
 	 * @param string[] $slugs      Raw slugs (or hierarchical paths in full-path mode).
 	 * @param string   $match_mode Allowlist format: `slug` or `full-path`.
