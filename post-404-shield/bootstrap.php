@@ -75,10 +75,27 @@ add_action(
 		// 2. Artifact missing or invalid, option valid → regenerate the artifact.
 		if ( null !== $option && \Post404Shield\config_is_valid( $option ) ) {
 			// Root mode: the S6 preflight inside write() walks every real URL —
-			// far too heavy for a request. Keep the direct file write there.
+			// far too heavy for a request, so it is the one step skipped here.
+			// The two snapshots are NOT skipped: they are cheap, and root mode
+			// depends on them. A staged option predates both, so publishing it
+			// verbatim leaves the loader with no excluded bases (root mode then
+			// never engages) and no derived reserved slugs — the same defect the
+			// based path below fixes by going through write().
 			if ( $post_shield_store->has_enabled_root_entries( (array) ( $option['entries'] ?? [] ) ) ) {
-				if ( $post_shield_store->write_artifact( $option ) ) {
-					error_log( '[post-404-shield] self-heal: regenerated the config artifact from the option (root mode: direct write, no preflight).' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+				$healed                   = $option;
+				$heal_pattern             = \Post404Shield\Library\ConfigStore::locale_pattern_of( $healed );
+				$healed['excluded_bases'] = $post_shield_store->excluded_bases_snapshot( (array) ( $healed['excluded_bases']['operator'] ?? [] ), $heal_pattern );
+				$healed['entries']        = $post_shield_store->apply_derived_reserved( (array) ( $healed['entries'] ?? [] ), $heal_pattern );
+				if ( ! \Post404Shield\config_is_valid( $healed ) ) {
+					$healed = $option;
+				}
+				if ( $post_shield_store->write_artifact( $healed ) ) {
+					// Keep the option in step with what was published, so the two
+					// never disagree about the snapshots.
+					if ( $healed !== $option ) {
+						update_option( \Post404Shield\Library\ConfigStore::OPTION, $healed, false );
+					}
+					error_log( '[post-404-shield] self-heal: regenerated the config artifact from the option (root mode: snapshots refreshed, no preflight).' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 				}
 				return;
 			}
