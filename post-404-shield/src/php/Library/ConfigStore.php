@@ -143,8 +143,10 @@ class ConfigStore {
 
 	/**
 	 * Optional rebuild seam for the match-mode-switch ordering (SPEC §3.2c).
-	 * Signature: fn( string[] $post_types, array $entries ): void — rebuild the
-	 * named effective CPTs' allowlists against the given (candidate) entries.
+	 * Signature: fn( string[] $post_types, array $entries, bool $root_switching_on = false ): bool
+	 * — rebuild the named effective CPTs' allowlists against the given
+	 * (candidate) entries; false when a list could not be written, and a
+	 * RuntimeException when a database read failed (a retry, not a refusal).
 	 * Injected by the bootstrap; absent in pure unit contexts.
 	 *
 	 * @var callable|null
@@ -187,6 +189,22 @@ class ConfigStore {
 	 * @var array<int, array{pattern: string, regex: bool}>|null
 	 */
 	private $redirect_sources_cache = null;
+
+	/**
+	 * Whether a redirect reader failed this request (threw, or its query
+	 * errored) — as opposed to reading, correctly, that there are none.
+	 *
+	 * @var bool
+	 */
+	private bool $redirect_read_failed = false;
+
+	/**
+	 * Redirect sources read this request that no path can stand for — Rank
+	 * Math's "contains" and "ends with" — kept to be warned about.
+	 *
+	 * @var array<int, array{pattern: string, comparison: string}>
+	 */
+	private array $unmappable_redirects = [];
 
 	/**
 	 * This instance's value in the lock row, or '' when it holds no lock. The
@@ -489,6 +507,10 @@ class ConfigStore {
 			if ( '' !== $base ) {
 				$bases[ $base ] = true;
 			}
+			// A category archive with its base stripped: `(news)/?$`.
+			foreach ( \Post404Shield\rewrite_pattern_literal_group( $pattern ) as $literal ) {
+				$bases[ $literal ] = true;
+			}
 		}
 		return array_keys( $bases );
 	}
@@ -563,14 +585,21 @@ class ConfigStore {
 			'simple_301_redirect_sources',
 		];
 
+		global $wpdb;
 		$sources = [];
 		foreach ( $readers as $reader ) {
 			try {
 				foreach ( $this->$reader() as $source ) {
 					$sources[] = $source;
 				}
+				// Each query resets last_error: set now, the reader's own failed.
+				if ( isset( $wpdb ) && is_string( $wpdb->last_error ?? null ) && '' !== $wpdb->last_error ) {
+					$this->redirect_read_failed = true;
+					error_log( '[post-404-shield] redirect reader ' . $reader . ' failed: ' . $wpdb->last_error ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+				}
 			} catch ( \Throwable $e ) {
-				error_log( '[post-404-shield] redirect reader ' . $reader . ' failed (ignored): ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+				$this->redirect_read_failed = true;
+				error_log( '[post-404-shield] redirect reader ' . $reader . ' failed: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			}
 		}
 
@@ -638,7 +667,13 @@ class ConfigStore {
 				}
 				$comparison = (string) ( $source['comparison'] ?? 'exact' );
 				if ( ! in_array( $comparison, [ 'exact', 'start', 'regex' ], true ) ) {
-					continue; // contains/end can't map to a path prefix.
+					// Contains / ends with match anywhere in a URL: no path
+					// prefix stands for them. Kept, so the save can say so.
+					$this->unmappable_redirects[] = [
+						'pattern'    => $source['pattern'],
+						'comparison' => $comparison,
+					];
+					continue;
 				}
 				// `start` is a string-prefix match — append a `*` so the
 				// reducer treats it as a within-segment prefix (`/promo` start
@@ -942,6 +977,13 @@ class ConfigStore {
 					}
 					$rest = substr( $pattern, strlen( $base ) + 1 );
 					$slug = \Post404Shield\rewrite_pattern_base( $rest );
+					// `{base}/(tips|video)/?$`: each literal is a route.
+					foreach ( \Post404Shield\rewrite_pattern_literal_group( $rest ) as $literal ) {
+						$first = explode( '/', $literal )[0];
+						if ( 1 === preg_match( '/^[a-z0-9_-]+$/', $first ) ) {
+							$slugs[ $first ] = true;
+						}
+					}
 					if ( '' !== $slug && 1 === preg_match( '/^[a-z0-9_-]+\*?$/', $slug ) ) {
 						$slugs[ $slug ] = true;
 					} elseif ( 1 === preg_match( '#^\(?(?:\?:)?(?:\\\\d|\[0-9\])#', $rest ) ) {
@@ -1047,6 +1089,36 @@ class ConfigStore {
 				}
 			}
 		}
+		// Contains / ends-with redirects match anywhere in a URL: nothing can
+		// be reserved for them. Say so when one names a shielded base, or in
+		// root mode, where every address is the shield's.
+		$root_on = false;
+		foreach ( $entries as $settings ) {
+			$root_on = $root_on || ( is_array( $settings ) && true === ( $settings['root'] ?? false )
+				&& ( ! isset( $settings['enabled'] ) || false !== $settings['enabled'] ) );
+		}
+		foreach ( $this->unmappable_redirects as $source ) {
+			$text  = strtolower( (string) $source['pattern'] );
+			$named = '';
+			foreach ( $based as $bases ) {
+				foreach ( $bases as $base ) {
+					if ( '' === $named && 1 === preg_match( '#(?<![a-z0-9_-])' . preg_quote( $base, '#' ) . '(?![a-z0-9_-])#', $text ) ) {
+						$named = $base;
+					}
+				}
+			}
+			if ( '' === $named && ! $root_on ) {
+				continue;
+			}
+			$this->derivation_warnings[] = sprintf(
+				'end' === $source['comparison']
+					/* translators: %s: the redirect source. */
+					? __( 'The Rank Math redirect "%s" matches addresses that end with it, so no reserved slug can stand for it, and the shield may answer those addresses before the redirect can. Change it to Exact, Starts with or Regex, add the slugs it redirects from to Reserved slugs, or move it to the edge.', 'post-404-shield' )
+					/* translators: %s: the redirect source. */
+					: __( 'The Rank Math redirect "%s" matches addresses that contain it, so no reserved slug can stand for it, and the shield may answer those addresses before the redirect can. Change it to Exact, Starts with or Regex, add the slugs it redirects from to Reserved slugs, or move it to the edge.', 'post-404-shield' ),
+				(string) $source['pattern']
+			);
+		}
 		return $out;
 	}
 
@@ -1085,6 +1157,17 @@ class ConfigStore {
 	}
 
 	/**
+	 * Whether a redirect reader failed this request, so what it read is
+	 * incomplete — not the same as a site with no redirects.
+	 *
+	 * @return bool
+	 */
+	public function redirect_read_failed(): bool {
+		$this->redirect_sources();
+		return $this->redirect_read_failed;
+	}
+
+	/**
 	 * A stable fingerprint of every active redirect source on the site.
 	 *
 	 * Rank Math's `Db::add()`/`update()` write straight through and fire no
@@ -1098,12 +1181,16 @@ class ConfigStore {
 	 * REDIRECT_DERIVATION_VERSION so a deploy that changes how sources are
 	 * reduced re-derives on the next nightly tick instead of waiting for a save.
 	 *
-	 * @return string Hash, or '' when no redirect source is readable.
+	 * @return string Hash, or '' when there are none.
 	 */
 	public function redirect_fingerprint(): string {
 		$rows = [];
 		foreach ( $this->redirect_sources() as $source ) {
 			$rows[] = ( $source['regex'] ? 'regex:' : 'plain:' ) . $source['pattern'];
+		}
+		// Unmappable ones too: adding one must re-save, so its warning shows.
+		foreach ( $this->unmappable_redirects as $source ) {
+			$rows[] = $source['comparison'] . ':' . $source['pattern'];
 		}
 		if ( [] === $rows ) {
 			return '';
@@ -1766,6 +1853,24 @@ class ConfigStore {
 				return $stale;
 			}
 
+			// An automatic write that would publish what is already live — a
+			// re-snapshot that found nothing new — archives nothing: a daily
+			// no-op must not push the operator's revisions out of retention.
+			// The option is brought in line, so it stops reading as stale.
+			$live = ! empty( $flags['fail_open'] ) ? $this->artifact() : null;
+			if ( null !== $live && self::same_document( $config, $live ) ) {
+				update_option( self::OPTION, $live, false );
+				if ( null !== $redirect_fp ) {
+					update_option( self::REDIRECT_FP_OPTION, $redirect_fp, false );
+				}
+				return [
+					'ok'        => true,
+					'errors'    => [],
+					'warnings'  => $validated['warnings'],
+					'unchanged' => true,
+				];
+			}
+
 			// S6 — the root-preflight coverage gate. Any save that leaves root mode
 			// ACTIVE walks real URLs through the exact would-be loader decision
 			// (against the candidate config, its allowlists built in memory from
@@ -1785,101 +1890,9 @@ class ConfigStore {
 			// real URL would 404 or be redirected away. A save that changes no
 			// based entry — the self-heal, a CLI write of the stored option —
 			// runs nothing. `force_preflight` (CLI --force) overrides, as above.
-			if ( null !== $this->coverage_handler ) {
-				$current_doc = $this->option();
-				$coverage    = ( $this->coverage_handler )( $config, is_array( $current_doc['entries'] ?? null ) ? $current_doc['entries'] : null );
-				$breaks      = (array) ( $coverage['breaks'] ?? [] );
-				$unclaimed   = (array) ( $coverage['unclaimed'] ?? [] );
-				$name        = function ( $entry_key ) use ( $config ): string {
-					$entry = $config['entries'][ (string) $entry_key ] ?? [];
-					return $this->entry_label( (string) $entry_key, is_array( $entry ) ? $entry : [] );
-				};
-				if ( [] !== $unclaimed && empty( $flags['force_preflight'] ) ) {
-					$unclaimed_errors = [];
-					foreach ( $unclaimed as $entry_key => $home ) {
-						$unclaimed_errors[] = '' === (string) $home
-							? sprintf(
-								/* translators: %s: entry name. */
-								__( 'Coverage check FAILED: none of %s\'s real URLs sit under its URL bases, so it would shield nothing — check the URL base.', 'post-404-shield' ),
-								$name( $entry_key )
-							)
-							: sprintf(
-								/* translators: 1: entry name, 2: the URL base its posts really use. */
-								__( 'Coverage check FAILED: none of %1$s\'s real URLs sit under its URL bases, so it would shield nothing. Its posts live under /%2$s/ — check the URL base.', 'post-404-shield' ),
-								$name( $entry_key ),
-								(string) $home
-							);
-					}
-					return [
-						'ok'       => false,
-						'errors'   => $unclaimed_errors,
-						'warnings' => $validated['warnings'],
-					];
-				}
-				if ( [] !== $breaks && empty( $flags['force_preflight'] ) ) {
-					$coverage_errors = [
-						sprintf(
-							/* translators: 1: number of real URLs that would 404, 2: number checked. */
-							__( 'Coverage check FAILED: %1$d of %2$d real URLs checked would be served a 404 by this change.', 'post-404-shield' ),
-							count( $breaks ),
-							(int) ( $coverage['checked'] ?? 0 )
-						),
-					];
-					foreach ( (array) ( $coverage['homes'] ?? [] ) as $entry_key => $home ) {
-						$coverage_errors[] = sprintf(
-							/* translators: 1: entry name, 2: the URL base its posts really use. */
-							__( '%1$s: its posts live under /%2$s/ — check the URL base.', 'post-404-shield' ),
-							$name( $entry_key ),
-							(string) $home
-						);
-					}
-					foreach ( array_slice( $breaks, 0, 10 ) as $break ) {
-						$coverage_errors[] = sprintf(
-							/* translators: 1: URL, 2: shield decision, 3: entry name. */
-							__( 'Would break: %1$s (%2$s, %3$s)', 'post-404-shield' ),
-							(string) $break['url'],
-							(string) $break['marker'],
-							$name( $break['entry'] )
-						);
-					}
-					return [
-						'ok'       => false,
-						'errors'   => $coverage_errors,
-						'warnings' => $validated['warnings'],
-					];
-				}
-				$depth_hits = (array) ( $coverage['depth'] ?? [] );
-				if ( [] !== $depth_hits ) {
-					$validated['warnings'][] = sprintf(
-						/* translators: 1: number of real URLs, 2: an example URL, 3: its decision. */
-						_n(
-							'%1$d real URL sits deeper than its entry\'s depth limit and the depth policy will act on it (e.g. %2$s → %3$s). That is intended if the entry folds child pages into their parent.',
-							'%1$d real URLs sit deeper than their entry\'s depth limit and the depth policy will act on them (e.g. %2$s → %3$s). That is intended if the entry folds child pages into their parent.',
-							count( $depth_hits ),
-							'post-404-shield'
-						),
-						count( $depth_hits ),
-						(string) $depth_hits[0]['url'],
-						(string) $depth_hits[0]['marker']
-					);
-				}
-				foreach ( (array) ( $coverage['homes'] ?? [] ) as $entry_key => $home ) {
-					if ( ! isset( $unclaimed[ $entry_key ] ) ) {
-						$validated['warnings'][] = sprintf(
-							/* translators: 1: entry name, 2: the URL base most of its posts use. */
-							__( '%1$s: most of its real URLs live under /%2$s/, which is not one of its URL bases — check the bases are complete.', 'post-404-shield' ),
-							$name( $entry_key ),
-							(string) $home
-						);
-					}
-				}
-				if ( (int) ( $coverage['checked'] ?? 0 ) > 0 ) {
-					$validated['warnings'][] = [] === $breaks
-						/* translators: %d: number of real URLs checked. */
-						? sprintf( __( 'Coverage check passed — %d real URLs of the changed post types still resolve.', 'post-404-shield' ), (int) $coverage['checked'] )
-						/* translators: %d: number of real URLs the forced save breaks. */
-						: sprintf( __( 'Coverage check reported %d broken real URL(s) but the save was FORCED.', 'post-404-shield' ), count( $breaks ) );
-				}
+			$refused = $this->coverage_gate( $config, $flags, $validated['warnings'] );
+			if ( null !== $refused ) {
+				return $refused;
 			}
 
 			// Mode-switch ordering (SPEC §3.2c). The invariant: a FULL-PATH artifact
@@ -1996,16 +2009,22 @@ class ConfigStore {
 			$this->release_lock();
 		}
 
-		if ( null !== $this->rebuild_handler && [] !== $rebuild_after ) {
-			( $this->rebuild_handler )( $rebuild_after, $config['entries'] );
-		}
-		// Once more for the types that became full-path, now that the artifact
-		// saying so is live: a rebuild started from the OLD artifact (the daily
-		// run, a queued job) could have replaced the pre-swap list with slug
-		// lines between that rebuild and the swap, and the builders' guard only
-		// knows the artifact that is live. From here on the guard refuses them.
-		if ( null !== $this->rebuild_handler && [] !== $rebuild_before ) {
-			( $this->rebuild_handler )( $rebuild_before, $config['entries'] );
+		// After the swap the save has landed: a rebuild that fails here keeps
+		// its previous list, which the nightly rebuild replaces.
+		try {
+			if ( null !== $this->rebuild_handler && [] !== $rebuild_after ) {
+				( $this->rebuild_handler )( $rebuild_after, $config['entries'] );
+			}
+			// Once more for the types that became full-path, now that the artifact
+			// saying so is live: a rebuild started from the OLD artifact (the daily
+			// run, a queued job) could have replaced the pre-swap list with slug
+			// lines between that rebuild and the swap, and the builders' guard only
+			// knows the artifact that is live. From here on the guard refuses them.
+			if ( null !== $this->rebuild_handler && [] !== $rebuild_before ) {
+				( $this->rebuild_handler )( $rebuild_before, $config['entries'] );
+			}
+		} catch ( \RuntimeException $e ) {
+			error_log( '[post-404-shield] post-save rebuild: ' . $e->getMessage() . '; the previous lists stay until the nightly rebuild.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 		}
 
 		return [
@@ -2013,6 +2032,161 @@ class ConfigStore {
 			'errors'   => [],
 			'warnings' => $validated['warnings'],
 		];
+	}
+
+	/**
+	 * The based-entry coverage gate (see write()): null when the save may go
+	 * on, else the refusal. Adds its verdicts to the warnings.
+	 *
+	 * @param array<string, mixed> $config   Candidate document.
+	 * @param array<string, mixed> $flags    write() flags.
+	 * @param string[]             $warnings The save's warnings (appended).
+	 *
+	 * @return array<string, mixed>|null
+	 */
+	private function coverage_gate( array $config, array $flags, array &$warnings ): ?array {
+		if ( null === $this->coverage_handler ) {
+			return null;
+		}
+		// Measured against what is LIVE: an option edited over WP-CLI and
+		// published with `config write` changes what the loader serves as
+		// much as a settings save does. With no live artifact (a heal)
+		// the stored option stands in.
+		$current_doc = $this->artifact() ?? $this->option();
+		$coverage    = ( $this->coverage_handler )( $config, is_array( $current_doc['entries'] ?? null ) ? $current_doc['entries'] : null );
+		$breaks      = (array) ( $coverage['breaks'] ?? [] );
+		$unclaimed   = (array) ( $coverage['unclaimed'] ?? [] );
+		$name        = function ( $entry_key ) use ( $config ): string {
+			$entry = $config['entries'][ (string) $entry_key ] ?? [];
+			return $this->entry_label( (string) $entry_key, is_array( $entry ) ? $entry : [] );
+		};
+		if ( [] !== $unclaimed && empty( $flags['force_preflight'] ) ) {
+			$unclaimed_errors = [];
+			foreach ( $unclaimed as $entry_key => $home ) {
+				$unclaimed_errors[] = '' === (string) $home
+					? sprintf(
+						/* translators: %s: entry name. */
+						__( 'Coverage check FAILED: none of %s\'s real URLs sit under its URL bases, so it would shield nothing — check the URL base.', 'post-404-shield' ),
+						$name( $entry_key )
+					)
+					: sprintf(
+						/* translators: 1: entry name, 2: the URL base its posts really use. */
+						__( 'Coverage check FAILED: none of %1$s\'s real URLs sit under its URL bases, so it would shield nothing. Its posts live under /%2$s/ — check the URL base.', 'post-404-shield' ),
+						$name( $entry_key ),
+						(string) $home
+					);
+			}
+			return [
+				'ok'       => false,
+				'errors'   => $unclaimed_errors,
+				'warnings' => $warnings,
+			];
+		}
+		if ( [] !== $breaks && empty( $flags['force_preflight'] ) ) {
+			$coverage_errors = [
+				sprintf(
+					/* translators: 1: number of real URLs that would 404, 2: number checked. */
+					__( 'Coverage check FAILED: %1$d of %2$d real URLs checked would be served a 404 by this change.', 'post-404-shield' ),
+					count( $breaks ),
+					(int) ( $coverage['checked'] ?? 0 )
+				),
+			];
+			foreach ( (array) ( $coverage['homes'] ?? [] ) as $entry_key => $home ) {
+				$coverage_errors[] = sprintf(
+					/* translators: 1: entry name, 2: the URL base its posts really use. */
+					__( '%1$s: its posts live under /%2$s/ — check the URL base.', 'post-404-shield' ),
+					$name( $entry_key ),
+					(string) $home
+				);
+			}
+
+			foreach ( array_slice( $breaks, 0, 10 ) as $break ) {
+				$coverage_errors[] = sprintf(
+					isset( $break['status'] )
+					/* translators: 1: URL, 2: shield decision, 3: entry name, 4: post status. */
+					? __( 'Would break: %1$s (%2$s, %3$s — status "%4$s" is not listed)', 'post-404-shield' )
+					/* translators: 1: URL, 2: shield decision, 3: entry name. */
+					: __( 'Would break: %1$s (%2$s, %3$s)', 'post-404-shield' ),
+					(string) $break['url'],
+					(string) $break['marker'],
+					$name( $break['entry'] ),
+					(string) ( $break['status'] ?? '' )
+				);
+			}
+			return [
+				'ok'       => false,
+				'errors'   => $coverage_errors,
+				'warnings' => $warnings,
+			];
+		}
+		$depth_hits = (array) ( $coverage['depth'] ?? [] );
+		if ( [] !== $depth_hits ) {
+			$warnings[] = sprintf(
+				/* translators: 1: number of real URLs, 2: an example URL, 3: its decision. */
+				_n(
+					'%1$d real URL sits deeper than its entry\'s depth limit and the depth policy will act on it (e.g. %2$s → %3$s). That is intended if the entry folds child pages into their parent.',
+					'%1$d real URLs sit deeper than their entry\'s depth limit and the depth policy will act on them (e.g. %2$s → %3$s). That is intended if the entry folds child pages into their parent.',
+					count( $depth_hits ),
+					'post-404-shield'
+				),
+				count( $depth_hits ),
+				(string) $depth_hits[0]['url'],
+				(string) $depth_hits[0]['marker']
+			);
+		}
+		foreach ( (array) ( $coverage['unlisted'] ?? [] ) as $entry_key => $unlisted_statuses ) {
+			foreach ( (array) $unlisted_statuses as $unlisted_status => $posts ) {
+				$warnings[] = sprintf(
+					/* translators: 1: entry name, 2: post status, 3: number of posts. */
+					__( '%1$s: WordPress serves posts in the status "%2$s" to anyone (%3$d of them), but this entry does not list it, so the shield answers them with a 404. Tick it under the entry\'s statuses — unless the site relies on the shield to hide them, in which case register the status as private instead.', 'post-404-shield' ),
+					$name( $entry_key ),
+					(string) $unlisted_status,
+					(int) $posts
+				);
+			}
+		}
+		foreach ( (array) ( $coverage['private'] ?? [] ) as $entry_key => $posts ) {
+			$warnings[] = sprintf(
+				/* translators: 1: entry name, 2: number of posts sampled. */
+				__( '%1$s: private posts are not listed (%2$d sampled), so staff who can read them get a 404 at their address. Tick Private under the entry\'s statuses to pass them to WordPress.', 'post-404-shield' ),
+				$name( $entry_key ),
+				(int) $posts
+			);
+		}
+		foreach ( (array) ( $coverage['homes'] ?? [] ) as $entry_key => $home ) {
+			if ( ! isset( $unclaimed[ $entry_key ] ) ) {
+				$warnings[] = sprintf(
+					/* translators: 1: entry name, 2: the URL base most of its posts use. */
+					__( '%1$s: most of its real URLs live under /%2$s/, which is not one of its URL bases — check the bases are complete.', 'post-404-shield' ),
+					$name( $entry_key ),
+					(string) $home
+				);
+			}
+		}
+		if ( (int) ( $coverage['checked'] ?? 0 ) > 0 ) {
+			$warnings[] = [] === $breaks
+				/* translators: %d: number of real URLs checked. */
+				? sprintf( __( 'Coverage check passed — %d real URLs of the changed post types still resolve.', 'post-404-shield' ), (int) $coverage['checked'] )
+				/* translators: %d: number of real URLs the forced save breaks. */
+				: sprintf( __( 'Coverage check reported %d broken real URL(s) but the save was FORCED.', 'post-404-shield' ), count( $breaks ) );
+		}
+		return null;
+	}
+
+	/**
+	 * Whether two config documents say the same thing, apart from when and by
+	 * whom they were generated.
+	 *
+	 * @param array<string, mixed> $a Document.
+	 * @param array<string, mixed> $b Document.
+	 *
+	 * @return bool
+	 */
+	private static function same_document( array $a, array $b ): bool {
+		foreach ( [ 'version', 'generated_at', 'generated_by' ] as $meta ) {
+			unset( $a[ $meta ], $b[ $meta ] );
+		}
+		return $a == $b; // phpcs:ignore Universal.Operators.StrictComparisons.LooseEqual -- key order may differ; the values are JSON-typed.
 	}
 
 	/**
@@ -2113,11 +2287,12 @@ class ConfigStore {
 		// skip the new redirect indefinitely.
 		$redirect_fp = $this->redirect_fingerprint();
 
-		// Redirects read as NONE where some were read before: almost always
-		// a failed read (the plugin mid-update, its module toggled), not
-		// every redirect deleted at once. Keep what the stored config
-		// derived from them — the union, fail-open — and record nothing.
-		if ( '' === $redirect_fp && '' !== (string) get_option( self::REDIRECT_FP_OPTION, '' ) && is_array( $stored ) ) {
+		// A reader failed (threw, or its query errored): what was read is
+		// incomplete. Keep what the stored config derived — the union,
+		// fail-open — and record nothing, so the nightly sync tries again.
+		// Reading, correctly, that there are none is not a failure: the
+		// redirects are gone, and so are the slugs they reserved.
+		if ( $this->redirect_read_failed && is_array( $stored ) ) {
 			$config      = self::with_stored_derivations( $config, $stored );
 			$redirect_fp = null;
 		}
@@ -2160,9 +2335,18 @@ class ConfigStore {
 	 */
 	private function stale_result( array $flags ): ?array {
 		if ( function_exists( 'wp_cache_delete' ) ) {
+			// Only these two rows: both are stored with autoload off, so the
+			// site-wide alloptions / notoptions entries are touched only when
+			// they carry one of them (an install that autoloaded it once) —
+			// evicting them on every save makes every web head reload them.
 			wp_cache_delete( self::OPTION, 'options' );
 			wp_cache_delete( self::KEEP_OPTION, 'options' );
-			wp_cache_delete( 'alloptions', 'options' );
+			foreach ( [ 'alloptions', 'notoptions' ] as $bucket ) {
+				$cached = wp_cache_get( $bucket, 'options' );
+				if ( is_array( $cached ) && ( isset( $cached[ self::OPTION ] ) || isset( $cached[ self::KEEP_OPTION ] ) ) ) {
+					wp_cache_delete( $bucket, 'options' );
+				}
+			}
 		}
 		if ( ! isset( $flags['expect_revision'] ) || (string) $flags['expect_revision'] === $this->current_revision() ) {
 			return null;
@@ -2512,12 +2696,14 @@ class ConfigStore {
 	 * any other save — fresh generated_at/by, the outgoing config rotated to a
 	 * new revision, retention pruned.
 	 *
-	 * @param string $stamp        Revision stamp.
-	 * @param string $generated_by Display label for the restored artifact's meta.
+	 * @param string               $stamp        Revision stamp.
+	 * @param string               $generated_by Display label for the restored artifact's meta.
+	 * @param array<string, mixed> $flags        write() flags (`expect_revision`: the settings the
+	 *                                           confirm screen showed the diff against).
 	 *
-	 * @return array{ok: bool, errors: string[], warnings: string[]}
+	 * @return array{ok: bool, errors: string[], warnings: string[], stale?: bool}
 	 */
-	public function restore( string $stamp, string $generated_by ): array {
+	public function restore( string $stamp, string $generated_by, array $flags = [] ): array {
 		$config = $this->read_revision( $stamp );
 		if ( null === $config ) {
 			return [
@@ -2527,7 +2713,7 @@ class ConfigStore {
 			];
 		}
 		unset( $config['generated_at'], $config['generated_by'] );
-		return $this->write( $config, $generated_by );
+		return $this->write( $config, $generated_by, $flags );
 	}
 
 	// --- Legacy import -----------------------------------------------------------
@@ -2563,8 +2749,14 @@ class ConfigStore {
 		}
 
 		// A based `post` entry follows the permalink structure's base (the
-		// settings screen derives it the same way on every save).
+		// settings screen derives it the same way on every save) — but not in
+		// the request that changed the structure: its rewrite rules are still
+		// the old ones, so the routes under the new base would reserve nothing.
+		// The follow-up a minute later, with the rules flushed, moves it.
 		$candidate = $this->with_current_post_base( $option );
+		if ( $candidate !== $option && $this->rewrite_reset_this_request() ) {
+			$candidate = $option;
+		}
 
 		if ( ! $this->has_enabled_root_entries( (array) ( $candidate['entries'] ?? [] ) ) ) {
 			// Based mode: the same drift, for a `post` entry — its base moved
@@ -2720,6 +2912,11 @@ class ConfigStore {
 	public function snapshot_is_stale( array $config ): bool {
 		$stored = (array) ( $config['excluded_bases'] ?? [] );
 		$live   = $this->excluded_bases_snapshot( (array) ( $stored['operator'] ?? [] ), self::locale_pattern_of( $config ), (array) ( $stored['endpoints'] ?? [] ) );
+		// A failed redirect read keeps the stored derivations (take_snapshots()):
+		// judge staleness by the same rule, or the snapshot never matches.
+		if ( $this->redirect_read_failed ) {
+			$live['derived'] = array_values( array_unique( array_merge( (array) $live['derived'], array_filter( (array) ( $stored['derived'] ?? [] ), 'is_string' ) ) ) );
+		}
 		foreach ( [ 'floor', 'derived', 'endpoints' ] as $bucket ) {
 			$a = array_values( array_filter( (array) ( $stored[ $bucket ] ?? [] ), 'is_string' ) );
 			$b = array_values( (array) $live[ $bucket ] );
@@ -3180,8 +3377,9 @@ class ConfigStore {
 	 * @return void
 	 */
 	private function flush_lock_cache(): void {
+		// The lock row is only ever read with a direct query; this drops any
+		// copy another caller's get_option() made of it, nothing site-wide.
 		wp_cache_delete( self::LOCK_OPTION, 'options' );
-		wp_cache_delete( 'notoptions', 'options' );
 	}
 
 	/**

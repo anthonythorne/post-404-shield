@@ -48,6 +48,14 @@ class PostShieldCronController {
 	private const LOCK_TRANSIENT_KEY = 'post_shield_rebuild_lock';
 
 	/**
+	 * Cron hook for a redirect sync soon after the site's redirect plugins
+	 * change — one activated, deactivated or updated, or Rank Math's modules
+	 * toggled — so the derived reserved slugs follow within a minute, not
+	 * the next night.
+	 */
+	private const REDIRECT_SYNC_HOOK = 'post_shield_redirect_sync';
+
+	/**
 	 * Whether the daily rebuild + redirect sync run (at least one type enabled).
 	 *
 	 * @var bool
@@ -95,6 +103,35 @@ class PostShieldCronController {
 		if ( $this->rebuilds ) {
 			add_action( 'init', [ $this, 'register_cron_event' ] );
 			add_action( self::CRON_HOOK, [ $this, 'run_scheduled_rebuild' ] );
+			add_action( self::REDIRECT_SYNC_HOOK, [ $this, 'run_redirect_sync' ] );
+			foreach ( [ 'activated_plugin', 'deactivated_plugin', 'upgrader_process_complete', 'update_option_rank_math_modules' ] as $hook ) {
+				add_action( $hook, [ $this, 'queue_redirect_sync' ], 10, 0 );
+			}
+		}
+	}
+
+	/**
+	 * A redirect plugin may have come or gone: sync the derived reserved
+	 * slugs in a minute, once it has finished loading.
+	 *
+	 * @return void
+	 */
+	public function queue_redirect_sync(): void {
+		if ( false === wp_next_scheduled( self::REDIRECT_SYNC_HOOK ) ) {
+			wp_schedule_single_event( time() + MINUTE_IN_SECONDS, self::REDIRECT_SYNC_HOOK );
+		}
+	}
+
+	/**
+	 * Cron entry point for queue_redirect_sync().
+	 *
+	 * @return void
+	 */
+	public function run_redirect_sync(): void {
+		try {
+			$this->sync_derived_reserved();
+		} catch ( \Throwable $e ) {
+			error_log( '[post-404-shield] redirect sync failed: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 		}
 	}
 
@@ -182,15 +219,14 @@ class PostShieldCronController {
 			return;
 		}
 
-		// Redirects were readable last time and now read as NONE. That is almost
-		// always a failed read — Rank Math deactivated or mid-update during a
-		// plugin round, its Redirections module toggled off, a DB blip — not
-		// every redirect on the site being deleted at once. Re-saving now would
-		// publish an EMPTY derived bucket, and the redirects would stay dead
-		// until the following night even after the plugin came back. Skip,
-		// leave the fingerprint alone, and let the next tick decide.
-		if ( '' === $fingerprint && '' !== $stored ) {
-			error_log( '[post-404-shield] redirect sync SKIPPED: no redirect sources readable (previously some were). Treating as a failed read; derived reserved slugs left in place.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+		// A reader failed (threw, or its query errored — a DB blip): what was
+		// read is incomplete, and re-saving would drop the slugs of the
+		// redirects it missed. Skip, leave the fingerprint alone, and let the
+		// next tick decide. A site that reads, correctly, as having no
+		// redirects (all moved to the edge, the module switched off) is
+		// re-saved like any change, and the slugs they reserved go.
+		if ( $this->store->redirect_read_failed() ) {
+			error_log( '[post-404-shield] redirect sync SKIPPED: a redirect reader failed; derived reserved slugs left in place.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			return;
 		}
 
@@ -262,6 +298,7 @@ class PostShieldCronController {
 			if ( 0 === $enabled ) {
 				$problems[] = 'artifact has zero enabled entries';
 			}
+			$this->log_unlisted_statuses( (array) $artifact['entries'] );
 		}
 
 		if ( null === $option ) {
@@ -287,6 +324,31 @@ class PostShieldCronController {
 					'problems' => implode( '; ', $problems ),
 				]
 			);
+		}
+	}
+	/**
+	 * Log each shielded type whose posts are in a public status its entry
+	 * does not list: WordPress serves them to anyone, the shield 404s them.
+	 * Logged, not changed — listing one can publish what a site relies on
+	 * the shield to hide.
+	 *
+	 * @param array<string, mixed> $entries Live entries.
+	 *
+	 * @return void
+	 */
+	private function log_unlisted_statuses( array $entries ): void {
+		$builder = new AllowlistBuilder( $entries );
+		foreach ( $builder->allowlist_type_map() as $type => $listed ) {
+			$unlisted = [];
+			foreach ( AllowlistBuilder::in_use_statuses( (string) $type ) as $status => $posts ) {
+				$object = get_post_status_object( $status );
+				if ( ! in_array( $status, $listed, true ) && null !== $object && empty( $object->private ) ) {
+					$unlisted[] = $status . ' (' . $posts . ')';
+				}
+			}
+			if ( [] !== $unlisted ) {
+				error_log( '[post-404-shield] health: ' . $type . ' has posts in public statuses its entry does not list, answered with a 404: ' . implode( ', ', $unlisted ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+			}
 		}
 	}
 }

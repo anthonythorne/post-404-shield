@@ -53,6 +53,26 @@ final class BasedPreflight {
 	private const SAMPLE_PAGES = 10;
 
 	/**
+	 * Media pages sampled per full-path entry (nested under its posts' URLs).
+	 */
+	private const SAMPLE_MEDIA = 5;
+
+	/**
+	 * Per sampled path: the post's status and the base its URL lives under
+	 * (the path minus the post's own URI), from real_paths().
+	 *
+	 * @var array<string, array{status: string, home: string}>
+	 */
+	private array $sampled = [];
+
+	/**
+	 * The candidate's locale pattern body, for run()'s helpers.
+	 *
+	 * @var string
+	 */
+	private string $pattern = '';
+
+	/**
 	 * Decisions that mean the config does not recognise a real URL at all:
 	 * its own slug reads as fake, or its base is denied. The signature of a
 	 * wrong base — these refuse the save.
@@ -178,8 +198,9 @@ final class BasedPreflight {
 	public function run( array $candidate, array $keys, ?array $current = null ): array {
 		$entries         = (array) ( $candidate['entries'] ?? [] );
 		$this->endpoints = array_values( array_filter( (array) ( $candidate['excluded_bases']['endpoints'] ?? [] ), 'is_string' ) );
-		$pattern = ConfigStore::locale_pattern_of( $candidate );
-		$builder = new AllowlistBuilder( $entries );
+		$pattern         = ConfigStore::locale_pattern_of( $candidate );
+		$this->pattern   = $pattern;
+		$builder         = new AllowlistBuilder( $entries );
 
 		$bodies = [];
 		$read   = static function ( string $type ) use ( $builder, &$bodies ): ?string {
@@ -195,6 +216,8 @@ final class BasedPreflight {
 		$depth     = [];
 		$homes     = [];
 		$unclaimed = [];
+		$unlisted  = [];
+		$private   = [];
 		$lang      = function_exists( 'apply_filters' ) ? apply_filters( 'wpml_current_language', null ) : null;
 
 		try {
@@ -227,25 +250,59 @@ final class BasedPreflight {
 					continue;
 				}
 
-				$statuses = self::viewable_statuses(
+				// Every servable status the type's posts are in, listed or not: a
+				// public one the entry leaves out is served to anyone and would
+				// 404, and a save that drops a status must replay what it drops.
+				$listed     = array_map( 'strval', (array) ( $entry['post_status'] ?? [ 'publish' ] ) );
+				$was_listed = [] === $before ? [] : array_map( 'strval', (array) ( $before['post_status'] ?? [ 'publish' ] ) );
+				$in_use     = AllowlistBuilder::in_use_statuses( $type );
+				$statuses   = self::viewable_statuses(
 					array_merge(
-						(array) ( $entry['post_status'] ?? [ 'publish' ] ),
-						[] === $before ? [] : (array) ( $before['post_status'] ?? [ 'publish' ] )
+						$listed,
+						$was_listed,
+						array_keys( $in_use )
 					)
 				);
-				$paths    = $this->real_paths( $type, $bases, $statuses );
+				$paths      = $this->real_paths( $type, $bases, $statuses );
+				if ( 'full-path' === ( $entry['match'] ?? 'slug' ) ) {
+					$paths = array_merge( $paths, $this->media_paths( $type, array_values( array_intersect( $statuses, $listed ) ) ) );
+				}
 
 				$seen    = [];
 				$claimed = 0;
 				$sampled = 0;
 				foreach ( $paths as $path ) {
+					$status        = $this->sampled[ $path ]['status'] ?? '';
+					$before_breaks = count( $breaks );
+					$marker        = $this->record( $path, (string) $key, $entries, $read, $pattern, $breaks, $depth );
+					// A slug the loader cannot capture (non-ASCII, underscores)
+					// goes to WordPress whatever the list says: not a sample.
+					if ( 'unclaimed' === $marker && self::unmatchable_under( $path, $bases, $pattern ) ) {
+						continue;
+					}
 					++$checked;
 					++$sampled;
-					$marker = $this->record( $path, (string) $key, $entries, $read, $pattern, $breaks, $depth );
 					if ( 'unclaimed' !== $marker ) {
 						++$claimed;
 					}
-					$home = self::base_of( $path, $pattern );
+					if ( count( $breaks ) > $before_breaks && '' !== $status && ! in_array( $status, $listed, true ) ) {
+						if ( in_array( $status, $was_listed, true ) ) {
+							// A status this save drops: its posts it stops serving.
+							$breaks[ count( $breaks ) - 1 ]['status'] = $status;
+						} else {
+							// A status the entry never listed. Its posts 404 today
+							// too; listing it can publish what the site relies on
+							// the shield to hide (a pre-launch status registered
+							// public), so it is said, not refused.
+							array_pop( $breaks );
+							if ( self::is_private_status( $status ) ) {
+								$private[ (string) $key ] = ( $private[ (string) $key ] ?? 0 ) + 1;
+							} else {
+								$unlisted[ (string) $key ][ $status ] = (int) ( $in_use[ $status ] ?? 0 );
+							}
+						}
+					}
+					$home = $this->sampled[ $path ]['home'] ?? '';
 					if ( '' !== $home ) {
 						$seen[ $home ] = ( $seen[ $home ] ?? 0 ) + 1;
 					}
@@ -295,7 +352,83 @@ final class BasedPreflight {
 			'depth'     => $depth,
 			'homes'     => $homes,
 			'unclaimed' => $unclaimed,
+			'unlisted'  => $unlisted,
+			'private'   => $private,
 		];
+	}
+
+	/**
+	 * Whether a status is a private one (served to logged-in readers only).
+	 *
+	 * @param string $status Post status.
+	 *
+	 * @return bool
+	 */
+	private static function is_private_status( string $status ): bool {
+		$object = function_exists( 'get_post_status_object' ) ? get_post_status_object( $status ) : null;
+		return null !== $object && ! empty( $object->private );
+	}
+
+	/**
+	 * Whether a path sits under one of the bases with a slug the loader
+	 * cannot capture — it passes such a URL to WordPress, list or no list.
+	 *
+	 * @param string   $path           URL path.
+	 * @param string[] $bases          The entry's bases.
+	 * @param string   $locale_pattern Locale pattern body ('' = none).
+	 *
+	 * @return bool
+	 */
+	private static function unmatchable_under( string $path, array $bases, string $locale_pattern ): bool {
+		$rest   = trim( $path, '/' );
+		$locale = self::locale_of( $path, $locale_pattern );
+		if ( '' !== $locale ) {
+			$rest = (string) substr( $rest, strlen( $locale ) + 1 );
+		}
+		foreach ( $bases as $base ) {
+			if ( 0 === strpos( $rest . '/', $base . '/' ) ) {
+				$slug = (string) strtok( (string) substr( $rest, strlen( $base ) + 1 ), '/' );
+				if ( '' !== $slug && 1 !== preg_match( '/^[a-z0-9-]+$/', $slug ) ) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * A sample of the media pages of a type's live posts — the addresses
+	 * WordPress serves nested under their URLs.
+	 *
+	 * @param string   $type     Effective post type.
+	 * @param string[] $statuses The type's listed statuses.
+	 *
+	 * @return string[]
+	 */
+	private function media_paths( string $type, array $statuses ): array {
+		global $wpdb;
+		if ( ! isset( $wpdb ) || [] === $statuses ) {
+			return [];
+		}
+		$in = implode( ', ', array_fill( 0, count( $statuses ), '%s' ) );
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$ids = (array) $wpdb->get_col(
+			$wpdb->prepare(
+				"SELECT a.ID FROM {$wpdb->posts} a INNER JOIN {$wpdb->posts} p ON p.ID = a.post_parent
+				 WHERE a.post_type = 'attachment' AND a.post_status = 'inherit' AND a.post_name <> ''
+				   AND p.post_type = %s AND p.post_status IN ($in) ORDER BY a.ID DESC LIMIT %d",
+				array_merge( [ $type ], $statuses, [ self::SAMPLE_MEDIA ] )
+			)
+		);
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$paths = [];
+		foreach ( $ids as $id ) {
+			$path = $this->public_path( (int) $id, 'attachment' );
+			if ( null !== $path ) {
+				$paths[] = $path;
+			}
+		}
+		return $paths;
 	}
 
 	/**
@@ -454,10 +587,12 @@ final class BasedPreflight {
 
 		// Per status, so a status with few posts is sampled at all rather than
 		// crowded out by thousands of published ones.
-		$ids = [];
+		$ids       = [];
+		$status_of = [];
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
 		foreach ( $statuses as $status ) {
-			$ids = array_merge(
+			$before = count( $ids );
+			$ids    = array_merge(
 				$ids,
 				(array) $wpdb->get_col(
 					$wpdb->prepare(
@@ -476,6 +611,9 @@ final class BasedPreflight {
 					)
 				)
 			);
+			foreach ( array_slice( $ids, $before ) as $id ) {
+				$status_of[ (int) $id ] = (string) $status;
+			}
 		}
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
 
@@ -484,6 +622,17 @@ final class BasedPreflight {
 			$path = $this->public_path( $id, $type );
 			if ( null !== $path ) {
 				$paths[] = $path;
+				// The base the URL lives under: the path minus the post's own
+				// URI — for a child page, its parents are not the base.
+				$uri                    = is_post_type_hierarchical( $type ) ? (string) get_page_uri( $id ) : (string) get_post_field( 'post_name', $id );
+				$segments               = array_values( array_filter( explode( '/', trim( $path, '/' ) ), 'strlen' ) );
+				$depth                  = max( 1, count( array_filter( explode( '/', $uri ), 'strlen' ) ) );
+				$locale                 = self::locale_of( $path, $this->pattern );
+				$home                   = array_slice( $segments, '' === $locale ? 0 : 1, max( 0, count( $segments ) - $depth - ( '' === $locale ? 0 : 1 ) ) );
+				$this->sampled[ $path ] = [
+					'status' => $status_of[ $id ] ?? '',
+					'home'   => implode( '/', $home ),
+				];
 			}
 		}
 
@@ -525,7 +674,11 @@ final class BasedPreflight {
 				) as $child ) {
 					$path = $this->public_path( (int) $child, 'page' );
 					if ( null !== $path && $found < self::SAMPLE_PAGES ) {
-						$paths[] = $path;
+						$paths[]                = $path;
+						$this->sampled[ $path ] = [
+							'status' => 'publish',
+							'home'   => $base,
+						];
 						++$found;
 					}
 				}

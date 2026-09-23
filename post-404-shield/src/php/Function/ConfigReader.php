@@ -256,6 +256,28 @@ function rewrite_pattern_base( string $pattern ): string {
 }
 
 /**
+ * The literals a rewrite rule's leading capture group names, when that group
+ * is nothing but literals: `(news)/?$`, `(news)/page/?([0-9]{1,})/?$`,
+ * `(a|b/c)/…` — the shape SEO plugins emit, one rule set per category, when
+ * they strip the category base. rewrite_pattern_base() stops at the `(` and
+ * reads nothing, so those archives were never excluded. A group with any
+ * metacharacter (`(.?.+?)`, `([^/]+)`, real content space) yields nothing.
+ *
+ * Pure string logic, no WordPress.
+ *
+ * @param string $pattern A rewrite-rule regex (the array KEY of the rewrite table).
+ *
+ * @return string[] The literal paths, or [] when the rule does not start so.
+ */
+function rewrite_pattern_literal_group( string $pattern ): array {
+	$literal = '(?:[a-z0-9_-]|\\\\-)+(?:/(?:[a-z0-9_-]|\\\\-)+)*';
+	if ( 1 !== preg_match( '#^\^?\((' . $literal . '(?:\|' . $literal . ')*)\)(?:/|\$|$)#', $pattern, $group ) ) {
+		return [];
+	}
+	return array_values( array_unique( array_map( static fn( string $alt ): string => str_replace( '\\-', '-', $alt ), explode( '|', $group[1] ) ) ) );
+}
+
+/**
  * Reduce a redirect plugin's SOURCE (a plain path, a wildcard path, or a regex)
  * to the excluded-base literal that lets it pass root matching.
  *
@@ -465,7 +487,7 @@ function regex_alternatives( string $regex ): array {
  * @return int Bytes to strip, including the `/` after the locale; 0 for none.
  */
 function redirect_leading_locale( string $source, callable $is_locale, array $samples ): int {
-	$matches = static function ( string $regex, string $subject ): bool {
+	$matches       = static function ( string $regex, string $subject ): bool {
 		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- an engine error on a plugin-supplied pattern must read as "no match".
 		return 1 === @preg_match( '#^(?:' . $regex . ')$#', $subject );
 	};

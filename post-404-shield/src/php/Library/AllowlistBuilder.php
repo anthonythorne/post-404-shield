@@ -62,6 +62,14 @@ class AllowlistBuilder {
 	private array $failed = [];
 
 	/**
+	 * Types whose rebuild failed because a database read failed (the list
+	 * stays as it was) — a retry, unlike a write that failed.
+	 *
+	 * @var array<string, true>
+	 */
+	private array $failed_reads = [];
+
+	/**
 	 * Construct the builder for a set of managed post types.
 	 *
 	 * @param array<string, array<string, mixed>> $config Managed post-type config.
@@ -225,7 +233,8 @@ class AllowlistBuilder {
 				$allow = $this->build_allowlist( $this->raw_lines( $post_type, $match, $statuses ), $match );
 			} catch ( \RuntimeException $e ) {
 				// The previous list stays: a failed read is not an empty type.
-				$this->failed[ $file ] = true;
+				$this->failed[ $file ]            = true;
+				$this->failed_reads[ $post_type ] = true;
 				error_log( '[post-404-shield] rebuild: ' . $post_type . ' not rebuilt — ' . $e->getMessage() . '; the previous list stays in place.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 				return 0;
 			}
@@ -260,6 +269,16 @@ class AllowlistBuilder {
 	 */
 	public function failed_writes(): array {
 		return array_keys( $this->failed );
+	}
+
+	/**
+	 * Types whose rebuild in this builder's lifetime stopped at a failed
+	 * database read (their previous list stays in place).
+	 *
+	 * @return string[]
+	 */
+	public function failed_reads(): array {
+		return array_keys( $this->failed_reads );
 	}
 
 	/**
@@ -450,6 +469,31 @@ class AllowlistBuilder {
 	}
 
 	/**
+	 * The servable statuses a type's posts are in right now, with how many
+	 * posts are in each (registered statuses only).
+	 *
+	 * @param string $post_type Effective CPT.
+	 *
+	 * @return array<string, int> Status => post count.
+	 */
+	public static function in_use_statuses( string $post_type ): array {
+		global $wpdb;
+		if ( ! isset( $wpdb ) || ! function_exists( 'get_post_status_object' ) ) {
+			return [];
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT post_status, COUNT(*) AS posts FROM {$wpdb->posts} WHERE post_type = %s AND post_name <> '' GROUP BY post_status", $post_type ) );
+		$out  = [];
+		foreach ( (array) $rows as $row ) {
+			$status = (string) $row->post_status;
+			if ( null !== get_post_status_object( $status ) && self::is_servable_status( $status ) ) {
+				$out[ $status ] = (int) $row->posts;
+			}
+		}
+		return $out;
+	}
+
+	/**
 	 * Whether WordPress serves a post in this status at its own address, to
 	 * anyone: a public status, or private (for readers who may). Drafts,
 	 * pending and scheduled posts are not — their previews are `?p=` links —
@@ -604,7 +648,90 @@ class AllowlistBuilder {
 				}
 			}
 		}
+		// WordPress serves a post's media at pages nested under its URL; a
+		// full-path list matches whole paths, so it must hold them.
+		if ( 'full-path' === $match ) {
+			$lines = array_merge( $lines, $this->type_media_lines( $post_type, $statuses ) );
+		}
 		return $lines;
+	}
+
+	/**
+	 * `{post-path}/{media}` lines for the attachments of one type's live
+	 * posts — the address WordPress serves an attachment's page at.
+	 *
+	 * @param string     $post_type  Effective CPT.
+	 * @param string[]   $statuses   The type's statuses (its posts that are live).
+	 * @param int[]|null $parent_ids Only these parents' media; null for any.
+	 * @param int[]|null $ids        Only these attachments; null for any.
+	 *
+	 * @return string[] Unvalidated lines.
+	 *
+	 * @throws \RuntimeException On a database error.
+	 */
+	public function type_media_lines( string $post_type, array $statuses, ?array $parent_ids = null, ?array $ids = null ): array {
+		global $wpdb;
+		if ( ! isset( $wpdb ) || [] === $statuses || ( null !== $parent_ids && [] === $parent_ids ) || ( null !== $ids && [] === $ids ) ) {
+			return [];
+		}
+		$args = array_merge( [ $post_type ], array_values( $statuses ) );
+		$only = '';
+		foreach ( [
+			'a.post_parent' => $parent_ids,
+			'a.ID'          => $ids,
+		] as $column => $list ) {
+			if ( null !== $list ) {
+				$list  = array_values( array_unique( array_map( 'intval', $list ) ) );
+				$only .= " AND $column IN (" . implode( ', ', array_fill( 0, count( $list ), '%d' ) ) . ')';
+				$args  = array_merge( $args, $list );
+			}
+		}
+		$in = implode( ', ', array_fill( 0, count( $statuses ), '%s' ) );
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT a.post_name, a.post_parent FROM {$wpdb->posts} a
+				 INNER JOIN {$wpdb->posts} parent ON parent.ID = a.post_parent
+				 WHERE a.post_type = 'attachment' AND a.post_status = 'inherit' AND a.post_name <> ''
+				   AND parent.post_type = %s AND parent.post_status IN ($in)
+				   $only",
+				$args
+			)
+		);
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		self::assert_query();
+		$parents = $this->uris_for( $post_type, array_values( array_unique( array_map( static fn( $row ) => (int) $row->post_parent, (array) $rows ) ) ) );
+		$lines   = [];
+		foreach ( (array) $rows as $row ) {
+			$parent = $parents[ (int) $row->post_parent ] ?? '';
+			if ( '' !== $parent ) {
+				$lines[] = $parent . '/' . (string) $row->post_name;
+			}
+		}
+		return $lines;
+	}
+
+	/**
+	 * Media lines for every based full-path type, per type — for the instant
+	 * append when media is uploaded, attached, renamed or its post moves.
+	 *
+	 * @param int[]|null $parent_ids Only these parents' media; null for any.
+	 * @param int[]|null $ids        Only these attachments; null for any.
+	 *
+	 * @return array<string, string[]> Effective CPT => lines.
+	 */
+	public function based_media_lines( ?array $parent_ids = null, ?array $ids = null ): array {
+		$out = [];
+		foreach ( array_keys( $this->allowlist_type_map() ) as $type ) {
+			if ( 'full-path' !== $this->match_for( $type ) || $this->is_root_type( $type ) ) {
+				continue;
+			}
+			$lines = $this->type_media_lines( $type, $this->post_statuses_for( $type ), $parent_ids, $ids );
+			if ( [] !== $lines ) {
+				$out[ $type ] = $lines;
+			}
+		}
+		return $out;
 	}
 
 	/**
@@ -665,7 +792,7 @@ class AllowlistBuilder {
 		$ids          = array_map( 'intval', array_keys( $uris ) );
 		$placeholders = implode( ', ', array_fill( 0, count( $ids ), '%d' ) );
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-		$rows = (array) $wpdb->get_results(
+		$rows  = (array) $wpdb->get_results(
 			$wpdb->prepare(
 				"SELECT meta_id, post_id, meta_value FROM {$wpdb->postmeta} WHERE meta_key = %s AND post_id IN ($placeholders) ORDER BY meta_id ASC",
 				array_merge( [ self::OLD_URI_META ], $ids )
@@ -874,10 +1001,10 @@ class AllowlistBuilder {
 		if ( [] === $lines && ! $in_flight ) {
 			return 0;
 		}
-		// Nothing new in the file as it stands, but a rebuild holds the lock
-		// and is about to replace it: its read may predate this post, so wait
-		// for it and check its file instead.
-		if ( [] === $lines ) {
+		// A rebuild holds the lock and is about to replace the file: its read
+		// may predate this post, and what the old file lists says nothing
+		// about the new one — wait for it and check every line against its file.
+		if ( $in_flight ) {
 			$lines = $candidates;
 		}
 		$lock = $this->lock( dirname( $file ) );

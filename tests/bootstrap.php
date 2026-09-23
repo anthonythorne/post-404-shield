@@ -78,3 +78,17 @@ if ( ! function_exists( 'get_option' ) ) {
 		return $default_value;
 	}
 }
+
+if ( ! function_exists( '__' ) ) {
+	/**
+	 * No translations in unit tests.
+	 *
+	 * @param string $text   Text.
+	 * @param string $domain Text domain.
+	 *
+	 * @return string
+	 */
+	function __( string $text, string $domain = 'default' ): string { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed -- core's signature.
+		return $text;
+	}
+}

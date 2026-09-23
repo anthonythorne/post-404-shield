@@ -31,6 +31,12 @@ namespace Post404Shield\Library;
 class RootPreflight {
 
 	/**
+	 * Term archives per public taxonomy, and posts per other public type,
+	 * sampled by other_public_sample().
+	 */
+	private const OTHER_SAMPLE = 3;
+
+	/**
 	 * Rewrite endpoints from the candidate's snapshot (set by run()).
 	 *
 	 * @var string[]
@@ -83,6 +89,67 @@ class RootPreflight {
 	}
 
 	/**
+	 * A sample of the other URLs WordPress serves, which root mode must pass:
+	 * term archives of every public taxonomy (an SEO plugin can strip the
+	 * category base, putting them at the root), and posts of every public
+	 * type that is neither a root type nor shielded under a base.
+	 *
+	 * @param string[]             $root_types Effective CPTs of the enabled root entries.
+	 * @param array<string, mixed> $entries    Candidate entries.
+	 *
+	 * @return string[] Paths with a trailing slash, locale prefix included.
+	 */
+	private function other_public_sample( array $root_types, array $entries ): array {
+		global $wpdb;
+		if ( ! isset( $wpdb ) || [] === $root_types || ! function_exists( 'get_taxonomies' ) ) {
+			return [];
+		}
+		$based = [];
+		foreach ( $entries as $key => $settings ) {
+			if ( is_array( $settings ) && true !== ( $settings['root'] ?? false ) && 'allowlist' === ( $settings['mode'] ?? 'allowlist' ) ) {
+				$based[] = (string) ( $settings['post_type'] ?? $key );
+			}
+		}
+		$path_of = static function ( $link ): ?string {
+			if ( ! is_string( $link ) || '' === $link || false !== strpos( $link, '?' ) ) {
+				return null;
+			}
+			$path = (string) wp_parse_url( $link, PHP_URL_PATH );
+			return '' === $path ? null : '/' . trim( $path, '/' ) . ( '/' === $path ? '' : '/' );
+		};
+
+		$paths = [];
+		foreach ( get_taxonomies( [ 'public' => true ], 'names' ) as $taxonomy ) {
+			$terms = get_terms(
+				[
+					'taxonomy'   => $taxonomy,
+					'number'     => self::OTHER_SAMPLE,
+					'hide_empty' => true,
+				]
+			);
+			foreach ( is_array( $terms ) ? $terms : [] as $term ) {
+				$path = $path_of( get_term_link( $term ) );
+				if ( null !== $path ) {
+					$paths[] = $path;
+				}
+			}
+		}
+		foreach ( get_post_types( [ 'public' => true ], 'names' ) as $type ) {
+			if ( 'attachment' === $type || in_array( $type, $root_types, true ) || in_array( $type, $based, true ) ) {
+				continue;
+			}
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+			foreach ( (array) $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_status = 'publish' AND post_name <> '' ORDER BY ID DESC LIMIT %d", $type, self::OTHER_SAMPLE ) ) as $id ) {
+				$path = $path_of( get_permalink( (int) $id ) );
+				if ( null !== $path ) {
+					$paths[] = $path;
+				}
+			}
+		}
+		return $paths;
+	}
+
+	/**
 	 * Real addresses of a sample of each root type's published posts, taken
 	 * from get_permalink() — independent of the allowlist derivation the rest
 	 * of the corpus shares with the builder. If the builder ever derives a
@@ -108,7 +175,7 @@ class RootPreflight {
 				'DESC' => self::PERMALINK_RECENT,
 				'ASC'  => self::PERMALINK_OLDEST,
 			];
-			$in = $statuses[ $type ] ?? [ 'publish' ];
+			$in     = $statuses[ $type ] ?? [ 'publish' ];
 			foreach ( $orders as $order => $limit ) {
 				foreach ( (array) $wpdb->get_col(
 					$wpdb->prepare(
@@ -267,7 +334,7 @@ class RootPreflight {
 		$would_block = [];
 		$warn_block  = [];
 		$urls        = $this->probe_urls( $candidate, $bodies, $root_candidates, $published, $extras_lines, $excluded_flat, $locale_pattern );
-		$urls        = array_values( array_unique( array_merge( $urls, $this->permalink_sample( array_keys( $root_candidates ), $corpus ) ) ) );
+		$urls        = array_values( array_unique( array_merge( $urls, $this->permalink_sample( array_keys( $root_candidates ), $corpus ), $this->other_public_sample( array_keys( $root_candidates ), $entries ) ) ) );
 		foreach ( $urls as $url ) {
 			$decision = $this->decide( $url, $entries, $bodies, $excluded_flat, $match_candidates, $locale_pattern );
 			if ( 0 !== strpos( $decision['marker'], 'blocked' ) ) {

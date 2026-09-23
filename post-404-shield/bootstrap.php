@@ -118,11 +118,13 @@ $post_shield_store->set_rebuild_handler(
 	static function ( array $post_types, array $entries, bool $root_switching_on = false ): bool {
 		$candidate_builder = new \Post404Shield\Library\AllowlistBuilder( $entries );
 		$ok                = true;
+		$read_failed       = false;
 		foreach ( $post_types as $rebuild_type ) {
 			try {
 				$candidate_builder->rebuild_type( (string) $rebuild_type );
 			} catch ( \Throwable $e ) {
-				$ok = false;
+				$ok          = false;
+				$read_failed = $read_failed || $e instanceof \RuntimeException;
 				error_log( '[post-404-shield] mode-switch rebuild for ' . $rebuild_type . ' failed: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			}
 		}
@@ -135,9 +137,15 @@ $post_shield_store->set_rebuild_handler(
 			try {
 				$candidate_builder->rebuild_root_extras();
 			} catch ( \Throwable $e ) {
-				$ok = false;
+				$ok          = false;
+				$read_failed = $read_failed || $e instanceof \RuntimeException;
 				error_log( '[post-404-shield] root-extras rebuild failed: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			}
+		}
+		// A failed database read is not a failed write: the save says so, and
+		// an automatic one is retried rather than read as a refusal.
+		if ( $read_failed || [] !== $candidate_builder->failed_reads() ) {
+			throw new \RuntimeException( 'a database read failed while rebuilding ' . implode( ', ', array_merge( array_map( 'strval', $post_types ), $candidate_builder->failed_reads() ) ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- caught by ConfigStore::write(), never printed.
 		}
 		return $ok && [] === $candidate_builder->failed_writes();
 	}
@@ -266,6 +274,7 @@ if ( [] === $post_shield_enabled_types ) {
 	if ( function_exists( 'wp_unschedule_hook' ) ) {
 		wp_unschedule_hook( 'post_shield_rebuild_allowlist' );
 		wp_unschedule_hook( 'post_shield_rebuild_type' ); // admin-button per-type rebuild.
+		wp_unschedule_hook( 'post_shield_redirect_sync' );
 	}
 } else {
 	// Sync controller — appends slugs to allowlists on post changes (real-time).

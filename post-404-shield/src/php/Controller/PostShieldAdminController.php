@@ -317,7 +317,11 @@ class PostShieldAdminController {
 			$this->redirect_to_page();
 		}
 
-		$result = $this->store->restore( $stamp, $this->current_user_label() );
+		// The confirm screen's diff was against the settings as they were when
+		// it opened: a save since then would be reverted unseen.
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
+		$revision = isset( $_POST['ps_revision'] ) ? sanitize_key( wp_unslash( $_POST['ps_revision'] ) ) : '';
+		$result   = $this->store->restore( $stamp, $this->current_user_label(), [ 'expect_revision' => $revision ] );
 		if ( ! $result['ok'] ) {
 			$this->set_notice( $result['errors'], $result['warnings'], false );
 			$this->redirect_to_page();
@@ -1515,6 +1519,23 @@ class PostShieldAdminController {
 	 * @return array<string, mixed>
 	 */
 	private function type_state( string $cpt, ?\WP_Post_Type $type_object, ?array $entry, array $seen_bases, ?array $stored = null ): array {
+		$in_use   = AllowlistBuilder::in_use_statuses( $cpt );
+		$unlisted = [];
+		if ( null !== $entry && ( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] ) ) {
+			$listed = array_map( 'strval', (array) ( $entry['post_status'] ?? [ 'publish' ] ) );
+			foreach ( $in_use as $in_use_status => $posts ) {
+				$object = get_post_status_object( $in_use_status );
+				if ( ! in_array( $in_use_status, $listed, true ) && null !== $object && empty( $object->private ) ) {
+					$unlisted[] = [
+						'status' => $in_use_status,
+						'label'  => isset( $object->label ) && is_string( $object->label ) && '' !== $object->label ? $object->label : $in_use_status,
+						'posts'  => $posts,
+					];
+				}
+			}
+		}
+		$depth_kept = null !== $entry && null !== $stored && 'full-path' === ( $entry['match'] ?? 'slug' ) && 'full-path' !== ( $stored['match'] ?? 'slug' )
+			&& isset( $stored['depth_allowed'] ) && null !== $stored['depth_allowed'];
 		// A REAL rewrite base only — never invent one from the type name. Built-in
 		// `page` (and `post` under a bare /%postname%/ structure) has no URL base:
 		// its content lives at the ROOT, shielded by root mode (root-pages v2).
@@ -1588,9 +1609,21 @@ class PostShieldAdminController {
 			// the control must not vanish mid-edit when the select changes.
 			'offerMatch'      => null === $type_object || (bool) $type_object->hierarchical || 'full-path' === ( $stored['match'] ?? 'slug' ),
 			'allowPagination' => null === $entry || ! isset( $entry['allow_pagination'] ) || false !== $entry['allow_pagination'],
-			'depthAllowed'    => isset( $entry['depth_allowed'] ) && null !== $entry['depth_allowed'] ? (string) (int) $entry['depth_allowed'] : ( null === $entry ? '0' : '' ),
-			'depthAction'     => (string) ( $entry['depth_action'] ?? ( null === $entry ? 'redirect' : 'passthrough' ) ),
-			'statuses'        => isset( $entry['post_status'] ) && is_array( $entry['post_status'] ) && [] !== $entry['post_status'] ? array_values( array_map( 'strval', $entry['post_status'] ) ) : [ 'publish' ],
+			// A rejected save that switched a slug entry to full-path carries no
+			// depth rule (full-path has none): show the stored one, so switching
+			// back in the draft restores it rather than saving "unlimited".
+			'depthAllowed'    => isset( $entry['depth_allowed'] ) && null !== $entry['depth_allowed']
+				? (string) (int) $entry['depth_allowed']
+				: ( $depth_kept ? (string) (int) $stored['depth_allowed'] : ( null === $entry ? '0' : '' ) ),
+			'depthAction'     => (string) ( $depth_kept && ! isset( $entry['depth_action'] ) ? $stored['depth_action'] ?? 'passthrough' : ( $entry['depth_action'] ?? ( null === $entry ? 'redirect' : 'passthrough' ) ) ),
+			// A new row starts with every status the type's posts are in that
+			// WordPress serves at their address — what is live today, unshielded.
+			'statuses'        => isset( $entry['post_status'] ) && is_array( $entry['post_status'] ) && [] !== $entry['post_status']
+				? array_values( array_map( 'strval', $entry['post_status'] ) )
+				: array_values( array_unique( array_merge( [ 'publish' ], array_keys( $in_use ) ) ) ),
+			// Public statuses the type's posts are in that the entry leaves out:
+			// WordPress serves those posts to anyone, and the shield 404s them.
+			'unlisted'        => $unlisted,
 			'reserved'        => isset( $entry['reserved_allowlist'] ) && is_array( $entry['reserved_allowlist'] ) ? implode( "\n", $entry['reserved_allowlist'] ) : '',
 			// Derived on save, so a draft carries none yet: the stored ones.
 			'reservedDerived' => isset( $stored['reserved_derived'] ) && is_array( $stored['reserved_derived'] ) ? array_values( array_map( 'strval', $stored['reserved_derived'] ) ) : [],
@@ -1949,6 +1982,7 @@ class PostShieldAdminController {
 			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
 				<input type="hidden" name="action" value="post_shield_restore" />
 				<input type="hidden" name="ps_stamp" value="<?php echo esc_attr( $stamp ); ?>" />
+				<input type="hidden" name="ps_revision" value="<?php echo esc_attr( $this->store->current_revision() ); ?>" />
 				<?php wp_nonce_field( 'post_shield_restore' ); ?>
 				<?php if ( $restore_needs_confirm ) : ?>
 					<div class="post-shield-admin-notice post-shield-admin-notice--warning post-shield-confirm">

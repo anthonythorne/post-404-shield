@@ -355,9 +355,37 @@
 	// ── Post type rows ─────────────────────────────────────────────────────
 
 	function StatusChecklist({ type, onChange }) {
+		// Public statuses the type's posts are in that are still unticked:
+		// WordPress serves those posts to anyone, and the shield 404s them.
+		const unticked = (type.unlisted || []).filter(
+			(u) => !type.statuses.includes(u.status)
+		);
 		return el(
 			'fieldset',
 			{ className: 'post-shield-admin__fieldset' },
+			unticked.length
+				? el(
+						Notice,
+						{
+							status: 'warning',
+							isDismissible: false,
+							className: 'post-shield-admin__status-warning',
+						},
+						unticked
+							.map((u) =>
+								sprintf(
+									/* translators: 1: post status label, 2: number of posts. */
+									__(
+										'WordPress serves the %2$d posts in "%1$s" to anyone, but they are not ticked, so the shield answers them with a 404. Tick it — unless the site relies on the shield to hide them; then register the status as private instead.',
+										'post-404-shield'
+									),
+									u.label,
+									u.posts
+								)
+							)
+							.join(' ')
+					)
+				: null,
 			el(
 				'legend',
 				{ className: 'post-shield-admin__field-label' },

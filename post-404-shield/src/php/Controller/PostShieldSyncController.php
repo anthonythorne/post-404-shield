@@ -87,6 +87,15 @@ class PostShieldSyncController {
 	private array $orphan_media = [];
 
 	/**
+	 * Per post type, its parent → children and child → status maps, read by
+	 * descendant_statuses() and dropped when a post of the type changes parent
+	 * or status.
+	 *
+	 * @var array<string, array{0: array<int, int[]>, 1: array<int, string>}>
+	 */
+	private array $family = [];
+
+	/**
 	 * Construct the sync controller.
 	 *
 	 * @param AllowlistBuilder $builder Shared builder, following the live artifact.
@@ -167,13 +176,37 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	public function handle_attachment( int $post_id ): void {
-		if ( ! $this->builder->has_root_entries() ) {
-			return;
-		}
 		// Exactly the rebuild's lines for it (AllowlistBuilder::attachment_lines()),
 		// which leave out media on a post that is not live yet: it has no page,
 		// and listing it would reveal the unreleased post.
-		$this->builder->append_root_extras( $this->builder->attachment_lines( null, [ $post_id ] ) );
+		if ( $this->builder->has_root_entries() ) {
+			$this->builder->append_root_extras( $this->builder->attachment_lines( null, [ $post_id ] ) );
+		}
+		$this->append_based_media( null, [ $post_id ] );
+	}
+
+	/**
+	 * Append media pages to the lists of based full-path types, whose lines
+	 * are whole paths (AllowlistBuilder::type_media_lines()).
+	 *
+	 * @param int[]|null $parent_ids Only these parents' media; null for any.
+	 * @param int[]|null $ids        Only these attachments; null for any.
+	 * @param string     $old_name   A renamed attachment's former slug: its old page instead.
+	 *
+	 * @return void
+	 */
+	private function append_based_media( ?array $parent_ids, ?array $ids, string $old_name = '' ): void {
+		foreach ( $this->builder->based_media_lines( $parent_ids, $ids ) as $type => $lines ) {
+			if ( '' !== $old_name ) {
+				$lines = array_map(
+					static function ( string $line ) use ( $old_name ): string {
+						return substr( $line, 0, (int) strrpos( $line, '/' ) + 1 ) . $old_name;
+					},
+					$lines
+				);
+			}
+			$this->builder->append_slugs( $type, $lines );
+		}
 	}
 
 	/**
@@ -199,14 +232,17 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	public function handle_parent_live( string $new_status, string $old_status, \WP_Post $post ): void {
-		if ( 'attachment' === $post->post_type || ! $this->builder->has_root_entries() ) {
+		if ( 'attachment' === $post->post_type ) {
 			return;
 		}
 		$live = $this->builder->attachment_parent_statuses();
 		if ( ! in_array( $new_status, $live, true ) || in_array( $old_status, $live, true ) ) {
 			return;
 		}
-		$this->builder->append_root_extras( $this->builder->attachment_lines( [ (int) $post->ID ] ) );
+		if ( $this->builder->has_root_entries() ) {
+			$this->builder->append_root_extras( $this->builder->attachment_lines( [ (int) $post->ID ] ) );
+		}
+		$this->append_based_media( [ (int) $post->ID ], null );
 	}
 
 	/**
@@ -262,6 +298,7 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	public function handle_after_delete( int $post_id ): void {
+		$this->family = []; // Core just moved the children up a level.
 		if ( isset( $this->orphan_media[ $post_id ] ) ) {
 			$this->builder->append_root_extras( $this->builder->attachment_lines( null, $this->orphan_media[ $post_id ] ) );
 			unset( $this->orphan_media[ $post_id ] );
@@ -321,6 +358,9 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	public function handle_post_updated( int $post_id, \WP_Post $post_after, \WP_Post $post_before ): void {
+		if ( $post_before->post_parent !== $post_after->post_parent || $post_before->post_status !== $post_after->post_status ) {
+			unset( $this->family[ $post_after->post_type ] );
+		}
 		if ( $post_before->post_name !== $post_after->post_name || $post_before->post_parent !== $post_after->post_parent ) {
 			$this->moved[ $post_id ] = true;
 			$this->remember_old_uris( $post_id, $post_after, $post_before );
@@ -466,7 +506,11 @@ class PostShieldSyncController {
 		if ( is_post_type_hierarchical( $post_after->post_type ) ) {
 			return;
 		}
-		if ( ! $this->builder->is_shielding_status( $post_after->post_type, (string) $post_after->post_status ) ) {
+		// Core stores (and 301s) an old slug only when the post is published
+		// after the update. Going private or into another status it stores
+		// nothing, and listing the slug would only let an anonymous request
+		// confirm it exists.
+		if ( 'publish' !== $post_after->post_status || ! $this->builder->is_shielding_status( $post_after->post_type, 'publish' ) ) {
 			return;
 		}
 		$this->builder->append_slug( $post_after->post_type, $post_before->post_name );
@@ -506,6 +550,9 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	public function handle_transition_post_status( string $new_status, string $old_status, \WP_Post $post ): void {
+		if ( $new_status !== $old_status ) {
+			unset( $this->family[ $post->post_type ] );
+		}
 		if ( ! $this->managed( $post->post_type ) || $new_status === $old_status ) {
 			return;
 		}
@@ -599,7 +646,11 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	public function handle_attachment_renamed( int $post_id, \WP_Post $after, \WP_Post $before ): void {
-		if ( '' === $before->post_name || $before->post_name === $after->post_name || ! $this->builder->has_root_entries() ) {
+		if ( '' === $before->post_name || $before->post_name === $after->post_name ) {
+			return;
+		}
+		$this->append_based_media( null, [ $post_id ], $before->post_name );
+		if ( ! $this->builder->has_root_entries() ) {
 			return;
 		}
 		$lines = [];
@@ -663,10 +714,14 @@ class PostShieldSyncController {
 			if ( [] !== $private ) {
 				$this->builder->append_root_extras( array_values( $this->builder->uris_for( $post_type, $private ) ) );
 			}
-			// Root mode: the media of every moved post moves with it — its URL
-			// nests under the post's.
+			// The media of every moved post moves with it — its URL nests under
+			// the post's: into root-extras in root mode, into the type's own
+			// full-path list otherwise.
 			if ( $this->builder->has_root_entries() && $was_moved ) {
 				$this->builder->append_root_extras( $this->builder->attachment_lines( array_merge( $ids, $private ) ) );
+			}
+			if ( $was_moved && ! $root_type && [] !== $ids ) {
+				$this->append_based_media( $ids, null );
 			}
 			if ( $live ) {
 				$this->purge_page_cache( $post_id );
@@ -703,31 +758,37 @@ class PostShieldSyncController {
 		global $wpdb;
 
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
-		$has_child = $wpdb->get_var(
-			$wpdb->prepare(
-				"SELECT ID FROM {$wpdb->posts} WHERE post_parent = %d AND post_type = %s LIMIT 1",
-				$post_id,
-				$post_type
-			)
-		);
-		if ( null === $has_child ) {
-			return [];
-		}
+		if ( ! isset( $this->family[ $post_type ] ) ) {
+			$has_child = $wpdb->get_var(
+				$wpdb->prepare(
+					"SELECT ID FROM {$wpdb->posts} WHERE post_parent = %d AND post_type = %s LIMIT 1",
+					$post_id,
+					$post_type
+				)
+			);
+			if ( null === $has_child ) {
+				return [];
+			}
 
-		$rows = $wpdb->get_results(
-			$wpdb->prepare(
-				"SELECT ID, post_parent, post_status FROM {$wpdb->posts} WHERE post_type = %s AND post_parent <> 0",
-				$post_type
-			)
-		);
+			$rows     = $wpdb->get_results(
+				$wpdb->prepare(
+					"SELECT ID, post_parent, post_status FROM {$wpdb->posts} WHERE post_type = %s AND post_parent <> 0",
+					$post_type
+				)
+			);
+			$children = [];
+			$status   = [];
+			foreach ( (array) $rows as $row ) {
+				$children[ (int) $row->post_parent ][] = (int) $row->ID;
+				$status[ (int) $row->ID ]              = (string) $row->post_status;
+			}
+			// One read per type until a post of it changes parent or status: a
+			// move walks the subtree several times (old addresses, the append,
+			// every WPML translation), each against the same family.
+			$this->family[ $post_type ] = [ $children, $status ];
+		}
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
-
-		$children = [];
-		$status   = [];
-		foreach ( (array) $rows as $row ) {
-			$children[ (int) $row->post_parent ][] = (int) $row->ID;
-			$status[ (int) $row->ID ]              = (string) $row->post_status;
-		}
+		[ $children, $status ] = $this->family[ $post_type ];
 
 		$found = [];
 		$queue = [ $post_id ];
