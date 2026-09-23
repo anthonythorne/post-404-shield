@@ -522,6 +522,12 @@ redirect plugin can answer.
 - Reserved slugs are **locale-agnostic**, like allowlists: a source under
   `/it-it/` reserves that slug in every locale. Wider than the redirect itself,
   but only ever in the fail-open direction.
+- Regex sources are read the way their authors write them: `\/` is a slash, a
+  top-level `^a/?$|^b/?$` is two sources, and a leading locale is stripped in
+  any form — literal, class (`[a-z]{2}-[a-z]{2}/`), group, optional group
+  (`(?:…/)?`, `(?:/…)?`), nested — when each of its alternatives is a locale.
+  A regex source that names a shielded base but that none of this can place
+  gets a save warning rather than silently reserving nothing.
 
 ### How it stays current
 
@@ -606,7 +612,12 @@ current rewrite slugs for exactly this reason. Structural caveats:
   the saving request still holds the old rewrite rules and no endpoints, so
   only then is the snapshot true. The daily health check does the same; a
   plugin's rewrite routes changing (activated, deactivated) is caught there,
-  and the root-mode tile flags the stale snapshot meanwhile. When root mode
+  and the root-mode tile flags the stale snapshot meanwhile. These automatic
+  writes are not held back by an error the live config already carries (a
+  status whose plugin was switched off); a new error still refuses them, and
+  with no live artifact they publish nothing. Only a busy lock or a failed
+  database read is retried; any other refusal of a needed root refresh
+  switches root matching off. When root mode
   was switched off and will not come back, the notice's **Discard the kept
   root settings** removes them.
 - **Root mode: unticking one root type is refused** (the S1 together-rule) —

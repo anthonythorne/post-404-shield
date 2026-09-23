@@ -97,9 +97,12 @@ uploads/post-404-shield/config.php  ◀──read ONLY this──  loader + gene
 
 The mu-plugin loader requires `bootstrap.php` (the generator) only where
 `generator_needed()` (`src/php/Function/LoadContext.php`) says so: wp-admin
-(including admin-ajax and admin-post), a cron run, WP-CLI, XML-RPC, REST (by
-path or `?rest_route=`), any method other than GET/HEAD, `/robots.txt` (its
-filter adds the probe path's Disallow line) and the bake probe's own loopback.
+(including admin-ajax and admin-post), a cron run, WP-CLI, XML-RPC, any method
+other than GET/HEAD (the block editor saves through REST with POST or PUT), a
+REST request that overrides its method (`?_method=`, `X-HTTP-Method-Override`),
+`/robots.txt` (its filter adds the probe path's Disallow line) and the bake
+probe's own loopback. A plain REST read, like the theme's own front-end
+fetches, is a page view.
 A site running `ALTERNATE_WP_CRON` loads it everywhere, because that setting
 runs cron inside ordinary page requests. A plain page view never builds,
 bakes or saves anything, so it skips the ten class files and four controllers;
@@ -317,9 +320,19 @@ The catch: PublishPress Revisions applies the parent's **slug** with a direct
 `$wpdb->update()` that **bypasses `save_post`** — a plain save hook would miss a
 revision that renames the post. So the shield also listens on PublishPress's own
 `revision_applied` and `revision_published` actions (fired *after* the slug is
-written and the cache cleaned) and **appends** the new slug. Standard slug changes
-(editor, Quick Edit, REST) come through `save_post_<type>`. The daily rebuild
-covers anything that bypasses every hook.
+written and the cache cleaned) and **appends** the new slug. Before the write,
+PublishPress's `revisionary_apply_revision_data` filter hands over the live post
+— as a raw `wp_posts` row, not a `WP_Post` — and the shield notes its and its
+descendants' addresses then, so a revision that moves a page keeps the
+addresses it leaves (`_post_shield_old_uri`). Standard slug changes (editor,
+Quick Edit, REST) come through `save_post`, checked against the types the live
+artifact shields when it fires. The daily rebuild covers anything that
+bypasses every hook.
+
+A request's builder follows the live artifact: a save in another request while
+this one runs (a daily rebuild, a queued job, a long import) changes the format,
+statuses and root types its rebuilds and appends write, from the moment it
+lands. Only a save's own rebuilds and the preflights build from the candidate.
 
 ## Themed 404 pages
 

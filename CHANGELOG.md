@@ -16,8 +16,9 @@ Moved out of the sites that used it into its own repository.
   file reads to two, and a REST, cron or admin request from five to none. Every
   decision is unchanged.
 - The generator (`bootstrap.php`) loads only where it is needed — admin, cron,
-  WP-CLI, REST, XML-RPC, non-GET requests, `robots.txt` and the bake probe
-  (`generator_needed()`), about 6 ms saved per page view. Sites vendoring the
+  WP-CLI, XML-RPC, non-GET requests, a REST request that overrides its method,
+  `robots.txt` and the bake probe (`generator_needed()`), about 6 ms saved per
+  page view; a plain REST read is a page view. Sites vendoring the
   shield should copy the updated `examples/mu-plugins/05-post-404-shield-bootstrap.php`.
 - Schedule checks run only in wp-admin, on a cron run or under WP-CLI, not on
   every `init`.
@@ -95,9 +96,8 @@ Moved out of the sites that used it into its own repository.
   older artifact keeps working).
 - A failed database read never builds a list: the rebuild keeps the previous
   one, and a save is refused.
-- Automatic switch-offs land whatever unrelated errors the config carries,
-  never over a save that committed meanwhile, and only for a root-mode
-  refusal (a busy lock is retried); the self-heal checks the revision too.
+- Automatic switch-offs never land over a save that committed meanwhile; the
+  self-heal checks the revision too.
 - A type switched on, or given more statuses, is rebuilt before the swap.
 - Redirects that go on below a base with a numeric part reserve digit-led
   slugs (others warn at save); `^/?…` and optional locale groups reduce; a
@@ -108,6 +108,31 @@ Moved out of the sites that used it into its own repository.
   addresses; WPML translations are re-walked only on a re-parent.
 - Retention is stored under the save lock; a new type row never overwrites an
   entry holding its key; an all-digit blocked-section name is refused clearly.
+- Automatic writes (the permalink re-check, the daily health check, the nightly
+  redirect sync) carry an error the live config already has but refuse a new
+  one, and publish nothing when no config is live. Only a busy lock or a failed
+  read is retried; any other refusal of a needed root refresh switches root
+  matching off.
+- The save gates switch WPML's language without writing its cookie: a save
+  that replayed many URLs sent one Set-Cookie per post and nginx answered 502.
+- Redirect derivation (version 4): escaped slashes, top-level alternations and
+  a leading locale in any regex form are read; the part below a base is cut
+  where the source's literal run ended; a regex source naming a shielded base
+  that cannot be placed warns at save. The version test keeps a per-shape
+  table and an append-only version history.
+- The request's builder follows the live artifact, so a long rebuild, queued
+  job or import writes what a save made meanwhile; the sync controller checks
+  managed types when a hook fires.
+- PublishPress's pre-apply filter passes a raw row, which is now read, so a
+  revision's move keeps the addresses it leaves; the site loader loads the
+  write side on that filter and on a post delete.
+- The root preflight measures every public status either the stored or the
+  candidate config lists, as the based gate does.
+- Appends no longer take `LOCK_EX` (a failed write is logged), and probe for a
+  rebuild before reading the list.
+- A blocked-section name PHP reads as a number (`-1`) is refused by name.
+- The pre-boot loader checks every reader and matcher function it calls, so a
+  half-deployed release leaves the shield off instead of failing the request.
 
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing
