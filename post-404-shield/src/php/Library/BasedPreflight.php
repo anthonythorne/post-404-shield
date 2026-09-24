@@ -582,6 +582,16 @@ final class BasedPreflight {
 	}
 
 	/**
+	 * The served statuses anyone may see (served_statuses() without the
+	 * private ones).
+	 *
+	 * @return string[]
+	 */
+	private static function public_served_statuses(): array {
+		return array_values( array_filter( self::served_statuses(), static fn( string $status ): bool => ! self::is_private_status( $status ) ) );
+	}
+
+	/**
 	 * Whether a served post or page (any type) carries this slug.
 	 *
 	 * @param string $slug Slug.
@@ -697,12 +707,17 @@ final class BasedPreflight {
 				continue;
 			}
 			$leaf = basename( $base );
+			// Pages in every public status WordPress serves, whatever the
+			// entry lists: a page the base swallows is a break whichever
+			// entry claims it (private pages, staff-only, are left out as
+			// everywhere a private status is a warning at most).
+			$page_statuses = self::public_served_statuses();
 			// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
-			$status_in = implode( ', ', array_fill( 0, count( $statuses ), '%s' ) );
+			$status_in = implode( ', ', array_fill( 0, count( $page_statuses ), '%s' ) );
 			$parents   = (array) $wpdb->get_col(
 				$wpdb->prepare(
 					"SELECT ID FROM {$wpdb->posts} WHERE post_type = 'page' AND post_status IN ($status_in) AND post_name = %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- an IN list holds one placeholder per status, built from a count.
-					array_merge( $statuses, [ $leaf ] )
+					array_merge( $page_statuses, [ $leaf ] )
 				)
 			);
 			// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
@@ -715,7 +730,7 @@ final class BasedPreflight {
 					[
 						'post_parent' => (int) $parent,
 						'post_type'   => 'page',
-						'post_status' => $statuses,
+						'post_status' => $page_statuses,
 						'numberposts' => self::SAMPLE_PAGES,
 						'fields'      => 'ids',
 					]
@@ -723,8 +738,11 @@ final class BasedPreflight {
 					$path = $this->public_path( (int) $child, 'page' );
 					if ( null !== $path && $found < self::SAMPLE_PAGES ) {
 						$paths[]                = $path;
+						// No status: not one of the entry's own posts, so the
+						// status handling (an unlisted status warns) does
+						// not apply — a swallowed page is a break.
 						$this->sampled[ $path ] = [
-							'status' => 'publish',
+							'status' => '',
 							'home'   => $base,
 						];
 						++$found;

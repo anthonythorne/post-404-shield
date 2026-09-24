@@ -34,16 +34,17 @@ class PostShieldServedSampleTest extends TestCase {
 	private function stub(): void {
 		eval( // phpcs:ignore Squiz.PHP.Eval.Discouraged -- test-only global stubs, in a separate process.
 			'function get_post_types( $args = [], $output = "names" ) { return "objects" === $output ? [] : [ "page" => "page", "firmware" => "firmware", "service" => "service" ]; }
-			function get_post_stati( $args = [] ) { return [ "publish" => "publish", "discontinued" => "discontinued", "draft" => "draft" ]; }
-			function get_post_status_object( $status ) { return in_array( $status, [ "publish", "discontinued", "draft" ], true ) ? (object) [ "name" => $status, "private" => false, "public" => "draft" !== $status ] : null; }
+			function get_post_stati( $args = [] ) { return [ "publish" => "publish", "discontinued" => "discontinued", "private" => "private", "draft" => "draft" ]; }
+			function get_post_status_object( $status ) { return in_array( $status, [ "publish", "discontinued", "private", "draft" ], true ) ? (object) [ "name" => $status, "private" => "private" === $status, "public" => ! in_array( $status, [ "draft", "private" ], true ) ] : null; }
 			function is_post_status_viewable( $status ) { return is_object( $status ) ? $status->public : "draft" !== $status; }
 			function is_post_type_hierarchical( $type ) { return "page" === $type; }
 			function get_post_field( $field, $id ) { return 9 === (int) $id ? "old-camera" : "svc-post"; }
-			function get_page_uri( $id ) { return get_post_field( "post_name", $id ); }
+			function get_page_uri( $id ) { return 20 === (int) $id ? "news" : get_post_field( "post_name", $id ); }
+			function get_children( $args ) { return 20 === (int) $args["post_parent"] && in_array( "discontinued", (array) $args["post_status"], true ) ? [ 21 ] : []; }
 			function get_page_by_path( $path ) { return null; }
 			function add_filter( ...$args ) { return true; }
 			function remove_filter( ...$args ) { return true; }
-			function get_permalink( $id ) { return 9 === (int) $id ? "https://example.test/support/firmware/old-camera/" : "https://example.test/svc-post/"; }
+			function get_permalink( $id ) { $map = [ 9 => "https://example.test/support/firmware/old-camera/", 5 => "https://example.test/svc-post/", 21 => "https://example.test/news/old-child/" ]; return $map[ (int) $id ] ?? "https://example.test/?p=" . (int) $id; }
 			function wp_parse_url( $url, $component = -1 ) { return parse_url( $url, $component ); }
 			function get_taxonomies( $args = [], $output = "names" ) { return []; }
 			function get_terms( $args = [] ) { return []; }'
@@ -97,7 +98,15 @@ class PostShieldServedSampleTest extends TestCase {
 				if ( false !== strpos( $query, "'firmware'" ) ) {
 					return false !== strpos( $query, "'discontinued'" ) ? [ 9 ] : [];
 				}
-				return false !== strpos( $query, "'service'" ) ? [ 5 ] : [];
+				if ( false !== strpos( $query, "post_type = 'page'" ) && false !== strpos( $query, "post_name = 'news'" ) ) {
+					return [ 20 ];
+				}
+				if ( false !== strpos( $query, "'service'" ) ) {
+					// The newest service rows are private (no pretty link in
+					// cron); the published one is older.
+					return false !== strpos( $query, "'publish'" ) && false === strpos( $query, "'private'" ) ? [ 5 ] : ( false !== strpos( $query, "'private'" ) ? [ 6, 7, 8 ] : [] );
+				}
+				return [];
 			}
 		};
 		require_once __DIR__ . '/../../post-404-shield/src/php/Function/ConfigReader.php';
@@ -123,6 +132,20 @@ class PostShieldServedSampleTest extends TestCase {
 	}
 
 	/**
+	 * A page beneath a base is replayed in every public status WordPress
+	 * serves (a discontinued child here), whatever the entry lists.
+	 *
+	 * @return void
+	 */
+	public function test_a_discontinued_page_beneath_a_base_is_replayed(): void {
+		$this->stub();
+		$method = new \ReflectionMethod( \Post404Shield\Library\BasedPreflight::class, 'real_paths' );
+		$method->setAccessible( true );
+		$paths = $method->invoke( new \Post404Shield\Library\BasedPreflight(), 'story', [ 'news' ], [ 'publish' ] );
+		$this->assertContains( '/news/old-child/', $paths );
+	}
+
+	/**
 	 * Root mode's sample reads a type shielded under a base at its real
 	 * address too.
 	 *
@@ -143,6 +166,6 @@ class PostShieldServedSampleTest extends TestCase {
 				],
 			]
 		);
-		$this->assertContains( '/svc-post/', $paths );
+		$this->assertContains( '/svc-post/', $paths, 'The published post is sampled, although newer private rows exist.' );
 	}
 }

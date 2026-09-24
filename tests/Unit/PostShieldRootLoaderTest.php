@@ -211,14 +211,21 @@ echo "FELL-THROUGH";
 	 * @return array<string, string> Lower-cased header name => value.
 	 */
 	private function headers_for( string $uri ): array {
+		// A token this server stamps on every response: an answer from any
+		// other listener on the port fails the test instead of passing it.
+		$token = bin2hex( random_bytes( 8 ) );
 		file_put_contents(
 			$this->root . '/server.php',
 			'<?php
+header( "X-Test-Server: ' . $token . '" );
 require __DIR__ . "/wp-content/mu-plugins/post-404-shield/bootstrap-front-end-post-404-shield.php";
 echo "FELL-THROUGH";
 '
 		);
-		$port   = random_int( 20000, 40000 );
+		// A port the OS says is free (not a guess in the ephemeral range).
+		$probe = stream_socket_server( 'tcp://127.0.0.1:0' );
+		$port  = (int) substr( (string) strrchr( (string) stream_socket_get_name( $probe, false ), ':' ), 1 );
+		fclose( $probe );
 		$server = proc_open(
 			[ PHP_BINARY, '-S', '127.0.0.1:' . $port, $this->root . '/server.php' ],
 			[
@@ -256,6 +263,7 @@ echo "FELL-THROUGH";
 			proc_terminate( $server );
 			proc_close( $server );
 		}
+		$this->assertSame( $token, $headers['x-test-server'] ?? '', 'The answer came from this test\'s own server.' );
 		return $headers;
 	}
 

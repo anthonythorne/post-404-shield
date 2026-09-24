@@ -65,7 +65,9 @@ review; changing one is a design change, not a bug fix. Read
   URLs. An empty candidate list is measured **armed**, stricter than the loader.
   A blocked section, a removed reserved slug and root mode's sample of other
   types replay content in every status WordPress serves (discontinued,
-  private…), not only published.
+  private…), not only published. Pages beneath a base are replayed in every
+  public status and are always a break when swallowed, whichever entry claims
+  them.
 - **Lists that must exist before the swap are written first**, from the union of
   the live and candidate statuses, and only while the save still holds its
   lock; the post-swap rebuild narrows them. A save refused after that leaves the

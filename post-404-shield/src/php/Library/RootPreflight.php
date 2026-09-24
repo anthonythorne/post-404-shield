@@ -209,20 +209,48 @@ class RootPreflight {
 		// Every status WordPress serves at a post's address (discontinued,
 		// private… as well as published).
 		$served    = array_values( array_filter( function_exists( 'get_post_stati' ) ? array_keys( (array) get_post_stati() ) : [ 'publish' ], static fn( $status ): bool => 'publish' === $status || ( null !== get_post_status_object( (string) $status ) && AllowlistBuilder::is_servable_status( (string) $status ) ) ) );
-		$status_in = implode( ', ', array_fill( 0, count( $served ), '%s' ) );
 		foreach ( get_post_types( [ 'public' => true ], 'names' ) as $type ) {
 			if ( 'attachment' === $type || in_array( $type, $root_types, true ) ) {
 				continue;
 			}
-			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- an IN list holds one placeholder per status, built from a count.
-			foreach ( (array) $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_status IN ($status_in) AND post_name <> '' ORDER BY ID DESC LIMIT %d", array_merge( [ $type ], $served, [ self::OTHER_SAMPLE ] ) ) ) as $id ) {
-				$path = $path_of( get_permalink( (int) $id ) );
-				if ( null !== $path ) {
-					$paths[] = $path;
+			// Per status, so private rows never crowd the published ones out.
+			foreach ( $served as $status ) {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+				foreach ( (array) $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_status = %s AND post_name <> '' ORDER BY ID DESC LIMIT %d", $type, $status, self::OTHER_SAMPLE ) ) as $id ) {
+					$path = $path_of( self::permalink_as_reader( (int) $id ) );
+					if ( null !== $path ) {
+						$paths[] = $path;
+					}
 				}
 			}
 		}
 		return $paths;
+	}
+
+	/**
+	 * A post's pretty permalink as a user who may read it: WordPress gives a
+	 * private post its pretty address only to such a user, and the daily
+	 * replay runs from cron, with no user at all.
+	 *
+	 * @param int $id Post ID.
+	 *
+	 * @return string|false
+	 */
+	private static function permalink_as_reader( int $id ) {
+		$reader = static function ( array $allcaps, array $caps, array $args ) use ( $id ): array {
+			if ( 'read_post' === ( $args[0] ?? '' ) && (int) ( $args[2] ?? 0 ) === $id ) {
+				foreach ( $caps as $cap ) {
+					$allcaps[ $cap ] = true;
+				}
+			}
+			return $allcaps;
+		};
+		add_filter( 'user_has_cap', $reader, 10, 3 );
+		try {
+			return get_permalink( $id );
+		} finally {
+			remove_filter( 'user_has_cap', $reader, 10 );
+		}
 	}
 
 	/**
