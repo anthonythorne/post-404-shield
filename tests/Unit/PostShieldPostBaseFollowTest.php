@@ -253,9 +253,17 @@ class PostShieldPostBaseFollowTest extends TestCase {
 			'root'      => true,
 			'post_type' => 'page',
 		];
-		$candidate                             = $live;
+		$candidate                              = $live;
 		$candidate['excluded_bases']['derived'] = [ 'old-news', 'old-events' ];
-		$this->assertFalse( $same->invoke( null, $as_loaded->invoke( null, $candidate ), $as_loaded->invoke( null, $live ) ), 'Root rows kept off: all of it counts.' );
+		$this->assertTrue( $same->invoke( null, $as_loaded->invoke( null, $candidate ), $as_loaded->invoke( null, $live ) ), 'Root rows kept off: root matching does not run, derived drift archives nothing.' );
+
+		$candidate['excluded_bases']['operator'] = [ 'blog' ];
+		$this->assertFalse( $same->invoke( null, $as_loaded->invoke( null, $candidate ), $as_loaded->invoke( null, $live ) ), 'Root rows kept off: a kept Posts base still lands.' );
+
+		$live['entries']['page']['enabled']     = true;
+		$candidate                              = $live;
+		$candidate['excluded_bases']['derived'] = [ 'old-news', 'old-events' ];
+		$this->assertFalse( $same->invoke( null, $as_loaded->invoke( null, $candidate ), $as_loaded->invoke( null, $live ) ), 'Root matching on: all of it counts.' );
 	}
 
 	/**

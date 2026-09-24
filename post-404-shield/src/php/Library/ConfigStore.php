@@ -862,7 +862,7 @@ class ConfigStore {
 		foreach ( (array) $rows as $row ) {
 			$sources[] = [
 				'pattern' => $row->source ?? null,
-				'regex'   => ! empty( $row->is_regex ), // '0' is empty().
+				'regex'   => ! empty( $row->is_regex ), // The string zero counts as empty.
 			];
 		}
 		return $sources;
@@ -1508,6 +1508,17 @@ class ConfigStore {
 	 * @return bool
 	 */
 	public function has_enabled_root_entries( array $entries ): bool {
+		return self::enabled_root_rows( $entries );
+	}
+
+	/**
+	 * Whether any root entry is switched on (root matching runs).
+	 *
+	 * @param array<mixed> $entries Config entries.
+	 *
+	 * @return bool
+	 */
+	private static function enabled_root_rows( array $entries ): bool {
 		foreach ( $entries as $entry ) {
 			if ( ! is_array( $entry ) || true !== ( $entry['root'] ?? false ) ) {
 				continue;
@@ -2049,6 +2060,18 @@ class ConfigStore {
 				if ( ! \Post404Shield\excluded_base_is_valid( $base ) ) {
 					/* translators: 1: the offending excluded base, 2: bucket name. */
 					$errors[] = sprintf( __( 'Excluded base "%1$s" (%2$s) is invalid — lowercase letters, digits, dots, hyphens and underscores only (optional trailing *), no leading/trailing slash.', 'post-404-shield' ), is_scalar( $base ) ? (string) $base : gettype( $base ), $bucket );
+				}
+			}
+		}
+		// Root matching takes the language folder off a path before it
+		// compares the excluded bases, so an operator base that starts with
+		// one can never match: say so, rather than 404 the route it names.
+		$pattern = self::locale_pattern_of( $config );
+		if ( '' !== $pattern && \Post404Shield\locale_pattern_is_valid( $pattern ) ) {
+			foreach ( (array) ( $excluded['operator'] ?? [] ) as $base ) {
+				if ( is_string( $base ) && 1 === preg_match( '#^(?:' . $pattern . ')$#', explode( '/', $base )[0] ) ) {
+					/* translators: %s: the excluded base as typed. */
+					$errors[] = sprintf( __( 'Excluded base "%s" starts with a language folder. Enter the address without it: the language is taken off before bases are compared.', 'post-404-shield' ), $base );
 				}
 			}
 		}
@@ -2596,7 +2619,7 @@ class ConfigStore {
 				$this->confirmed_drop_pairs[] = (string) ( $drop['entry'] ?? '' ) . ':' . (string) $drop['status'];
 			}
 			if ( [] !== $dropped ) {
-				$which = array_values( array_unique( array_map( static fn( array $b ): string => $name( $b['entry'] ?? '' ) . ' — "' . (string) $b['status'] . '"', $dropped ) ) );
+				$which      = array_values( array_unique( array_map( static fn( array $b ): string => $name( $b['entry'] ?? '' ) . ' — "' . (string) $b['status'] . '"', $dropped ) ) );
 				$warnings[] = sprintf(
 					/* translators: 1: number of real URLs, 2: the entries and statuses dropped. */
 					_n( 'Dropped a status as confirmed: %1$d real URL checked now gets a 404 (%2$s).', 'Dropped a status as confirmed: %1$d real URLs checked now get a 404 (%2$s).', count( $dropped ), 'post-404-shield' ),
@@ -2659,9 +2682,9 @@ class ConfigStore {
 				);
 			}
 			return [
-				'ok'          => false,
-				'errors'      => $coverage_errors,
-				'warnings'    => $warnings,
+				'ok'                => false,
+				'errors'            => $coverage_errors,
+				'warnings'          => $warnings,
 				// Refused only over dropped statuses: the screen offers to confirm
 				// exactly these (entry, status) pairs.
 				'status_drop'       => [] === array_filter( $breaks, static fn( $b ) => ! isset( $b['status'] ) ),
@@ -2766,21 +2789,29 @@ class ConfigStore {
 
 	/**
 	 * A document as far as the loader reads it, for comparing an automatic
-	 * write with the live artifact: with no root entries the root stage never
-	 * runs, so the snapshot buckets only it reads change nothing, and a new
-	 * redirect source base must not archive a revision each night (pushing
-	 * the operator's own out of retention). The endpoints stay: based
-	 * matching strips them too.
+	 * write with the live artifact: with no root entry switched on the root
+	 * stage never runs, so the snapshot buckets only it reads change nothing,
+	 * and a new redirect source base must not archive a revision each night
+	 * (pushing the operator's own out of retention, the pre-Disable one
+	 * included). The endpoints stay: based matching strips them too.
 	 *
 	 * @param array<string, mixed> $doc Config document.
 	 *
 	 * @return array<string, mixed>
 	 */
 	private static function as_loaded( array $doc ): array {
-		if ( ! self::has_root_rows( (array) ( $doc['entries'] ?? [] ) ) && is_array( $doc['excluded_bases'] ?? null ) ) {
-			foreach ( [ 'floor', 'derived', 'operator', 'post_base', 'posts_left_root' ] as $bucket ) {
-				unset( $doc['excluded_bases'][ $bucket ] );
-			}
+		if ( ! is_array( $doc['excluded_bases'] ?? null ) ) {
+			return $doc;
+		}
+		$entries = (array) ( $doc['entries'] ?? [] );
+		// Root rows kept switched off: the root stage does not run either,
+		// but the moved-base record (operator, post_base, posts_left_root)
+		// must still land for when root matching comes back on.
+		$unread = self::has_root_rows( $entries )
+			? ( self::enabled_root_rows( $entries ) ? [] : [ 'floor', 'derived' ] )
+			: [ 'floor', 'derived', 'operator', 'post_base', 'posts_left_root' ];
+		foreach ( $unread as $bucket ) {
+			unset( $doc['excluded_bases'][ $bucket ] );
 		}
 		return $doc;
 	}
@@ -2882,10 +2913,10 @@ class ConfigStore {
 					: sprintf( __( 'Would block: %s', 'post-404-shield' ), $blocked_url );
 			}
 			return [
-				'ok'           => false,
-				'root_refused' => true,
-				'errors'       => $block_errors,
-				'warnings'     => $warnings,
+				'ok'                => false,
+				'root_refused'      => true,
+				'errors'            => $block_errors,
+				'warnings'          => $warnings,
 				// Refused only over dropped statuses: the screen offers to confirm
 				// exactly these (entry, status) pairs.
 				'status_drop'       => [] === array_diff( $new_blocks, array_keys( $dropped ) ),
@@ -3125,8 +3156,9 @@ class ConfigStore {
 	 * Which effective CPTs need a synchronous allowlist rebuild for a candidate
 	 * config, split by WHEN (relative to the artifact swap). Compares against
 	 * the CURRENT ARTIFACT — the loader's live view: an enabled full-path entry
-	 * whose type is not already serving full-path rebuilds before the swap; an
-	 * enabled slug entry whose type was serving full-path rebuilds after it.
+	 * whose type is not already serving full-path, or one listing a status the
+	 * live one does not, rebuilds before the swap; an enabled slug entry whose
+	 * type was serving full-path, or one dropping a status, rebuilds after it.
 	 *
 	 * @param array<string, mixed> $candidate Candidate config document.
 	 *
@@ -3153,8 +3185,9 @@ class ConfigStore {
 			}
 		}
 
-		$before = [];
-		$after  = [];
+		$before     = [];
+		$after      = [];
+		$candidates = [];
 		foreach ( (array) ( $candidate['entries'] ?? [] ) as $key => $entry ) {
 			if ( ! is_array( $entry ) || ( isset( $entry['enabled'] ) && false === $entry['enabled'] ) ) {
 				continue;
@@ -3162,9 +3195,10 @@ class ConfigStore {
 			if ( 'allowlist' !== ( $entry['mode'] ?? 'allowlist' ) ) {
 				continue;
 			}
-			$cpt       = (string) ( $entry['post_type'] ?? $key );
-			$wants_fp  = self::is_full_path( $entry );
-			$serves_fp = $current_full_path[ $cpt ] ?? false;
+			$cpt                = (string) ( $entry['post_type'] ?? $key );
+			$candidates[ $cpt ] = array_merge( $candidates[ $cpt ] ?? [], \Post404Shield\effective_statuses( $entry ) );
+			$wants_fp           = self::is_full_path( $entry );
+			$serves_fp          = $current_full_path[ $cpt ] ?? false;
 			// A type the live artifact does not shield, or shields with fewer
 			// statuses, has a list on disk that is stale or missing: rebuild it
 			// before the swap. Safe then — the old artifact does not read that
@@ -3177,6 +3211,16 @@ class ConfigStore {
 				$after[] = $cpt;
 			} elseif ( $widened ) {
 				$before[] = $cpt;
+			}
+		}
+		// A status the live artifact lists and the candidate drops: its posts
+		// leave the list only when it is rebuilt, after the swap (until then
+		// the live artifact reads the wider list, a superset). Every save path
+		// — the settings screen, a restore, the CLI — so a hidden status is not
+		// confirmable until the nightly rebuild.
+		foreach ( $candidates as $cpt => $statuses ) {
+			if ( isset( $current_statuses[ $cpt ] ) && [] !== array_diff( $current_statuses[ $cpt ], $statuses ) && ! in_array( $cpt, $before, true ) ) {
+				$after[] = $cpt;
 			}
 		}
 
@@ -3668,13 +3712,14 @@ class ConfigStore {
 		if ( $this->redirect_read_failed ) {
 			$live['derived'] = array_values( array_unique( array_merge( (array) $live['derived'], array_filter( (array) ( $stored['derived'] ?? [] ), 'is_string' ) ) ) );
 		}
-		// With no root entries the root stage never runs: only the endpoints
-		// (based matching strips them too) and the reserved slugs are read.
+		// With no root entry switched on the root stage never runs: only the
+		// endpoints (based matching strips them too) and the reserved slugs
+		// are read. Kept-off root rows still record a moved Posts base.
 		$root_rows = self::has_root_rows( (array) ( $config['entries'] ?? [] ) );
 		if ( $root_rows && array_key_exists( 'post_base', $stored ) && $stored['post_base'] !== $live['post_base'] ) {
 			return true; // The permalink post base moved.
 		}
-		foreach ( $root_rows ? [ 'floor', 'derived', 'endpoints' ] : [ 'endpoints' ] as $bucket ) {
+		foreach ( self::enabled_root_rows( (array) ( $config['entries'] ?? [] ) ) ? [ 'floor', 'derived', 'endpoints' ] : [ 'endpoints' ] as $bucket ) {
 			$a = array_values( array_filter( (array) ( $stored[ $bucket ] ?? [] ), 'is_string' ) );
 			$b = array_values( (array) $live[ $bucket ] );
 			sort( $a );

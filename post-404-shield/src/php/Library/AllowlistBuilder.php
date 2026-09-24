@@ -364,7 +364,7 @@ class AllowlistBuilder {
 		$deadline = microtime( true ) + self::LOCK_WAIT;
 		do {
 			$would_block = 0;
-			if ( flock( $handle, LOCK_EX | LOCK_NB, $would_block ) ) {
+			if ( flock( $handle, LOCK_EX | LOCK_NB, $would_block ) ) { // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_flock -- the list locks and files live in uploads/post-404-shield.
 				return $handle;
 			}
 			if ( 1 !== $would_block ) {
@@ -393,9 +393,9 @@ class AllowlistBuilder {
 			return false;
 		}
 		$would_block = 0;
-		$free        = flock( $handle, LOCK_EX | LOCK_NB, $would_block );
+		$free        = flock( $handle, LOCK_EX | LOCK_NB, $would_block ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_flock -- the list locks and files live in uploads/post-404-shield.
 		if ( $free ) {
-			flock( $handle, LOCK_UN );
+			flock( $handle, LOCK_UN ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_flock -- the list locks and files live in uploads/post-404-shield.
 		}
 		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		return ! $free && 1 === $would_block;
@@ -417,9 +417,9 @@ class AllowlistBuilder {
 			return false;
 		}
 		$would_block = 0;
-		$free        = flock( $handle, LOCK_EX | LOCK_NB, $would_block );
+		$free        = flock( $handle, LOCK_EX | LOCK_NB, $would_block ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_flock -- the list locks and files live in uploads/post-404-shield.
 		if ( $free ) {
-			flock( $handle, LOCK_UN );
+			flock( $handle, LOCK_UN ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_flock -- the list locks and files live in uploads/post-404-shield.
 		}
 		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		return ! $free && 1 === $would_block;
@@ -434,7 +434,7 @@ class AllowlistBuilder {
 	 */
 	private function unlock( $handle ): void {
 		if ( is_resource( $handle ) ) {
-			flock( $handle, LOCK_UN );
+			flock( $handle, LOCK_UN ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_flock -- the list locks and files live in uploads/post-404-shield.
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		}
 	}
@@ -697,11 +697,12 @@ class AllowlistBuilder {
 		}
 		$lines = array_merge( $lines, $this->fetch_old_slugs( $post_type, $statuses ) );
 		if ( $this->is_hierarchical( $post_type ) ) {
-			// A slug list takes a former top-level address; a full-path list any.
+			// A full-path list takes a former address whole; a slug list its
+			// first segment, the old top-level ancestor (the only part the
+			// loader matches), so a child's old address still reaches
+			// WordPress's 301 after its parent is deleted or trashed.
 			foreach ( $this->old_uri_lines( [ $post_type ] ) as $uri ) {
-				if ( 'full-path' === $match || false === strpos( $uri, '/' ) ) {
-					$lines[] = $uri;
-				}
+				$lines[] = 'full-path' === $match ? $uri : explode( '/', $uri )[0];
 			}
 		}
 		// WordPress serves a post's media at pages nested under its URL; a
@@ -1352,14 +1353,14 @@ class AllowlistBuilder {
 		$nodes = [];
 		foreach ( array_chunk( array_values( array_unique( array_map( 'intval', $ids ) ) ), 1000 ) as $chunk ) {
 			$placeholders = implode( ', ', array_fill( 0, count( $chunk ), '%d' ) );
-			// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- an IN list holds one placeholder per value, built from a count; its values are passed as one array.
 			$rows = $wpdb->get_results(
 				$wpdb->prepare(
 					"SELECT ID, post_name, post_parent FROM {$wpdb->posts} WHERE ID IN ($placeholders)",
 					$chunk
 				)
 			);
-			// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber
 			self::assert_query();
 			foreach ( (array) $rows as $row ) {
 				$nodes[ (int) $row->ID ] = [ (string) $row->post_name, (int) $row->post_parent ];
@@ -1437,7 +1438,7 @@ class AllowlistBuilder {
 		}
 
 		// An `inherit` attachment takes its parent's status.
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- an IN list holds one placeholder per value, built from a count; its values are passed as one array.
 		$rows = $wpdb->get_results(
 			$wpdb->prepare(
 				"SELECT a.ID, a.post_name, a.post_parent, parent.post_type AS parent_type, parent.post_status AS parent_status FROM {$wpdb->posts} a
@@ -1450,7 +1451,7 @@ class AllowlistBuilder {
 				$args
 			)
 		);
-		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber
 		self::assert_query();
 		return (array) $rows;
 	}
@@ -1580,7 +1581,7 @@ class AllowlistBuilder {
 		}
 		$type_placeholders = implode( ', ', array_fill( 0, count( $root_types ), '%s' ) );
 
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- an IN list holds one placeholder per value, built from a count; its values are passed as one array.
 		$rows = $wpdb->get_results(
 			$wpdb->prepare(
 				"SELECT pm.meta_value AS old_slug, p.ID, p.post_name, p.post_parent, p.post_type, p.post_status
@@ -1591,7 +1592,7 @@ class AllowlistBuilder {
 				$root_types
 			)
 		);
-		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber
 		self::assert_query();
 
 		$lines   = [];
@@ -1632,7 +1633,7 @@ class AllowlistBuilder {
 		global $wpdb;
 		$statuses     = $this->attachment_parent_statuses();
 		$placeholders = implode( ', ', array_fill( 0, count( $statuses ), '%s' ) );
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- an IN list holds one placeholder per value, built from a count; its values are passed as one array.
 		$rows = (array) $wpdb->get_results(
 			$wpdb->prepare(
 				"SELECT a.ID, pm.meta_value AS post_name, a.post_parent, parent.post_type AS parent_type, parent.post_status AS parent_status
@@ -1645,7 +1646,7 @@ class AllowlistBuilder {
 				$statuses
 			)
 		);
-		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber
 		self::assert_query();
 		return $this->attachment_rows_lines( $rows );
 	}
@@ -1783,7 +1784,7 @@ class AllowlistBuilder {
 		}
 		$statuses     = $this->post_statuses_for( 'post' );
 		$placeholders = implode( ', ', array_fill( 0, count( $statuses ), '%s' ) );
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- an IN list holds one placeholder per value, built from a count; its values are passed as one array.
 		$old = $wpdb->get_col(
 			$wpdb->prepare(
 				"SELECT pm.meta_value FROM {$wpdb->postmeta} pm
@@ -1793,7 +1794,7 @@ class AllowlistBuilder {
 				$statuses
 			)
 		);
-		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber
 		self::assert_query();
 		return array_merge( $this->fetch_paths( 'post', $statuses ), array_map( 'strval', (array) $old ) );
 	}
@@ -1821,6 +1822,7 @@ class AllowlistBuilder {
 		$lock  = null;
 		// Read and write: NFSv4 refuses a shared lock on a write-only handle.
 		$stream = is_dir( dirname( $file ) ) ? fopen( dirname( $file ) . '/.stream', 'c+' ) : false; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		// phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_flock -- the list locks and files live in uploads/post-404-shield.
 		$shared = false !== $stream && flock( $stream, LOCK_SH ); // Appends see the read in flight (stream_in_flight()).
 		if ( ! $shared ) {
 			// Appends cannot see this stream: hold the list's lock for it
@@ -1858,7 +1860,7 @@ class AllowlistBuilder {
 			$this->unlock( $lock );
 			if ( false !== $stream ) {
 				if ( $shared ) {
-					flock( $stream, LOCK_UN );
+					flock( $stream, LOCK_UN ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_flock -- the list locks and files live in uploads/post-404-shield.
 				}
 				fclose( $stream ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			}
@@ -1895,7 +1897,7 @@ class AllowlistBuilder {
 		$copied = 0;
 		foreach ( explode( "\n", $tail ) as $line ) {
 			if ( 1 === preg_match( '#^[a-z0-9_-]+(?:/[a-z0-9_-]+)*$#', $line ) ) {
-				if ( strlen( $line ) + 1 !== fwrite( $handle, $line . "\n" ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+				if ( strlen( $line ) + 1 !== fwrite( $handle, $line . "\n" ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite, WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_fwrite
 					return null;
 				}
 				++$copied;
@@ -2164,7 +2166,7 @@ class AllowlistBuilder {
 		if ( false === $handle ) {
 			return null;
 		}
-		$ok    = false !== fwrite( $handle, "<?php exit; __halt_compiler(); // post-404-shield allowlist — do not edit by hand.\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+		$ok    = false !== fwrite( $handle, "<?php exit; __halt_compiler(); // post-404-shield allowlist — do not edit by hand.\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite, WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_fwrite
 		$count = 0;
 		try {
 			foreach ( $lines as $line ) {
@@ -2172,7 +2174,7 @@ class AllowlistBuilder {
 					break;
 				}
 				if ( is_string( $line ) && 1 === preg_match( '#^[a-z0-9_-]+(?:/[a-z0-9_-]+)*$#', $line ) ) {
-					$ok = strlen( $line ) + 1 === fwrite( $handle, $line . "\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+					$ok = strlen( $line ) + 1 === fwrite( $handle, $line . "\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite, WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_fwrite
 					++$count;
 				}
 			}
@@ -2196,7 +2198,7 @@ class AllowlistBuilder {
 		}
 		// An empty list is the guard plus an empty line, as the loader expects.
 		if ( $ok && 0 === $count ) {
-			$ok = 1 === fwrite( $handle, "\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+			$ok = 1 === fwrite( $handle, "\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite, WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_fwrite
 		}
 		$ok = fclose( $handle ) && $ok; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		if ( ! $ok || ! rename( $tmp, $file ) ) { // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_rename

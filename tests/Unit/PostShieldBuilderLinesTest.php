@@ -38,6 +38,7 @@ class PostShieldBuilderLinesTest extends TestCase {
 	private function stub(): void {
 		eval( // phpcs:ignore Squiz.PHP.Eval.Discouraged -- test-only global stubs, in a separate process.
 			'function is_post_type_hierarchical( $type ) { return "post" !== $type; }
+			function get_post_type_object( $type ) { return (object) [ "hierarchical" => "post" !== $type ]; }
 			function post_type_exists( $type ) { return true; }
 			function get_post_status_object( $status ) { return (object) [ "private" => false, "public" => true ]; }
 			function is_post_status_viewable( $status ) { return true; }
@@ -76,6 +77,16 @@ class PostShieldBuilderLinesTest extends TestCase {
 					'post_name'   => $name,
 					'post_parent' => $parent,
 				];
+				if ( false !== strpos( $query, "'_post_shield_old_uri'" ) ) {
+					// A child's recorded old address, its parent since deleted.
+					return [
+						(object) [
+							'uri'         => 'x-series/specs',
+							'post_type'   => 'camera',
+							'post_status' => 'publish',
+						],
+					];
+				}
 				if ( false !== strpos( $query, 'WHERE ID IN' ) ) {
 					return [ $row( 1, 'draft-series', 0 ) ];
 				}
@@ -96,6 +107,11 @@ class PostShieldBuilderLinesTest extends TestCase {
 			 * @return string[]
 			 */
 			public function get_col( $query ) {
+				if ( false !== strpos( $query, "post_type = 'post'" ) && false === strpos( $query, '_wp_old_slug' ) ) {
+					// A flat post whose post_parent is set: WordPress serves it at
+					// its flat address, so no top-level filter may drop it.
+					return false !== strpos( $query, 'post_parent = 0' ) ? [] : [ 'spec-child' ];
+				}
 				return false !== strpos( $query, "p.post_type = 'post'" ) && false !== strpos( $query, '_wp_old_slug' ) ? [ 'old-root-post' ] : [];
 			}
 		};
@@ -163,5 +179,44 @@ class PostShieldBuilderLinesTest extends TestCase {
 			'post_status' => [ 'publish' ],
 		];
 		$this->assertNotContains( 'old-root-post', $stream( ( new \Post404Shield\Library\AllowlistBuilder( $config ) )->set_posts_left_root( true ) ), 'At the root: the Posts list has them.' );
+	}
+
+	/**
+	 * Slug mode: a child's old address (its parent deleted, the child moved
+	 * up) is listed by its old top-level segment, the only part the loader
+	 * matches, so the old URL still reaches WordPress's 301.
+	 *
+	 * @return void
+	 */
+	public function test_a_slug_list_keeps_an_old_nested_address_by_its_first_segment(): void {
+		$this->stub();
+		$builder = new \Post404Shield\Library\AllowlistBuilder(
+			[
+				'camera' => [
+					'url_base'    => [ 'products/cameras' ],
+					'post_status' => [ 'publish' ],
+				],
+			]
+		);
+		$this->assertContains( 'x-series', $builder->lines_for( 'camera' ) );
+	}
+
+	/**
+	 * A flat type lists a post that has a post_parent (WordPress ignores the
+	 * parent and serves it at its flat address).
+	 *
+	 * @return void
+	 */
+	public function test_a_flat_post_with_a_parent_is_listed(): void {
+		$this->stub();
+		$builder = new \Post404Shield\Library\AllowlistBuilder(
+			[
+				'post' => [
+					'url_base'    => [ 'blog' ],
+					'post_status' => [ 'publish' ],
+				],
+			]
+		);
+		$this->assertContains( 'spec-child', $builder->lines_for( 'post' ) );
 	}
 }

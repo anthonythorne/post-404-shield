@@ -16,6 +16,7 @@ revisions with one-click restore.
 | Doc | Read it when you want to… |
 |---|---|
 | **[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)** | Understand the whole system in plain English — a request's journey, how rebuilds work, **worked examples** (a production release day, and everyday edits), and a **developer FAQ**. Start here. |
+| **[docs/DECISIONS.md](docs/DECISIONS.md)** | The behaviour that is intended, with the reason (fail-open, statuses, automatic writes, locks, root mode). Read it before reporting a "bug" in review. |
 | **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** | Add / enable / disable / tune a post type on **Settings → Post 404 Shield** — the UI reference, the artifact's JSON schema, every field, the locale option, and a decision guide for depth behaviour. |
 | **[docs/WP-CONFIG-SETUP.md](docs/WP-CONFIG-SETUP.md)** | Wire (or re-add) the pre-boot Tier-1 line in `wp-config.php` on WP Engine, and the mandatory lint/verify steps. |
 

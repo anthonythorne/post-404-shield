@@ -264,6 +264,29 @@ class PostShieldSyncMovesTest extends TestCase {
 	}
 
 	/**
+	 * Slug mode: deleting a parent for good moves its child up a level; the
+	 * child's old address is listed at once by its old first segment, so the
+	 * old URL still reaches WordPress's 301.
+	 *
+	 * @return void
+	 */
+	public function test_a_deleted_parents_old_segment_is_listed_at_once(): void {
+		$GLOBALS['post_shield_test_nodes'] = [
+			1 => [ 'x-series', 0, 'publish' ],
+			3 => [ 'specs', 1, 'publish' ],
+		];
+		[ $sync, $builder ] = $this->controller();
+
+		$sync->handle_before_delete( 1 );
+		unset( $GLOBALS['post_shield_test_nodes'][1] );
+		$GLOBALS['post_shield_test_nodes'][3][1] = 0; // Core moves the child up.
+		$sync->handle_after_delete( 1 );
+
+		$this->assertContains( 'specs', $builder->appended['photographer'] ?? [], 'Its new address.' );
+		$this->assertContains( 'x-series', $builder->appended['photographer'] ?? [], 'Its old address, by the old first segment.' );
+	}
+
+	/**
 	 * A draft parent with no live child lists nothing.
 	 *
 	 * @return void

@@ -429,10 +429,10 @@ class RootPreflight {
 		}
 
 		return [
-			'checked'     => count( $urls ),
-			'would_block' => $would_block,
-			'warn_block'  => $warn_block,
-			'dropped'     => $dropped,
+			'checked'       => count( $urls ),
+			'would_block'   => $would_block,
+			'warn_block'    => $warn_block,
+			'dropped'       => $dropped,
 			'dropped_types' => $dropped_types,
 		];
 	}

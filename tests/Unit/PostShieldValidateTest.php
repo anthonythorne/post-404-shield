@@ -92,4 +92,30 @@ class PostShieldValidateTest extends TestCase {
 		$failed->setAccessible( true );
 		$this->assertFalse( $failed->getValue( $store ) );
 	}
+
+	/**
+	 * Root matching takes the language folder off before comparing excluded
+	 * bases, so an operator base typed with one is refused, by name.
+	 *
+	 * @return void
+	 */
+	public function test_an_operator_base_with_a_language_folder_is_refused(): void {
+		$this->stub();
+		$config = static fn( string $base ): array => [
+			'locale'         => [
+				'mode'    => 'custom',
+				'pattern' => '[a-z]{2}-[a-z]{2}|global',
+			],
+			'entries'        => [],
+			'excluded_bases' => [
+				'floor'    => [],
+				'derived'  => [],
+				'operator' => [ $base ],
+			],
+		];
+		$store  = new ConfigStore();
+		$this->assertStringContainsString( 'starts with a language folder', implode( ' | ', $store->validate( $config( 'global/special-route' ) )['errors'] ) );
+		$this->assertStringContainsString( 'starts with a language folder', implode( ' | ', $store->validate( $config( 'en-us/special-route' ) )['errors'] ) );
+		$this->assertStringNotContainsString( 'language folder', implode( ' | ', $store->validate( $config( 'special-route' ) )['errors'] ) );
+	}
 }

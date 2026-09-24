@@ -349,6 +349,20 @@ Moved out of the sites that used it into its own repository.
 - The sync controller forgets a save's parent map and move flags when the save
   ends (long-running CLI and cron processes). A refused save's draft offers the
   Posts row coming back from root mode no matching selector.
+- The loader checks the round-15 cache-header functions exist before using them,
+  so a half-finished deploy leaves the shield off instead of erroring; a test
+  now fails if any function the loader calls is unguarded.
+- A status a save drops is rebuilt out of its list after the swap on every save
+  path (restore and CLI too). Slug-mode lists keep a moved post's old address by
+  its old first segment. With root settings kept switched off, automatic writes
+  archive no revision for changes root matching does not read. An operator
+  excluded base that starts with the language folder is refused.
+- Explained suppressions for the list locks' file operations, the bake probe's
+  robots.txt hook and IN-list placeholders; alignment fixed.
+- `docs/DECISIONS.md`: the intended behaviour, with the reason, for reviewers.
+- Tests: whole saves through `write()` (a dropped status, posts leaving the root,
+  kept-off root rows), the loader's guards, old nested addresses, a flat post
+  with a parent, the language-folder check, the shared builder's wiring.
 
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing

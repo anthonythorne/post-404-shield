@@ -8,7 +8,8 @@ or renamed, and rebuilds it nightly.
 
 Full documentation ships with the plugin: [`post-404-shield/README.md`](post-404-shield/README.md)
 and [`post-404-shield/docs/`](post-404-shield/docs/) (how it works, configuration,
-wp-config wiring, testing).
+wp-config wiring, testing). Reviewing a change? Read
+[`docs/DECISIONS.md`](post-404-shield/docs/DECISIONS.md): the behaviour that is intended, and why.
 
 ## Repository layout
 

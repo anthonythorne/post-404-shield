@@ -909,12 +909,14 @@ class PostShieldSyncController {
 			return;
 		}
 		if ( 'full-path' !== $this->builder->match_for( $type ) ) {
+			// Slug mode matches a URL's first segment: an old nested address
+			// is listed by its old top-level ancestor, as the rebuild does.
 			$lines = array_values(
-				array_filter(
-					$lines,
-					static function ( string $line ): bool {
-						return false === strpos( $line, '/' );
-					}
+				array_unique(
+					array_map(
+						static fn( string $line ): string => explode( '/', $line )[0],
+						$lines
+					)
 				)
 			);
 		}

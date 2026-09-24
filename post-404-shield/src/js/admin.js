@@ -1328,7 +1328,7 @@
 						),
 						rows: 3,
 						help: __(
-							'Only for a route WordPress does not know about, such as a path another server handles. Most sites leave this empty. One per line: letters, digits, dots, hyphens and underscores; end with * to match everything that starts with it.',
+							'Only for a route WordPress does not know about, such as a path another server handles. Most sites leave this empty. One per line, without the language folder: letters, digits, dots, hyphens and underscores; end with * to match everything that starts with it.',
 							'post-404-shield'
 						),
 						value: operator,

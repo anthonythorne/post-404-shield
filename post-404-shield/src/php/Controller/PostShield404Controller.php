@@ -117,7 +117,7 @@ class PostShield404Controller {
 		add_action( self::BAKE_EVENT, [ $this, 'run_bake' ] );
 		add_action( self::BAKE_CRON, [ $this, 'run_bake' ] );
 		add_action( self::BATCH_EVENT, [ $this, 'run_bake_batch' ] );
-		add_filter( 'robots_txt', [ $this, 'disallow_probe_path' ] );
+		add_filter( 'robots_txt', [ $this, 'disallow_probe_path' ] ); // phpcs:ignore WordPressVIPMinimum.Hooks.RestrictedHooks.robots_txt -- adds the bake probe's Disallow line; robots.txt is generated per request.
 	}
 
 	/**

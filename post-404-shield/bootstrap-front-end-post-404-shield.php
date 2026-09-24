@@ -268,6 +268,8 @@ define( 'POST_SHIELD_LOADED', true );
 	// must leave the shield off, never fatal the request.
 	if ( ! function_exists( 'Post404Shield\\match_entry' ) || ! function_exists( 'Post404Shield\\decide_based' ) || ! function_exists( 'Post404Shield\\list_is_empty' )
 		|| ! function_exists( 'Post404Shield\\match_blocked_base' ) || ! function_exists( 'Post404Shield\\prefers_markdown' )
+		|| ! function_exists( 'Post404Shield\\shield_404_cache_headers' ) || ! function_exists( 'Post404Shield\\shield_redirect_cache_header' )
+		|| ! function_exists( 'Post404Shield\\root_404_ttls' )
 	) {
 		return;
 	}

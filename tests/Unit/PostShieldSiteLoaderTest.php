@@ -179,4 +179,16 @@ class PostShieldSiteLoaderTest extends TestCase {
 		$this->assertSame( 1, $GLOBALS['post_shield_test_loads'] );
 		$this->assertSame( [], $GLOBALS['post_shield_test_hooks'] );
 	}
+
+	/**
+	 * The builder the write side shares (sync appends, the nightly and the
+	 * queued rebuilds) follows the live artifact: a save in another request,
+	 * or a heal earlier in this one, changes what it must write.
+	 *
+	 * @return void
+	 */
+	public function test_the_shared_builder_follows_the_live_config(): void {
+		$bootstrap = (string) file_get_contents( dirname( __DIR__, 2 ) . '/post-404-shield/bootstrap.php' );
+		$this->assertMatchesRegularExpression( '/\$post_shield_builder\s*=\s*\(\s*new \\\\Post404Shield\\\\Library\\\\AllowlistBuilder\(\s*\$post_shield_entries\s*\)\s*\)->follow_live\(\);/', $bootstrap );
+	}
 }

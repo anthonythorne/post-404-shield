@@ -168,10 +168,14 @@ echo "FELL-THROUGH";
 	public function test_a_half_deployed_release_leaves_the_shield_off(): void {
 		$function = $this->root . '/wp-content/mu-plugins/post-404-shield/src/php/Function';
 		$matcher  = (string) file_get_contents( $function . '/Matcher.php' );
-		file_put_contents( $function . '/Matcher.php', str_replace( 'function list_is_empty(', 'function list_is_empty_renamed(', $matcher ) );
-		$result = $this->request( '/global/stories/fake-one/' );
-		$this->assertSame( 0, $result['exit'], $result['stderr'] );
-		$this->assertTrue( $result['through'], 'An old matcher: shield off. ' . $result['stderr'] );
+		// An older Matcher.php lacks whatever this loader added since: each
+		// function it calls, missing in turn, leaves the shield off.
+		foreach ( [ 'match_entry', 'decide_based', 'list_is_empty', 'match_blocked_base', 'prefers_markdown', 'shield_404_cache_headers', 'shield_redirect_cache_header', 'root_404_ttls' ] as $missing ) {
+			file_put_contents( $function . '/Matcher.php', str_replace( 'function ' . $missing . '(', 'function ' . $missing . '_renamed(', $matcher ) );
+			$result = $this->request( '/global/stories/fake-one/' );
+			$this->assertSame( 0, $result['exit'], $missing . ': ' . $result['stderr'] );
+			$this->assertTrue( $result['through'], 'An old matcher without ' . $missing . ': shield off. ' . $result['stderr'] );
+		}
 
 		file_put_contents( $function . '/Matcher.php', $matcher );
 		$reader = (string) file_get_contents( $function . '/ConfigReader.php' );
@@ -179,6 +183,23 @@ echo "FELL-THROUGH";
 		$result = $this->request( '/global/stories/fake-one/' );
 		$this->assertSame( 0, $result['exit'], $result['stderr'] );
 		$this->assertTrue( $result['through'], 'An old reader: shield off. ' . $result['stderr'] );
+	}
+
+	/**
+	 * Every plugin function the loader calls is checked with function_exists()
+	 * first, so a function added to Matcher.php or ConfigReader.php cannot be
+	 * called unguarded (a half-finished deploy would error on every 404).
+	 *
+	 * @return void
+	 */
+	public function test_every_function_the_loader_calls_is_guarded(): void {
+		$loader = (string) file_get_contents( dirname( __DIR__, 2 ) . '/post-404-shield/bootstrap-front-end-post-404-shield.php' );
+		preg_match_all( '/\\\\Post404Shield\\\\([a-z0-9_]+)\\(/', $loader, $calls );
+		$called = array_unique( $calls[1] );
+		$this->assertNotEmpty( $called );
+		foreach ( $called as $name ) {
+			$this->assertStringContainsString( "function_exists( 'Post404Shield\\\\" . $name . "' )", $loader, $name . ' is called without a guard.' );
+		}
 	}
 
 	/**

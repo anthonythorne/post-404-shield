@@ -47,7 +47,7 @@ function locale_pattern_classes_are_safe( string $pattern ): bool {
 		}
 		$end = strpos( $pattern, ']', $i + 1 );
 		if ( false === $end || $i + 1 === $end ) {
-			return false; // Unclosed, or empty `[]`.
+			return false; // Unclosed, or an empty class.
 		}
 		$body = substr( $pattern, $i + 1, $end - $i - 1 );
 		$blen = strlen( $body );

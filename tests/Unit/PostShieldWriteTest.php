@@ -1,0 +1,311 @@
+<?php
+/**
+ * Unit tests that drive ConfigStore::write() end to end — options, the save
+ * lock, the artifact files and the rebuild handler stubbed — and check what
+ * is rebuilt around the swap, and what an automatic write archives:
+ *
+ * - a status the save drops is rebuilt out of its list after the swap, on
+ *   every save path (a hidden status must not stay confirmable for a day);
+ * - posts first leaving the site root rebuild root-extras before the swap,
+ *   with the candidate's own record, and the live artifact's statuses kept;
+ * - an automatic write that changes only what root matching reads, while
+ *   root settings are kept switched off, archives no revision.
+ *
+ * Each test runs in its own process: the WordPress stubs and $wpdb are global.
+ *
+ * @package Post404Shield\Tests
+ */
+
+namespace Post404Shield\Tests;
+
+use PHPUnit\Framework\TestCase;
+
+/**
+ * Test class for write().
+ *
+ * @runTestsInSeparateProcesses
+ * @preserveGlobalState disabled
+ */
+class PostShieldWriteTest extends TestCase {
+
+	/**
+	 * The temp artifact directory.
+	 *
+	 * @var string
+	 */
+	private string $dir = '';
+
+	/**
+	 * Remove the temp directory.
+	 *
+	 * @return void
+	 */
+	protected function tearDown(): void {
+		if ( '' !== $this->dir ) {
+			foreach ( (array) glob( $this->dir . '/*' ) as $file ) {
+				unlink( (string) $file );
+			}
+			rmdir( $this->dir );
+		}
+	}
+
+	/**
+	 * A store over a temp directory holding $live as its artifact, with the
+	 * WordPress calls write() makes stubbed, and a handler that records calls.
+	 *
+	 * @param array<string, mixed> $live      Live artifact (and stored option).
+	 * @param string               $structure `permalink_structure`.
+	 *
+	 * @return array{0: \Post404Shield\Library\ConfigStore, 1: \ArrayObject<int, array<int, mixed>>}
+	 */
+	private function store( array $live, string $structure = '/%postname%/' ): array {
+		eval( // phpcs:ignore Squiz.PHP.Eval.Discouraged -- test-only global stubs, in a separate process.
+			'function update_option( $name, $value, $autoload = null ) { $GLOBALS["post_shield_test_options"][ $name ] = $value; return true; }
+			function delete_option( $name ) { unset( $GLOBALS["post_shield_test_options"][ $name ] ); return true; }
+			function wp_cache_delete( $key, $group = "" ) { return true; }
+			function wp_cache_get( $key, $group = "", $force = false, &$found = null ) { $found = false; return false; }
+			function wp_cache_set( $key, $data, $group = "", $expire = 0 ) { return true; }
+			function wp_json_encode( $data, $flags = 0 ) { return json_encode( $data, $flags ); }
+			function wp_generate_password( $length = 12, $special = true ) { return substr( md5( (string) mt_rand() ), 0, $length ); }
+			function get_post_stati( $args = [] ) { return [ "publish" => "publish", "private" => "private", "zz-arch" => "zz-arch" ]; }
+			function get_post_status_object( $status ) { return (object) [ "private" => "private" === $status, "public" => "private" !== $status ]; }
+			function is_post_status_viewable( $status ) { return true; }
+			function post_type_exists( $type ) { return in_array( $type, [ "page", "post", "story" ], true ); }'
+		);
+		$GLOBALS['wpdb'] = new class() {
+			/** @var string */
+			public $options = 'wp_options';
+			/** @var string */
+			public $posts = 'wp_posts';
+			/** @var string */
+			public $postmeta = 'wp_postmeta';
+			/** @var string */
+			public $last_error = '';
+			/**
+			 * Stub prepare.
+			 *
+			 * @param string $query SQL.
+			 * @return string
+			 */
+			public function prepare( $query ) {
+				return (string) $query;
+			}
+			/**
+			 * Every lock query succeeds.
+			 *
+			 * @return int
+			 */
+			public function query() {
+				return 1;
+			}
+			/**
+			 * No lock row, no rows.
+			 *
+			 * @return null
+			 */
+			public function get_var() {
+				return null;
+			}
+			/**
+			 * No rows.
+			 *
+			 * @return array
+			 */
+			public function get_results() {
+				return [];
+			}
+			/**
+			 * No rows.
+			 *
+			 * @return array
+			 */
+			public function get_col() {
+				return [];
+			}
+			/**
+			 * Stub suppress_errors.
+			 *
+			 * @return bool
+			 */
+			public function suppress_errors() {
+				return false;
+			}
+		};
+		require_once __DIR__ . '/../../post-404-shield/src/php/Function/ConfigReader.php';
+		require_once __DIR__ . '/../../post-404-shield/src/php/Function/Matcher.php';
+		require_once __DIR__ . '/../../post-404-shield/src/php/Library/ReadFailure.php';
+		require_once __DIR__ . '/../../post-404-shield/src/php/Library/ConfigStore.php';
+
+		$this->dir = sys_get_temp_dir() . '/postshield-write-' . getmypid() . '-' . uniqid();
+		mkdir( $this->dir );
+		$GLOBALS['post_shield_test_dir']     = $this->dir;
+		$GLOBALS['post_shield_test_options'] = [
+			'permalink_structure'                           => $structure,
+			\Post404Shield\Library\ConfigStore::OPTION => $live,
+		];
+		$store = new class() extends \Post404Shield\Library\ConfigStore {
+			/**
+			 * The temp directory.
+			 *
+			 * @return string
+			 */
+			public function artifact_dir(): string {
+				return (string) $GLOBALS['post_shield_test_dir'];
+			}
+		};
+		$this->assertTrue( $store->write_artifact( $live ), 'The live artifact is in place.' );
+		$calls = new \ArrayObject();
+		$store->set_rebuild_handler(
+			static function ( ...$args ) use ( $calls ) {
+				$calls[] = $args;
+				return true;
+			}
+		);
+		return [ $store, $calls ];
+	}
+
+	/**
+	 * A valid document.
+	 *
+	 * @param array<string, mixed> $entries Entries.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private static function doc( array $entries ): array {
+		return [
+			'version' => 1,
+			'locale'  => [ 'mode' => 'none' ],
+			'entries' => $entries,
+		];
+	}
+
+	/**
+	 * A story entry listing these statuses.
+	 *
+	 * @param string[] $statuses Statuses.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private static function story( array $statuses ): array {
+		return [
+			'enabled'     => true,
+			'mode'        => 'allowlist',
+			'post_type'   => 'story',
+			'url_base'    => [ 'stories' ],
+			'post_status' => $statuses,
+		];
+	}
+
+	/**
+	 * A save that drops a status rebuilds that list after the swap, whoever
+	 * saves (here, as the CLI and a restore do: no follow-up job is queued).
+	 *
+	 * @return void
+	 */
+	public function test_a_dropped_status_is_rebuilt_out_after_the_swap(): void {
+		[ $store, $calls ] = $this->store( self::doc( [ 'story' => self::story( [ 'publish', 'private' ] ) ] ) );
+
+		$result = $store->write( self::doc( [ 'story' => self::story( [ 'publish' ] ) ] ), 'test', [ 'allow_status_drop' => true ] );
+
+		$this->assertTrue( $result['ok'], implode( ' | ', $result['errors'] ) );
+		$this->assertSame( [ 'publish' ], $store->artifact()['entries']['story']['post_status'] );
+		$rebuilt = array_merge( ...array_map( static fn( array $call ): array => (array) $call[0], $calls->getArrayCopy() ) );
+		$this->assertContains( 'story', $rebuilt, 'The narrowed list is rebuilt.' );
+	}
+
+	/**
+	 * Posts moved off the site root while root matching stays on: the save
+	 * rebuilds root-extras before the swap with the candidate's record that
+	 * they left, and with the live artifact's statuses kept.
+	 *
+	 * @return void
+	 */
+	public function test_posts_leaving_the_root_rebuild_root_extras_before_the_swap(): void {
+		$root = static fn( string $type, array $statuses ): array => [
+			'enabled'     => true,
+			'mode'        => 'allowlist',
+			'post_type'   => $type,
+			'root'        => true,
+			'url_base'    => [],
+			'post_status' => $statuses,
+		];
+		$live = self::doc(
+			[
+				'page' => $root( 'page', [ 'publish', 'zz-arch' ] ),
+				'post' => $root( 'post', [ 'publish' ] ),
+			]
+		);
+		// Posts now live under /blog/; the page row stays at the root and the
+		// Posts row moves to the base.
+		[ $store, $calls ] = $this->store( $live, '/blog/%postname%/' );
+		// The save also drops a Pages status: root-extras, rebuilt before the
+		// swap, must still hold what the live artifact lists.
+		$candidate         = self::doc(
+			[
+				'page' => $root( 'page', [ 'publish' ] ),
+				'post' => [
+					'enabled'     => true,
+					'mode'        => 'allowlist',
+					'post_type'   => 'post',
+					'url_base'    => [ 'blog' ],
+					'post_status' => [ 'publish' ],
+				],
+			]
+		);
+		$candidate['root_acknowledged'] = true;
+
+		$result = $store->write(
+			$candidate,
+			'test',
+			[
+				'skip_root_preflight' => true,
+				'allow_status_drop'   => true,
+			]
+		);
+
+		$this->assertTrue( $result['ok'], implode( ' | ', $result['errors'] ) );
+		$this->assertTrue( $store->artifact()['excluded_bases']['posts_left_root'] ?? false, 'Recorded.' );
+		$first = $calls[0] ?? [];
+		$this->assertTrue( $first[2] ?? false, 'Root-extras is rebuilt before the swap.' );
+		$this->assertTrue( $first[3] ?? false, 'With the candidate\'s record that posts left the root.' );
+		$this->assertContains( 'zz-arch', (array) ( $first[1]['page']['post_status'] ?? [] ), 'With the live statuses kept.' );
+	}
+
+	/**
+	 * Root settings kept switched off (Disable shield): an automatic
+	 * re-snapshot that changes only what root matching reads archives no
+	 * revision, so the pre-Disable one stays in retention.
+	 *
+	 * @return void
+	 */
+	public function test_kept_off_root_rows_archive_nothing_for_an_unread_change(): void {
+		$live                              = self::doc(
+			[
+				'page'  => [
+					'enabled'     => false,
+					'mode'        => 'allowlist',
+					'post_type'   => 'page',
+					'root'        => true,
+					'url_base'    => [],
+					'post_status' => [ 'publish' ],
+				],
+				'story' => array_merge( self::story( [ 'publish' ] ), [ 'enabled' => false ] ),
+			]
+		);
+		$live['excluded_bases']            = [
+			'floor'     => [ 'wp-admin' ],
+			'derived'   => [ 'a-redirect-that-went' ],
+			'operator'  => [],
+			'endpoints' => [],
+			'post_base' => '',
+		];
+		[ $store ]                         = $this->store( $live );
+		$before                            = glob( $this->dir . '/config-*.php' );
+
+		$result = $store->write( $live, 'auto: snapshot refreshed — test', [ 'fail_open' => true ] );
+
+		$this->assertTrue( $result['ok'], implode( ' | ', $result['errors'] ) );
+		$this->assertTrue( $result['unchanged'] ?? false, 'Nothing the loader reads changed.' );
+		$this->assertSame( $before, glob( $this->dir . '/config-*.php' ), 'No revision archived.' );
+	}
+}
