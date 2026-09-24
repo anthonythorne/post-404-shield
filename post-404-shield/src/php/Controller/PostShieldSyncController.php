@@ -908,18 +908,11 @@ class PostShieldSyncController {
 			$this->append_root_lines( $lines );
 			return;
 		}
-		if ( 'full-path' !== $this->builder->match_for( $type ) ) {
-			// Slug mode matches a URL's first segment: an old nested address
-			// is listed by its old top-level ancestor, as the rebuild does.
-			$lines = array_values(
-				array_unique(
-					array_map(
-						static fn( string $line ): string => explode( '/', $line )[0],
-						$lines
-					)
-				)
-			);
-		}
+		// Slug mode matches a URL's first segment: an old nested address is
+		// listed by its old top-level ancestor; a full-path list takes the
+		// whole address too. The rebuild writes the same lines.
+		$firsts = array_map( static fn( string $line ): string => explode( '/', $line )[0], $lines );
+		$lines  = array_values( array_unique( 'full-path' === $this->builder->match_for( $type ) ? array_merge( $lines, $firsts ) : $firsts ) );
 		$this->append_lines( $type, $lines );
 	}
 

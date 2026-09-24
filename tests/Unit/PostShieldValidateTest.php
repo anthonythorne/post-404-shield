@@ -95,7 +95,9 @@ class PostShieldValidateTest extends TestCase {
 
 	/**
 	 * Root matching takes the language folder off before comparing excluded
-	 * bases, so an operator base typed with one is refused, by name.
+	 * bases: an operator base that starts with what looks like one is warned
+	 * about, never refused — it may be a real route, and a stored config must
+	 * keep saving (Disable shield, the self-heal, a restore).
 	 *
 	 * @return void
 	 */
@@ -114,8 +116,11 @@ class PostShieldValidateTest extends TestCase {
 			],
 		];
 		$store  = new ConfigStore();
-		$this->assertStringContainsString( 'starts with a language folder', implode( ' | ', $store->validate( $config( 'global/special-route' ) )['errors'] ) );
-		$this->assertStringContainsString( 'starts with a language folder', implode( ' | ', $store->validate( $config( 'en-us/special-route' ) )['errors'] ) );
-		$this->assertStringNotContainsString( 'language folder', implode( ' | ', $store->validate( $config( 'special-route' ) )['errors'] ) );
+		foreach ( [ 'global/special-route', 'en-us/special-route' ] as $base ) {
+			$result = $store->validate( $config( $base ) );
+			$this->assertSame( [], $result['errors'], $base . ': never refused.' );
+			$this->assertStringContainsString( 'looks like a language folder', implode( ' | ', $result['warnings'] ), $base );
+		}
+		$this->assertStringNotContainsString( 'language folder', implode( ' | ', $store->validate( $config( 'special-route' ) )['warnings'] ) );
 	}
 }

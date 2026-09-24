@@ -36,8 +36,8 @@ review; changing one is a design change, not a bug fix. Read
   ancestor's status: a published child under a draft parent is real, and its
   URL already shows the parent's slug. Full-path lists carry the same first
   segments so a slug config reading one stays safe during a mode switch. A
-  moved post's old address is listed by its old first segment in slug mode
-  (whole in full-path), so the old URL still reaches WordPress's 301.
+  moved post's old address is listed by its old first segment (and whole, in
+  full-path), so the old URL still reaches WordPress's 301.
 - **An entry's statuses have one reading** (`effective_statuses()`): none, an
   empty list or no status name means Published.
 
@@ -77,13 +77,16 @@ review; changing one is a design change, not a bug fix. Read
 
 ## Root mode
 
-- **Root mode ships inert** and engages only when Pages and Posts are switched
-  on and the acknowledgement is confirmed. A permalink change that no longer
+- **Root mode ships inert** and engages only when its entries are switched on
+  (Pages, and Posts too while posts have no base) and the acknowledgement is
+  confirmed. A permalink change that no longer
   fits switches it off automatically (fail open), keeping its settings.
 - **Redirects the shield cannot place are warnings**: a regex with no leading
   literal, one not anchored at the start, or one under a blocked section.
 - **Operator excluded bases are entered without the language folder**: root
-  matching takes it off before comparing, so one that starts with it is refused.
+  matching takes it off before comparing. One whose first segment looks like a
+  language is a warning, not a refusal — the segment may be a real route, and a
+  stored config must keep saving (Disable shield, the self-heal, a restore).
 - **Root-extras is one file read whole** on a blocked root request (built in
   batches); the per-request cost is documented.
 - **A blocked root URL takes the Pages entry's cache times.**

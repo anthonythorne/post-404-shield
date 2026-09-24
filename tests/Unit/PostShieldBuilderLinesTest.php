@@ -140,6 +140,9 @@ class PostShieldBuilderLinesTest extends TestCase {
 		$lines   = $builder->lines_for( 'camera' );
 		$this->assertContains( 'draft-series/model-2', $lines );
 		$this->assertContains( 'draft-series', $lines );
+		// A former address: whole, and by its first segment for a slug config.
+		$this->assertContains( 'x-series/specs', $lines );
+		$this->assertContains( 'x-series', $lines );
 	}
 
 	/**

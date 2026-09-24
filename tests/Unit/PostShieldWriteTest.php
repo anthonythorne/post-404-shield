@@ -308,4 +308,32 @@ class PostShieldWriteTest extends TestCase {
 		$this->assertTrue( $result['unchanged'] ?? false, 'Nothing the loader reads changed.' );
 		$this->assertSame( $before, glob( $this->dir . '/config-*.php' ), 'No revision archived.' );
 	}
+
+	/**
+	 * A stored config whose operator base looks like it starts with a
+	 * language folder still saves: Disable shield, the self-heal and a
+	 * restore must land whatever the operator typed (it is a warning).
+	 *
+	 * @return void
+	 */
+	public function test_a_language_looking_operator_base_never_blocks_a_save(): void {
+		$live                   = self::doc( [ 'story' => self::story( [ 'publish' ] ) ] );
+		$live['locale']         = [
+			'mode'    => 'custom',
+			'pattern' => '[a-z]{2}',
+		];
+		$live['excluded_bases'] = [
+			'floor'    => [],
+			'derived'  => [],
+			'operator' => [ 'ir/reports' ],
+		];
+		[ $store ]              = $this->store( $live );
+		$disabled               = $live;
+		$disabled['entries']['story']['enabled'] = false;
+
+		$result = $store->write( $disabled, 'test' );
+
+		$this->assertTrue( $result['ok'], implode( ' | ', $result['errors'] ) );
+		$this->assertStringContainsString( 'looks like a language folder', implode( ' | ', $result['warnings'] ) );
+	}
 }

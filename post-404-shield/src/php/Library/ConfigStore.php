@@ -1915,6 +1915,9 @@ class ConfigStore {
 		foreach ( $this->excluded_bases_errors( $config ) as $excluded_error ) {
 			$errors[] = $excluded_error;
 		}
+		foreach ( self::operator_base_warnings( $config ) as $operator_warning ) {
+			$warnings[] = $operator_warning;
+		}
 
 		// Bases unique and non-overlapping ACROSS all entries incl. blocks:
 		// overlap = one base's segment list is a prefix of another's, compared
@@ -2063,19 +2066,34 @@ class ConfigStore {
 				}
 			}
 		}
-		// Root matching takes the language folder off a path before it
-		// compares the excluded bases, so an operator base that starts with
-		// one can never match: say so, rather than 404 the route it names.
+		return $errors;
+	}
+
+	/**
+	 * Operator excluded bases whose first segment looks like a language
+	 * folder. Root matching takes the language off a path before it compares
+	 * the bases, so one typed with it (copied from the browser) never
+	 * matches. A warning, never a refusal: a segment can look like a language
+	 * and be a real route (`ir` under a two-letter pattern), and a stored
+	 * config must keep saving (Disable shield, the self-heal, a restore).
+	 *
+	 * @param array<string, mixed> $config Candidate document.
+	 *
+	 * @return string[] Warnings.
+	 */
+	private static function operator_base_warnings( array $config ): array {
 		$pattern = self::locale_pattern_of( $config );
-		if ( '' !== $pattern && \Post404Shield\locale_pattern_is_valid( $pattern ) ) {
-			foreach ( (array) ( $excluded['operator'] ?? [] ) as $base ) {
-				if ( is_string( $base ) && 1 === preg_match( '#^(?:' . $pattern . ')$#', explode( '/', $base )[0] ) ) {
-					/* translators: %s: the excluded base as typed. */
-					$errors[] = sprintf( __( 'Excluded base "%s" starts with a language folder. Enter the address without it: the language is taken off before bases are compared.', 'post-404-shield' ), $base );
-				}
+		if ( '' === $pattern ) {
+			return [];
+		}
+		$warnings = [];
+		foreach ( (array) ( $config['excluded_bases']['operator'] ?? [] ) as $base ) {
+			if ( is_string( $base ) && 1 === preg_match( '#^(?:' . $pattern . ')$#', explode( '/', $base )[0] ) ) {
+				/* translators: %s: the excluded base as typed. */
+				$warnings[] = sprintf( __( 'Excluded base "%s" starts with what looks like a language folder. The language is taken off an address before it is compared, so enter the part after it — unless that segment is really part of the route.', 'post-404-shield' ), $base );
 			}
 		}
-		return $errors;
+		return $warnings;
 	}
 
 	// --- Save pipeline ---------------------------------------------------------

@@ -697,12 +697,16 @@ class AllowlistBuilder {
 		}
 		$lines = array_merge( $lines, $this->fetch_old_slugs( $post_type, $statuses ) );
 		if ( $this->is_hierarchical( $post_type ) ) {
-			// A full-path list takes a former address whole; a slug list its
-			// first segment, the old top-level ancestor (the only part the
-			// loader matches), so a child's old address still reaches
-			// WordPress's 301 after its parent is deleted or trashed.
+			// A former address's first segment, the old top-level ancestor
+			// (all the slug loader matches), so a child's old address still
+			// reaches WordPress's 301 after its parent is deleted or trashed;
+			// a full-path list takes the whole address as well, and keeps the
+			// first segment for a slug config reading it.
 			foreach ( $this->old_uri_lines( [ $post_type ] ) as $uri ) {
-				$lines[] = 'full-path' === $match ? $uri : explode( '/', $uri )[0];
+				$lines[] = explode( '/', $uri )[0];
+				if ( 'full-path' === $match ) {
+					$lines[] = $uri;
+				}
 			}
 		}
 		// WordPress serves a post's media at pages nested under its URL; a

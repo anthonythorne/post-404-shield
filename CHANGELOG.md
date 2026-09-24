@@ -356,7 +356,8 @@ Moved out of the sites that used it into its own repository.
   path (restore and CLI too). Slug-mode lists keep a moved post's old address by
   its old first segment. With root settings kept switched off, automatic writes
   archive no revision for changes root matching does not read. An operator
-  excluded base that starts with the language folder is refused.
+  excluded base whose first segment looks like a language folder is warned
+  about (never refused: it may be a real route, and stored configs must save).
 - Explained suppressions for the list locks' file operations, the bake probe's
   robots.txt hook and IN-list placeholders; alignment fixed.
 - `docs/DECISIONS.md`: the intended behaviour, with the reason, for reviewers.
