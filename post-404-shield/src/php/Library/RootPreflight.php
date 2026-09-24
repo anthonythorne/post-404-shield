@@ -209,7 +209,7 @@ class RootPreflight {
 		}
 		// Every status WordPress serves at a post's address (discontinued,
 		// private… as well as published).
-		$served    = array_values( array_filter( function_exists( 'get_post_stati' ) ? array_keys( (array) get_post_stati() ) : [ 'publish' ], static fn( $status ): bool => 'publish' === $status || ( null !== get_post_status_object( (string) $status ) && AllowlistBuilder::is_servable_status( (string) $status ) ) ) );
+		$served = array_values( array_filter( function_exists( 'get_post_stati' ) ? array_keys( (array) get_post_stati() ) : [ 'publish' ], static fn( $status ): bool => 'publish' === $status || ( null !== get_post_status_object( (string) $status ) && AllowlistBuilder::is_servable_status( (string) $status ) ) ) );
 		// A type shielded under a base is sampled in the statuses its entries
 		// list: its posts in any other status 404 under the base by design
 		// (the status warning says so, reserving their slugs would confirm

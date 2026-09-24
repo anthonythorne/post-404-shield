@@ -1655,7 +1655,7 @@ class ConfigStore {
 			}
 			$type = (string) ( $entry['post_type'] ?? $key );
 			if ( true === ( $entry['root'] ?? false ) ) {
-				$root_types[ $type ] = true;
+				$root_types[ $type ]  = true;
 				$root_keys[ $type ][] = (string) $key;
 			} else {
 				$based_types[ $type ] = true;

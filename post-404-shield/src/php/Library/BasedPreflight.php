@@ -737,7 +737,7 @@ final class BasedPreflight {
 				) as $child ) {
 					$path = $this->public_path( (int) $child, 'page' );
 					if ( null !== $path && $found < self::SAMPLE_PAGES ) {
-						$paths[]                = $path;
+						$paths[] = $path;
 						// No status: not one of the entry's own posts, so the
 						// status handling (an unlisted status warns) does
 						// not apply — a swallowed page is a break.
