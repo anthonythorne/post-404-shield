@@ -108,6 +108,14 @@ check( 'schema-preview', Post404Shield\rewrite_pattern_base( 'schema-preview(/(.
 check( 'schema-preview', Post404Shield\rewrite_pattern_base( '^schema-preview(/(.*))?/?$' ), 'rewrite: leading caret stripped' );
 check( 'category', Post404Shield\rewrite_pattern_base( 'category/(.+?)/schema-preview/?$' ), 'rewrite: literal first segment before slash' );
 check( 'robots.txt', Post404Shield\rewrite_pattern_base( 'robots\.txt$' ), 'rewrite: escaped dot = literal file route' );
+
+// A real child whose slug is a number, under a parent the list does not hold
+// (a draft or private parent): the whole path is looked up too.
+$numeric_child = [ [ 'type' => 'page', 'allow_pagination' => true, 'body' => "<?php exit;\nparent/2024\n" ] ];
+check( 'allowed', Post404Shield\match_root( '/parent/2024/', [], $numeric_child, '' )['outcome'], 'root: a listed numeric child passes without its parent' );
+check( 'blocked', Post404Shield\match_root( '/parent/2025/', [], $numeric_child, '' )['outcome'], 'root: an unlisted numeric child is still judged' );
+$numeric_entries = [ 'p' => [ 'enabled' => true, 'mode' => 'allowlist', 'post_type' => 'p', 'url_base' => [ 'base' ], 'match' => 'full-path', 'post_status' => [ 'publish' ] ] ];
+check( 'allowed-known-slug', Post404Shield\decide_based( '/base/parent/2024/', '/base/parent/2024/', $numeric_entries, static fn() => "<?php exit;\nparent/2024\n", '' )['marker'], 'full-path: a listed numeric child passes without its parent' );
 check( 'my-route', Post404Shield\rewrite_pattern_base( 'my-route\/([0-9]+)\/?$' ), 'rewrite: escaped slash = separator' );
 check( 'api', Post404Shield\rewrite_pattern_base( '^api\/v1\/(.*)' ), 'rewrite: escaped slash ends the leading segment' );
 check( [ 'news', 'tips' ], Post404Shield\rewrite_pattern_literal_group( '(news|tips)\/?$' ), 'rewrite: literal group before an escaped slash' );

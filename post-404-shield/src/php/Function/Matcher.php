@@ -173,7 +173,9 @@ function match_blocked_base( string $path, string $url_base, string $locale_patt
  * One layer only (mirrors the loader's historical behaviour); a bare numeric is
  * never stripped when it is the ONLY segment (it would erase the slug itself).
  * The deliberate fail-open trade: a fake child path ending in a number falls
- * through to WordPress (slow 404) instead of fast-404ing — never the reverse.
+ * through to WordPress (slow 404) instead of fast-404ing — never the reverse:
+ * the full-path matchers also try the whole path before judging, so a real
+ * child whose slug is a number is found even when its parent is not listed.
  *
  * @param string[] $segments         Path segments, no empties.
  * @param bool     $allow_pagination Strip pagination sub-routes too (default on).
@@ -377,6 +379,14 @@ function match_root( string $path, array $excluded_bases, array $entries, string
 		// of a scan of the whole body. The loader never does; it reads one path.
 		$line  = implode( '/', $stripped );
 		$found = isset( $entry['set'] ) && is_array( $entry['set'] ) ? isset( $entry['set'][ $line ] ) : is_allowed( $line, $body );
+		// What was stripped may be the page itself — a child whose slug is a
+		// number (`/parent/2024/`) under a parent the list does not hold (a
+		// draft or private parent WordPress still serves it under): a listed
+		// whole path is a real page, never a sub-route of one.
+		if ( ! $found && count( $stripped ) !== count( $segments ) ) {
+			$whole = implode( '/', $segments );
+			$found = isset( $entry['set'] ) && is_array( $entry['set'] ) ? isset( $entry['set'][ $whole ] ) : is_allowed( $whole, $body );
+		}
 		if ( $found ) {
 			return [
 				'outcome' => 'allowed',
@@ -552,7 +562,8 @@ function decide_based( string $uri, string $path, array $entries, callable $allo
 			}
 
 			$allow_pagination = ! isset( $settings['allow_pagination'] ) || false !== $settings['allow_pagination'];
-			$segments         = strip_trailing_sub_routes( array_merge( [ $match['slug'] ], $match['extra'] ), $allow_pagination, $endpoints );
+			$whole            = array_merge( [ $match['slug'] ], $match['extra'] );
+			$segments         = strip_trailing_sub_routes( $whole, $allow_pagination, $endpoints );
 			if ( [] === $segments ) {
 				return $decision( 'pass' ); // A sub-route alone (`/{base}/feed/`) — WordPress owns it.
 			}
@@ -567,7 +578,11 @@ function decide_based( string $uri, string $path, array $entries, callable $allo
 						return $decision( 'pass' );
 					}
 				}
-				return is_allowed( implode( '/', $segments ), $raw )
+				// A listed whole path is a real page, even when its last segment
+				// reads as a sub-route (a numeric child slug), as in match_root().
+				$listed = is_allowed( implode( '/', $segments ), $raw )
+					|| ( count( $segments ) !== count( $whole ) && is_allowed( implode( '/', $whole ), $raw ) );
+				return $listed
 					? $decision( 'allowed-known-slug' )
 					: $decision( 'blocked-unknown-slug', (string) $match['locale'] );
 			}

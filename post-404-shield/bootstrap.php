@@ -125,7 +125,7 @@ $post_shield_store->set_rebuild_handler(
 				$candidate_builder->rebuild_type( (string) $rebuild_type );
 			} catch ( \Throwable $e ) {
 				$failed[]    = (string) $rebuild_type;
-				$read_failed = $read_failed || $e instanceof \RuntimeException;
+				$read_failed = $read_failed || $e instanceof \Post404Shield\Library\ReadFailure;
 				error_log( '[post-404-shield] mode-switch rebuild for ' . $rebuild_type . ' failed: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			}
 		}
@@ -144,14 +144,14 @@ $post_shield_store->set_rebuild_handler(
 				$candidate_builder->rebuild_root_extras();
 			} catch ( \Throwable $e ) {
 				$failed[]    = \Post404Shield\Library\AllowlistBuilder::ROOT_EXTRAS_DIR;
-				$read_failed = $read_failed || $e instanceof \RuntimeException;
+				$read_failed = $read_failed || $e instanceof \Post404Shield\Library\ReadFailure;
 				error_log( '[post-404-shield] root-extras rebuild failed: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			}
 		}
 		// A failed database read is not a failed write: the save says so, and
 		// an automatic one is retried rather than read as a refusal.
 		if ( $read_failed || [] !== $candidate_builder->failed_reads() ) {
-			throw new \RuntimeException( 'a database read failed while rebuilding ' . implode( ', ', array_merge( array_map( 'strval', $post_types ), $candidate_builder->failed_reads() ) ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- caught by ConfigStore::write(), never printed.
+			throw new \Post404Shield\Library\ReadFailure( 'a database read failed while rebuilding ' . implode( ', ', array_merge( array_map( 'strval', $post_types ), $candidate_builder->failed_reads() ) ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- caught by ConfigStore::write(), never printed.
 		}
 		// The lists that failed to write (their directory names), or true.
 		foreach ( $candidate_builder->failed_writes() as $failed_file ) {
@@ -243,8 +243,9 @@ $post_shield_store->set_preflight_handler(
 			error_log( '[post-404-shield] preflight warning: ' . $post_shield_warn_url . ' is blocked by a BASED entry (pre-existing behaviour) — if it is a real/redirecting URL, add its slug to that entry\'s reserved slugs.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 		}
 		return [
-			'would_block' => $result['would_block'],
-			'dropped'     => $result['dropped'],
+			'would_block'   => $result['would_block'],
+			'dropped'       => $result['dropped'],
+			'dropped_types' => $result['dropped_types'],
 		];
 	}
 );
@@ -278,23 +279,25 @@ $post_shield_admin_controller = new \Post404Shield\Controller\PostShieldAdminCon
 );
 $post_shield_admin_controller->set_up();
 
-// Sync controller + the daily rebuild run only when at least one type is
-// enabled: clear their scheduled events (the daily rebuild, per-type rebuilds)
-// when the shield is fully off. Note: disabling every type also stops uploads
+// The daily rebuild runs only when at least one type is enabled: clear the
+// scheduled events (the daily rebuild, per-type rebuilds) when a config says
+// the shield is fully off — never when there is no config yet (a fresh deploy,
+// healed later in this request). Note: disabling every type also stops uploads
 // self-cleaning — re-enable a type and run `wp post-shield rebuild`, or remove
 // the uploads dir by hand.
-if ( [] === $post_shield_enabled_types ) {
-	if ( function_exists( 'wp_unschedule_hook' ) ) {
-		wp_unschedule_hook( 'post_shield_rebuild_allowlist' );
-		wp_unschedule_hook( 'post_shield_rebuild_type' ); // admin-button per-type rebuild.
-		wp_unschedule_hook( 'post_shield_redirect_sync' );
-	}
-} else {
-	// Sync controller — appends slugs to allowlists on post changes (real-time).
-	require_once POST_SHIELD_PLUGIN_DIR . '/src/php/Controller/PostShieldSyncController.php';
-	$post_shield_sync_controller = new \Post404Shield\Controller\PostShieldSyncController( $post_shield_builder );
-	$post_shield_sync_controller->set_up();
+if ( null !== $post_shield_config && [] === $post_shield_enabled_types && function_exists( 'wp_unschedule_hook' ) ) {
+	wp_unschedule_hook( 'post_shield_rebuild_allowlist' );
+	wp_unschedule_hook( 'post_shield_rebuild_type' ); // admin-button per-type rebuild.
+	wp_unschedule_hook( 'post_shield_redirect_sync' );
 }
+
+// Sync controller — appends slugs to allowlists on post changes (real-time).
+// Always wired: each handler asks the LIVE config whether its type is
+// shielded, and the config can change within the request — the self-heal on
+// admin_init after a fresh deploy publishes it just before the editor's save.
+require_once POST_SHIELD_PLUGIN_DIR . '/src/php/Controller/PostShieldSyncController.php';
+$post_shield_sync_controller = new \Post404Shield\Controller\PostShieldSyncController( $post_shield_builder );
+$post_shield_sync_controller->set_up();
 
 // Cron controller — ALWAYS wired, for the daily config health check: its job
 // is to report a shield that is off (no artifact, nothing enabled), which is

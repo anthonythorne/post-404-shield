@@ -243,6 +243,34 @@ Moved out of the sites that used it into its own repository.
 - Tests: the failed redirect read (separate processes), the forced coverage
   verdicts, the Posts entry following the permalinks, root-mode redirect
   warnings.
+- A real child whose slug is a number (`/parent/2024/`) is no longer read as
+  pagination of an unlisted parent: the full-path matchers try the whole path.
+- The sync hooks are always wired and ask the live config, so a post saved in
+  the request that self-heals a fresh deploy is appended; scheduled jobs are
+  cleared only when a real config says nothing is enabled.
+- A failed database read is its own exception (`ReadFailure`): only it is
+  retried, and any other exception in a save's checks refuses the save.
+- A status-drop confirmation covers the (entry, status) pairs the refusal
+  listed, kept server-side per user; a root refusal over a drop lists the
+  based drops too. The confirmed-drop warning names them.
+- A trash or delete diffs the type's parent map, so every post core or WPML
+  moved (WPML re-syncs every translated parent of the type, on trash as well,
+  and at shutdown for bulk deletes) is appended with the address it left.
+- In root mode a Posts base moved by the permalink settings keeps its old base
+  in the skip-list, with a notice, so old post links still reach WordPress's
+  301.
+- Root-extras lists a media item's bare slug only when it has no parent; the
+  stream holds the live list open (an inode cannot be reused under it) and
+  falls back to the list lock where a shared lock is refused (NFSv4).
+- The coverage replay reads private posts' addresses as a reader, whoever runs
+  the save, measures an empty list armed, and counts only resolving URLs as a
+  pass. A rejected save's draft keeps a removed row's posted settings.
+- The cache-time fields say what they control; a browser/CDN time longer than
+  the cache time warns. Discarding kept root settings shows its warnings.
+- Nonce actions end in `_nonce`; admin.js functions carry JSDoc.
+- Tests: the loader's root stage and prefilter (child processes), the root
+  preflight's armed measure and line mapping, a stream commit across two
+  replacements, numeric children.
 
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing

@@ -83,7 +83,7 @@ if ( $post_shield_needed ) {
 	// its WP-Cron scheduling is off. The first post-write hook loads the
 	// generator; its own listeners, at later priorities, then run in that same
 	// dispatch, so the new or renamed slug is appended at once.
-	foreach ( [ 'transition_post_status', 'post_updated', 'save_post', 'add_attachment', 'edit_attachment', 'before_delete_post', 'revision_applied', 'revision_published' ] as $post_shield_write_hook ) {
+	foreach ( [ 'transition_post_status', 'post_updated', 'save_post', 'add_attachment', 'edit_attachment', 'before_delete_post', 'wp_trash_post', 'revision_applied', 'revision_published' ] as $post_shield_write_hook ) {
 		add_action( $post_shield_write_hook, $post_shield_load, PHP_INT_MIN, 0 );
 	}
 	// PublishPress fires this filter BEFORE it writes the revision over the

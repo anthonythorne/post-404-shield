@@ -189,7 +189,7 @@ final class BasedPreflight {
 	 * @param array<int, string|int>        $keys      Entry keys to check (changed_keys()).
 	 * @param array<string|int, mixed>|null $current   Stored entries, when there are any.
 	 *
-	 * @return array{checked: int, breaks: array<int, array{url: string, marker: string, entry: string}>, depth: array<int, array{url: string, marker: string, entry: string}>, homes: array<string, string>, unclaimed: array<string, string>}
+	 * @return array{checked: int, resolving: int, breaks: array<int, array{url: string, marker: string, entry: string}>, depth: array<int, array{url: string, marker: string, entry: string}>, homes: array<string, string>, unclaimed: array<string, string>}
 	 *         `breaks` refuse the save; `depth` are real URLs the depth policy
 	 *         acts on (reported only); `homes`: per entry, the base its real
 	 *         URLs actually use when that differs; `unclaimed`: entries whose
@@ -205,13 +205,17 @@ final class BasedPreflight {
 		$bodies = [];
 		$read   = static function ( string $type ) use ( $builder, &$bodies ): ?string {
 			if ( ! array_key_exists( $type, $bodies ) ) {
+				// An empty list is measured ARMED, as the root preflight does:
+				// the loader passes everything while a list is empty, but the
+				// first post appended arms it, and no gate runs then.
 				$lines           = $builder->lines_for( $type );
-				$bodies[ $type ] = [] === $lines ? '' : "<?php exit;\n" . implode( "\n", $lines ) . "\n";
+				$bodies[ $type ] = "<?php exit;\n" . ( [] === $lines ? "\n" : implode( "\n", $lines ) . "\n" );
 			}
 			return $bodies[ $type ];
 		};
 
 		$checked   = 0;
+		$missed    = 0; // Samples that 404 over a status the entry does not list.
 		$breaks    = [];
 		$depth     = [];
 		$homes     = [];
@@ -295,6 +299,7 @@ final class BasedPreflight {
 							// the shield to hide (a pre-launch status registered
 							// public), so it is said, not refused.
 							array_pop( $breaks );
+							++$missed;
 							if ( self::is_private_status( $status ) ) {
 								$private[ (string) $key ] = ( $private[ (string) $key ] ?? 0 ) + 1;
 							} else {
@@ -348,6 +353,7 @@ final class BasedPreflight {
 
 		return [
 			'checked'   => $checked,
+			'resolving' => $checked - $missed,
 			'breaks'    => $breaks,
 			'depth'     => $depth,
 			'homes'     => $homes,
@@ -512,9 +518,9 @@ final class BasedPreflight {
 
 	/**
 	 * The statuses WordPress serves at a post's own address, from a list;
-	 * `publish` always. Private is one of them: the saving admin can read a
-	 * private post, so get_permalink() gives its pretty URL — which staff
-	 * open, and which a save dropping `private` would 404. A draft or
+	 * `publish` always. Private is one of them: its pretty URL (read as a
+	 * reader, public_path(), whoever runs the save) is what staff open, and
+	 * a save dropping `private` would 404 it. A draft or
 	 * scheduled post has no such URL to replay.
 	 *
 	 * @param array<int, mixed> $statuses Candidate statuses.
@@ -725,7 +731,23 @@ final class BasedPreflight {
 		if ( is_string( $lang ) && '' !== $lang ) {
 			\Post404Shield\switch_language( $lang );
 		}
-		$link = get_permalink( $id );
+		// Core gives a private post its pretty address only for a user who can
+		// read it; WP-CLI and cron run as nobody, and a CLI restore must be
+		// measured like a settings save. So read this one address as a reader.
+		$reader = static function ( array $allcaps, array $caps, array $args ) use ( $id ): array {
+			if ( 'read_post' === ( $args[0] ?? '' ) && (int) ( $args[2] ?? 0 ) === $id ) {
+				foreach ( $caps as $cap ) {
+					$allcaps[ $cap ] = true;
+				}
+			}
+			return $allcaps;
+		};
+		add_filter( 'user_has_cap', $reader, 10, 3 );
+		try {
+			$link = get_permalink( $id );
+		} finally {
+			remove_filter( 'user_has_cap', $reader, 10 );
+		}
 		if ( ! is_string( $link ) || '' === $link || false !== strpos( $link, '?' ) ) {
 			return null;
 		}

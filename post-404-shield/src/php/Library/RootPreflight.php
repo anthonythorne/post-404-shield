@@ -114,7 +114,7 @@ class RootPreflight {
 	 * @param array<string, mixed>               $entries         Candidate entries.
 	 * @param array<string, array<string, bool>> $sets      Candidate lines per effective CPT, as sets.
 	 *
-	 * @return array<string, string> Line => the dropped status.
+	 * @return array<string, array{0: string, 1: string}> Line => [ the dropped status, its post type ].
 	 */
 	private function dropped_status_lines( AllowlistBuilder $builder, array $entries, array $sets ): array {
 		$listed = static function ( array $source ): array {
@@ -136,7 +136,7 @@ class RootPreflight {
 			foreach ( array_diff( array_unique( $was ), $now[ $type ] ) as $status ) {
 				foreach ( $builder->lines_for( (string) $type, [ (string) $status ] ) as $line ) {
 					if ( ! isset( $sets[ $type ][ $line ] ) ) {
-						$lines[ $line ] = (string) $status;
+						$lines[ $line ] = [ (string) $status, (string) $type ];
 					}
 				}
 			}
@@ -300,7 +300,7 @@ class RootPreflight {
 	 * @param array<string, mixed> $candidate Candidate config document (entries
 	 *                                        + excluded_bases snapshot present).
 	 *
-	 * @return array{checked: int, would_block: string[], warn_block: string[], dropped: array<string, string>} `dropped`: the would-blocks a dropped status explains, URL => status.
+	 * @return array{checked: int, would_block: string[], warn_block: string[], dropped: array<string, string>, dropped_types: array<string, string>} `dropped`: the would-blocks a dropped status explains, URL => status (`dropped_types`: URL => its post type).
 	 */
 	public function run( array $candidate ): array {
 		$entries = (array) ( $candidate['entries'] ?? [] );
@@ -343,7 +343,7 @@ class RootPreflight {
 				// An empty list is measured ARMED: the loader leaves root
 				// matching inert while one is, but the first post appended arms
 				// it for the whole site, and no preflight runs then.
-				'body'             => '' === ( $bodies[ $root_type ] ?? '' ) ? "<?php exit;\n\n" : $bodies[ $root_type ],
+				'body'             => self::armed_body( $bodies[ $root_type ] ?? '' ),
 				'set'              => $sets[ $root_type ] ?? [],
 			];
 		}
@@ -427,11 +427,12 @@ class RootPreflight {
 
 		// Which would-blocks are a status this save drops (see dropped_status_lines()).
 		$dropped       = [];
+		$dropped_types = [];
 		$dropped_lines = [] === $would_block ? [] : $this->dropped_status_lines( $builder, $entries, $sets );
 		foreach ( $would_block as $url ) {
 			$line = $this->line_of( $url, $locale_pattern );
 			if ( isset( $dropped_lines[ $line ] ) ) {
-				$dropped[ $url ] = $dropped_lines[ $line ];
+				[ $dropped[ $url ], $dropped_types[ $url ] ] = $dropped_lines[ $line ];
 			}
 		}
 
@@ -440,6 +441,7 @@ class RootPreflight {
 			'would_block' => $would_block,
 			'warn_block'  => $warn_block,
 			'dropped'     => $dropped,
+			'dropped_types' => $dropped_types,
 		];
 	}
 
@@ -698,6 +700,19 @@ class RootPreflight {
 			return ''; // The loader treats an empty list as fail-open inert; '' mirrors that.
 		}
 		return "<?php exit;\n" . implode( "\n", $lines ) . "\n";
+	}
+
+	/**
+	 * A root list's body as the walk measures it: an empty one as ARMED — the
+	 * guard and an empty line, the list the builder writes and the first
+	 * appended post fills — never as '' (inert).
+	 *
+	 * @param string $body Body from body_from_lines().
+	 *
+	 * @return string
+	 */
+	private static function armed_body( string $body ): string {
+		return '' === $body ? "<?php exit;\n\n" : $body;
 	}
 
 	/**

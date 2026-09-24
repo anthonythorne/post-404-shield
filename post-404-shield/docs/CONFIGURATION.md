@@ -158,7 +158,7 @@ Notes on the shape:
 | `post_type` | string\|null | *(the entry key)* | The registered CPT this entry queries; `null` for `mode: block`. An unregistered CPT is a save-time **warning** (not a block) and is flagged on the page — never a silent empty allowlist. |
 | `mode` | string | `'allowlist'` | `'block'` marks a base with **no real content at all**: the bare base and anything under it, at any depth, gets the themed pre-boot 404 (`blocked-denied-base`). Loader-only — no allowlist, no hooks, no rebuilds. |
 | `cache_ttl` | int\|null | *(per-outcome default)* | Seconds a pre-boot 404 from this entry may be cached (origin `s-maxage` + browser/CDN `max-age` unless `edge_ttl` splits them). Defaults: **60s** allowlist entries, **3600s** blocks. `0` = `no-store`. At most **86400** (a day) is served — a longer value saves with a warning and is capped: no purge reaches a browser's cached 404. Global overrides: `POST_SHIELD_404_TTL`, `POST_SHIELD_BLOCKED_BASE_TTL`. |
-| `edge_ttl` | int\|null | *(none)* | **Publishable outcomes only.** Caps the CDN edge via `CDN-Cache-Control` — the only TTL that actually reaches the wire on WPE prod. Capped at **86400** likewise. Global override: `POST_SHIELD_404_EDGE_TTL`. See [Caching & invalidation](#caching--invalidation). |
+| `edge_ttl` | int\|null | *(none)* | **Publishable outcomes only.** Caps the browser (`max-age`) and the CDN edge (`CDN-Cache-Control`) — the only TTL that actually reaches the wire on WPE prod — while `cache_ttl` stays the origin's `s-maxage`. Set it shorter than `cache_ttl` (a save warns when it is longer: only the origin is purged on publish). Capped at **86400** likewise. Global override: `POST_SHIELD_404_EDGE_TTL`. See [Caching & invalidation](#caching--invalidation). |
 
 ## The locale option
 
@@ -188,10 +188,16 @@ also selects the baked 404 file (`404/<locale>.html`, falling back to
   the base (built via `get_page_uri()`); the loader exact-matches the entire
   sub-path; depth fields are ignored and hidden. Core sub-routes of a real page
   (`feed/…`, `embed`, `comment-page-N`, `page/N`, `trackback`) are stripped
-  before the match so they pass through with their parent.
+  before the match so they pass through with their parent — and the whole path
+  is tried too, so a real child whose slug is a number (`/parent/2024/`) passes
+  even when its parent is not listed.
 
   Best for **hierarchical types on smaller sites** — the allowlist grows with
-  the *total URL count*, not the top-level count. On rename/re-parent the sync
+  the *total URL count*, not the top-level count: every live post's path, and
+  every media page under one (`{post-path}/{media}`, old media names too). The
+  loader reads the whole list on each request under the base, so a type with
+  tens of thousands of attached images carries a list of megabytes; keep such
+  types on `slug`. On rename/re-parent the sync
   controller re-appends the **whole affected subtree** immediately (children
   must not 404 until the nightly rebuild). Switching an entry between modes
   rebuilds its allowlist **synchronously inside the save**, ordered so a
@@ -503,8 +509,10 @@ whose posts are in a public status it does not tick says so, and so do the
 save and the daily health check: the shield answers those posts with a 404,
 which is right only if the site hides them. Dropping a status the entry did
 list is refused while posts are in it — on a based row and on a Pages & posts
-row alike; the settings and restore screens then offer to drop it anyway
-(CLI: `--force`).
+row alike; the settings and restore screens then offer to drop it anyway. The
+confirmation covers exactly the entries and statuses the refusal listed (both
+checks' drops are listed together), never a drop made afterwards (CLI:
+`--force` drops any).
 
 **Reserve a page that lives under a CPT base**: add the slug to the type's
 *Reserved slugs*, and remember the shield is only half of it — WordPress needs

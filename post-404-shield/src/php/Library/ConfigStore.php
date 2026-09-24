@@ -154,7 +154,7 @@ class ConfigStore {
 	 * — rebuild the named effective CPTs' allowlists against the given
 	 * (candidate) entries; true when all were written, else the names of the
 	 * lists that could not be (any other value fails them all), and a
-	 * RuntimeException when a database read failed (a retry, not a refusal).
+	 * ReadFailure when a database read failed (a retry, not a refusal).
 	 * Injected by the bootstrap; absent in pure unit contexts.
 	 *
 	 * @var callable|null
@@ -1721,6 +1721,18 @@ class ConfigStore {
 					$warnings[] = sprintf( __( '%1$s: a cache time longer than %2$d seconds (a day) is capped to it — browsers keep a cached 404 as long as they are told, and nothing can recall it.', 'post-404-shield' ), $label, \Post404Shield\MAX_TTL );
 				}
 			}
+			// The edge time is what browsers and the CDN keep; only the server
+			// cache is purged on publish. Longer than the cache time, it keeps a
+			// launch URL's 404 in browsers after the post goes live.
+			if ( isset( $entry['edge_ttl'], $entry['cache_ttl'] ) && is_int( $entry['edge_ttl'] ) && is_int( $entry['cache_ttl'] ) && $entry['edge_ttl'] > $entry['cache_ttl'] ) {
+				$warnings[] = sprintf(
+					/* translators: 1: entry name, 2: the browser/CDN time, 3: the cache time, in seconds. */
+					__( '%1$s: browsers and the CDN keep its 404 for %2$d seconds, longer than the %3$d-second cache time; only the server cache is purged when a post is published, so a visitor can keep a new post\'s 404 that long. Set the browser and CDN time shorter.', 'post-404-shield' ),
+					$label,
+					$entry['edge_ttl'],
+					$entry['cache_ttl']
+				);
+			}
 
 			if ( 'block' === $entry_mode ) {
 				continue;
@@ -2002,11 +2014,14 @@ class ConfigStore {
 	 *                                           warnings kept from automatic writes; `keep_warnings` => true
 	 *                                           keeps this one's for the settings screen, as an automatic
 	 *                                           write's are;
-	 *                                           `allow_status_drop` => true lets a save drop a status whose
-	 *                                           posts are live (the settings screen's confirmation);
+	 *                                           `allow_status_drop` => true (CLI --force) lets a save drop any
+	 *                                           status whose posts are live, a list of "entry:status" pairs
+	 *                                           only those (the pairs a refusal listed, confirmed on screen);
 	 *                                           `persist_keep` => int stores that retention under the lock;
 	 *                                           `root_off_reason` => string says why, when the write leaves
-	 *                                           every root entry switched off (the kept-settings notice).
+	 *                                           every root entry switched off (the kept-settings notice);
+	 *                                           `notes` => string[] are added to the warnings (what an
+	 *                                           automatic write did beyond the obvious).
 	 *
 	 * @return array{ok: bool, errors: string[], warnings: string[], stale?: bool, retry?: bool} `retry` marks
 	 *         a refusal that says nothing about the config (a busy or lost lock, a failed read).
@@ -2031,7 +2046,7 @@ class ConfigStore {
 		$redirect_fp = function_exists( 'get_option' ) ? $this->take_snapshots( $config ) : null;
 
 		$validated             = $this->validate( $config );
-		$validated['warnings'] = array_merge( $validated['warnings'], $this->derivation_warnings );
+		$validated['warnings'] = array_merge( $validated['warnings'], $this->derivation_warnings, array_map( 'strval', (array) ( $flags['notes'] ?? [] ) ) );
 		// A fail-open write is automatic: it disables entries or re-snapshots
 		// what is live. An error the live artifact already carries — a status
 		// whose plugin was switched off — must not keep it from landing, or a
@@ -2119,6 +2134,17 @@ class ConfigStore {
 			if ( empty( $flags['skip_root_preflight'] ) && null !== $this->preflight_handler && $this->has_enabled_root_entries( $config['entries'] ) ) {
 				$refused = $this->root_preflight_gate( $config, $flags, $validated['warnings'], $accepted_after );
 				if ( null !== $refused ) {
+					// Over a dropped status: the based gate's drops are shown in
+					// the same refusal, so one confirmation covers all it lists.
+					if ( ! empty( $refused['status_drop'] ) ) {
+						$based_warnings = $validated['warnings'];
+						$based          = $this->coverage_gate( $config, $flags, $based_warnings );
+						if ( null !== $based ) {
+							$refused['errors']            = array_merge( $refused['errors'], $based['errors'] );
+							$refused['status_drop']       = ! empty( $based['status_drop'] );
+							$refused['status_drop_pairs'] = array_values( array_unique( array_merge( (array) ( $refused['status_drop_pairs'] ?? [] ), (array) ( $based['status_drop_pairs'] ?? [] ) ) ) );
+						}
+					}
 					return $refused;
 				}
 			}
@@ -2252,7 +2278,7 @@ class ConfigStore {
 			}
 
 			$this->prune_revisions( isset( $flags['keep'] ) ? (int) $flags['keep'] : null );
-		} catch ( \RuntimeException $e ) {
+		} catch ( ReadFailure $e ) {
 			// A database read inside a gate or rebuild failed: never judge,
 			// or swap, on a list built from "no rows".
 			return [
@@ -2260,6 +2286,15 @@ class ConfigStore {
 				'errors'   => [ __( 'Nothing was saved: a database read failed while checking the change. Try again.', 'post-404-shield' ) . ' (' . $e->getMessage() . ')' ],
 				'warnings' => $validated['warnings'],
 				'retry'    => true,
+			];
+		} catch ( \Throwable $e ) {
+			// A bug in a gate: refuse (nothing was swapped in), never fatal the
+			// save, and never read it as a retry.
+			error_log( '[post-404-shield] save check failed: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+			return [
+				'ok'       => false,
+				'errors'   => [ __( 'Nothing was saved: checking the change failed unexpectedly.', 'post-404-shield' ) . ' (' . $e->getMessage() . ')' ],
+				'warnings' => $validated['warnings'],
 			];
 		} finally {
 			if ( null !== $staged && file_exists( $staged ) ) {
@@ -2335,6 +2370,57 @@ class ConfigStore {
 	}
 
 	/**
+	 * Whether a save confirms dropping a status from an entry: `true` (CLI
+	 * --force) confirms every drop; a list confirms only the "entry:status"
+	 * pairs it names — the ones a refusal listed, so a confirmation never
+	 * covers a drop nobody was shown.
+	 *
+	 * @param array<string, mixed> $flags  write() flags.
+	 * @param string               $entry  Entry key.
+	 * @param string               $status Post status.
+	 *
+	 * @return bool
+	 */
+	private static function drop_is_confirmed( array $flags, string $entry, string $status ): bool {
+		$allow = $flags['allow_status_drop'] ?? false;
+		if ( true === $allow ) {
+			return true;
+		}
+		return is_array( $allow ) && in_array( $entry . ':' . $status, array_map( 'strval', $allow ), true );
+	}
+
+	/**
+	 * A status newly listed: anyone can now confirm its posts' slugs exist
+	 * (the shield's header says allowed-known-slug), which a site hiding
+	 * pre-launch content in it may not want.
+	 *
+	 * @param array<string, mixed> $config      Candidate document.
+	 * @param array<string, mixed> $current_doc What is live.
+	 * @param callable             $name        fn( entry key ): the entry's label.
+	 *
+	 * @return string[]
+	 */
+	private function newly_listed_warnings( array $config, array $current_doc, callable $name ): array {
+		$warnings = [];
+		foreach ( (array) ( $config['entries'] ?? [] ) as $entry_key => $entry ) {
+			if ( ! is_array( $entry ) || ( isset( $entry['enabled'] ) && false === $entry['enabled'] ) || 'allowlist' !== ( $entry['mode'] ?? 'allowlist' ) ) {
+				continue;
+			}
+			$live_entry = is_array( $current_doc['entries'][ $entry_key ] ?? null ) ? $current_doc['entries'][ $entry_key ] : [];
+			$was        = isset( $live_entry['enabled'] ) && false === $live_entry['enabled'] ? [] : (array) ( $live_entry['post_status'] ?? [ 'publish' ] );
+			foreach ( array_diff( array_map( 'strval', (array) ( $entry['post_status'] ?? [] ) ), $was, [ 'publish' ] ) as $added ) {
+				$warnings[] = sprintf(
+					/* translators: 1: entry name, 2: post status. */
+					__( '%1$s now lists the status "%2$s": anyone can confirm its posts\' addresses exist, although WordPress decides whether to show them.', 'post-404-shield' ),
+					$name( $entry_key ),
+					$added
+				);
+			}
+		}
+		return $warnings;
+	}
+
+	/**
 	 * The based-entry coverage gate (see write()): null when the save may go
 	 * on, else the refusal. Adds its verdicts to the warnings.
 	 *
@@ -2361,37 +2447,25 @@ class ConfigStore {
 			return $this->entry_label( (string) $entry_key, is_array( $entry ) ? $entry : [] );
 		};
 
-		// A status newly listed: anyone can now confirm its posts' slugs exist
-		// (the shield's header says allowed-known-slug), which a site hiding
-		// pre-launch content in it may not want.
-		foreach ( (array) ( $config['entries'] ?? [] ) as $entry_key => $entry ) {
-			if ( ! is_array( $entry ) || ( isset( $entry['enabled'] ) && false === $entry['enabled'] ) || 'allowlist' !== ( $entry['mode'] ?? 'allowlist' ) ) {
-				continue;
-			}
-			$live_entry = is_array( $current_doc['entries'][ $entry_key ] ?? null ) ? $current_doc['entries'][ $entry_key ] : [];
-			$was        = isset( $live_entry['enabled'] ) && false === $live_entry['enabled'] ? [] : (array) ( $live_entry['post_status'] ?? [ 'publish' ] );
-			foreach ( array_diff( array_map( 'strval', (array) ( $entry['post_status'] ?? [] ) ), $was, [ 'publish' ] ) as $added ) {
-				$warnings[] = sprintf(
-					/* translators: 1: entry name, 2: post status. */
-					__( '%1$s now lists the status "%2$s": anyone can confirm its posts\' addresses exist, although WordPress decides whether to show them.', 'post-404-shield' ),
-					$name( $entry_key ),
-					$added
-				);
-			}
+		foreach ( $this->newly_listed_warnings( $config, is_array( $current_doc ) ? $current_doc : [], $name ) as $newly_listed ) {
+			$warnings[] = $newly_listed;
 		}
 
 		// Dropping a status whose posts are live is refused unless confirmed
 		// (the settings screen's checkbox, or CLI --force): a status a site
 		// uses to hide content may be one the operator means to drop.
 		$dropped = [];
-		if ( ! empty( $flags['allow_status_drop'] ) && [] !== $breaks ) {
-			$dropped = array_values( array_filter( $breaks, static fn( $b ) => isset( $b['status'] ) ) );
-			$breaks  = array_values( array_filter( $breaks, static fn( $b ) => ! isset( $b['status'] ) ) );
+		if ( [] !== $breaks ) {
+			$confirmed = static fn( array $b ): bool => isset( $b['status'] ) && self::drop_is_confirmed( $flags, (string) ( $b['entry'] ?? '' ), (string) $b['status'] );
+			$dropped   = array_values( array_filter( $breaks, $confirmed ) );
+			$breaks    = array_values( array_filter( $breaks, static fn( array $b ): bool => ! $confirmed( $b ) ) );
 			if ( [] !== $dropped ) {
+				$which = array_values( array_unique( array_map( static fn( array $b ): string => $name( $b['entry'] ?? '' ) . ' — "' . (string) $b['status'] . '"', $dropped ) ) );
 				$warnings[] = sprintf(
-					/* translators: %d: number of real URLs. */
-					_n( 'Dropped a status as confirmed: %d real URL checked now gets a 404.', 'Dropped a status as confirmed: %d real URLs checked now get a 404.', count( $dropped ), 'post-404-shield' ),
-					count( $dropped )
+					/* translators: 1: number of real URLs, 2: the entries and statuses dropped. */
+					_n( 'Dropped a status as confirmed: %1$d real URL checked now gets a 404 (%2$s).', 'Dropped a status as confirmed: %1$d real URLs checked now get a 404 (%2$s).', count( $dropped ), 'post-404-shield' ),
+					count( $dropped ),
+					implode( ', ', $which )
 				);
 			}
 		}
@@ -2452,8 +2526,10 @@ class ConfigStore {
 				'ok'          => false,
 				'errors'      => $coverage_errors,
 				'warnings'    => $warnings,
-				// Refused only over dropped statuses: the screen offers to confirm.
-				'status_drop' => [] === array_filter( $breaks, static fn( $b ) => ! isset( $b['status'] ) ),
+				// Refused only over dropped statuses: the screen offers to confirm
+				// exactly these (entry, status) pairs.
+				'status_drop'       => [] === array_filter( $breaks, static fn( $b ) => ! isset( $b['status'] ) ),
+				'status_drop_pairs' => array_values( array_unique( array_map( static fn( $b ) => (string) ( $b['entry'] ?? '' ) . ':' . (string) $b['status'], array_filter( $breaks, static fn( $b ) => isset( $b['status'] ) ) ) ) ),
 			];
 		}
 		$depth_hits = (array) ( $coverage['depth'] ?? [] );
@@ -2513,9 +2589,11 @@ class ConfigStore {
 		if ( [] !== $breaks ) {
 			/* translators: %d: number of real URLs the forced save breaks. */
 			$warnings[] = sprintf( __( 'Coverage check reported %d broken real URL(s) but the save was FORCED.', 'post-404-shield' ), count( $breaks ) );
-		} elseif ( (int) ( $coverage['checked'] ?? 0 ) > 0 && [] === $unclaimed && [] === $dropped ) {
+		} elseif ( (int) ( $coverage['resolving'] ?? $coverage['checked'] ?? 0 ) > 0 && [] === $unclaimed && [] === $dropped ) {
+			// Counted without the samples said above to get a 404 (an unlisted
+			// or private status): only what still resolves is a pass.
 			/* translators: %d: number of real URLs checked. */
-			$warnings[]     = sprintf( __( 'Coverage check passed — %d real URLs of the changed post types still resolve.', 'post-404-shield' ), (int) $coverage['checked'] );
+			$warnings[]     = sprintf( __( 'Coverage check passed — %d real URLs of the changed post types still resolve.', 'post-404-shield' ), (int) ( $coverage['resolving'] ?? $coverage['checked'] ) );
 			$this->passes[] = end( $warnings );
 		}
 		return null;
@@ -2588,10 +2666,21 @@ class ConfigStore {
 		$would_block = array_values( array_filter( (array) ( $result['would_block'] ?? ( isset( $result['dropped'] ) ? [] : $result ) ), 'is_string' ) );
 		$dropped     = array_filter( (array) ( $result['dropped'] ?? [] ), 'is_string' );
 		$confirmed   = [];
+		// Each dropped would-block as its (root entry, status) pair.
+		$key_of = [];
+		foreach ( (array) ( $config['entries'] ?? [] ) as $entry_key => $entry ) {
+			if ( is_array( $entry ) && true === ( $entry['root'] ?? false ) ) {
+				$key_of[ (string) ( $entry['post_type'] ?? $entry_key ) ] = (string) $entry_key;
+			}
+		}
+		$pair_of = static function ( string $url ) use ( $dropped, $result, $key_of ): string {
+			$type = (string) ( $result['dropped_types'][ $url ] ?? '' );
+			return ( $key_of[ $type ] ?? $type ) . ':' . $dropped[ $url ];
+		};
 		// A status dropped as confirmed (the settings screen's checkbox, a
 		// restore's, CLI --force): its posts' 404s are what the save is for.
-		if ( ! empty( $flags['allow_status_drop'] ) && [] !== $dropped ) {
-			$confirmed   = array_intersect( $would_block, array_keys( $dropped ) );
+		if ( [] !== $dropped ) {
+			$confirmed   = array_values( array_filter( $would_block, fn( string $url ): bool => isset( $dropped[ $url ] ) && self::drop_is_confirmed( $flags, ...explode( ':', $pair_of( $url ), 2 ) ) ) );
 			$would_block = array_values( array_diff( $would_block, $confirmed ) );
 			if ( [] !== $confirmed ) {
 				$warnings[] = sprintf(
@@ -2626,8 +2715,10 @@ class ConfigStore {
 				'root_refused' => true,
 				'errors'       => $block_errors,
 				'warnings'     => $warnings,
-				// Refused only over dropped statuses: the screen offers to confirm.
-				'status_drop'  => [] === array_diff( $new_blocks, array_keys( $dropped ) ),
+				// Refused only over dropped statuses: the screen offers to confirm
+				// exactly these (entry, status) pairs.
+				'status_drop'       => [] === array_diff( $new_blocks, array_keys( $dropped ) ),
+				'status_drop_pairs' => array_values( array_unique( array_map( $pair_of, array_values( array_intersect( $new_blocks, array_keys( $dropped ) ) ) ) ) ),
 			];
 		}
 		if ( [] === $would_block && [] !== $confirmed ) {
@@ -2763,7 +2854,7 @@ class ConfigStore {
 	 *
 	 * @return bool False when a list failed to write.
 	 *
-	 * @throws \RuntimeException When a database read failed (write() refuses with a retry).
+	 * @throws ReadFailure When a database read failed (write() refuses with a retry).
 	 */
 	private function rebuild_before_swap( array $rebuild_before, array $config ): bool {
 		$live              = $this->artifact();
@@ -2774,7 +2865,7 @@ class ConfigStore {
 		}
 		try {
 			$result = ( $this->rebuild_handler )( $rebuild_before, $config['entries'], $root_switching_on );
-		} catch ( \RuntimeException $e ) {
+		} catch ( ReadFailure $e ) {
 			throw $e; // A failed read: write() refuses with a retry.
 		} catch ( \Throwable $e ) {
 			// A bug in a rebuild must refuse the save, never fatal it.
@@ -3217,12 +3308,30 @@ class ConfigStore {
 			if ( $candidate === $option && ! $this->snapshot_is_stale( $option ) ) {
 				return false;
 			}
+			// A Posts base moved (`/blog/` → `/news/`): root matching would take
+			// the old base, and every old post link would get a pre-boot 404
+			// instead of WordPress's 301 to the new address. Keep it excluded.
+			[ $candidate, $vacated ] = $this->with_vacated_post_base_kept( $option, $candidate );
+			$notes                   = [];
+			foreach ( $vacated as $old_base ) {
+				$notes[] = sprintf(
+					/* translators: %s: the old Posts base. */
+					__( 'Root mode: the Posts base moved, so /%s/ was added to the root skip-list to keep its old post links reaching WordPress\'s redirect. Remove it from Pages & posts when those links no longer matter.', 'post-404-shield' ),
+					$old_base
+				);
+			}
+			if ( [] !== $vacated ) {
+				$label = 'auto: the Posts entry follows the permalink settings (old base kept) — ';
+			} else {
+				$label = $candidate === $option ? 'auto: root snapshot refreshed — ' : 'auto: the Posts entry follows the permalink settings — ';
+			}
 			$result = $this->write(
 				$candidate,
-				'auto: root snapshot refreshed — ' . $reason,
+				$label . $reason,
 				[
 					'expect_revision' => $this->revision_of( $option ),
 					'fail_open'       => true,
+					'notes'           => $notes,
 				]
 			);
 			// A save that landed meanwhile ran every check itself.
@@ -3386,6 +3495,37 @@ class ConfigStore {
 			}
 		}
 		return $config;
+	}
+
+	/**
+	 * A candidate whose based `post` entry moved off bases the stored one had,
+	 * with those old bases added to the operator skip-list (root mode passes
+	 * them to WordPress, which 301s old post links), and the bases added.
+	 *
+	 * @param array<string, mixed> $option    Stored document.
+	 * @param array<string, mixed> $candidate Candidate document.
+	 *
+	 * @return array{0: array<string, mixed>, 1: string[]}
+	 */
+	private function with_vacated_post_base_kept( array $option, array $candidate ): array {
+		$vacated = [];
+		foreach ( (array) ( $option['entries'] ?? [] ) as $key => $entry ) {
+			if ( ! is_array( $entry ) || 'post' !== (string) ( $entry['post_type'] ?? $key ) || true === ( $entry['root'] ?? false )
+				|| 'allowlist' !== ( $entry['mode'] ?? 'allowlist' ) || ( isset( $entry['enabled'] ) && false === $entry['enabled'] )
+			) {
+				continue;
+			}
+			$now = (array) ( $candidate['entries'][ $key ]['url_base'] ?? [] );
+			foreach ( array_diff( array_filter( (array) ( $entry['url_base'] ?? [] ), 'is_string' ), $now ) as $old_base ) {
+				$vacated[] = (string) $old_base;
+			}
+		}
+		$operator = array_values( array_filter( (array) ( $candidate['excluded_bases']['operator'] ?? [] ), 'is_string' ) );
+		$added    = array_values( array_diff( array_unique( $vacated ), $operator ) );
+		if ( [] !== $added ) {
+			$candidate['excluded_bases']['operator'] = array_merge( $operator, $added );
+		}
+		return [ $candidate, $added ];
 	}
 
 	/**

@@ -198,7 +198,7 @@ class PostShieldAdminController {
 	 * @return void
 	 */
 	public function handle_save_config(): void {
-		check_admin_referer( 'post_shield_save_config' );
+		check_admin_referer( 'post_shield_save_config_nonce' );
 		$this->require_capability();
 
 		$previous = $this->current_document();
@@ -230,6 +230,10 @@ class PostShieldAdminController {
 			// candidate drops a row it refuses, and a draft without it would
 			// delete the stored entry on the corrected resubmit.
 			'blocks'        => $this->posted_block_rows(),
+			// A stored row the candidate removes (unticked), as posted: re-ticked
+			// after a refusal, it must come back with what the operator posted,
+			// not with a new row's defaults.
+			'removed'       => $this->posted_removed_rows( $candidate ),
 			'keep'          => isset( $_POST['ps_keep'] ) ? (string) (int) $_POST['ps_keep'] : (string) ConfigStore::DEFAULT_KEEP,
 			'rootConfirm'   => ! empty( $_POST['ps_root_confirm'] ), // phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
 			'statusConfirm' => ! empty( $_POST['ps_status_confirm'] ), // phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
@@ -278,22 +282,54 @@ class PostShieldAdminController {
 				'keep'              => $keep,
 				'persist_keep'      => $keep,
 				'expect_revision'   => $revision,
-				'allow_status_drop' => ! empty( $draft['statusConfirm'] ),
+				'allow_status_drop' => ! empty( $draft['statusConfirm'] ) ? $this->take_offered_drops() : [],
 				'shows_warnings'    => true,
 			]
 		);
 		if ( ! $result['ok'] ) {
 			// Offered only while the refusal is about a dropped status, and then
-			// unticked: a confirmation must never outlive the refusal it was for.
+			// unticked: a confirmation must never outlive the refusal it was for,
+			// nor cover a drop it did not list.
 			$draft['offerStatusConfirm'] = ! empty( $result['status_drop'] );
 			$draft['statusConfirm']      = false;
+			$this->offer_drops( ! empty( $result['status_drop'] ) ? (array) ( $result['status_drop_pairs'] ?? [] ) : [] );
 			$this->set_notice( $result['errors'], $result['warnings'], false, '', empty( $result['stale'] ) ? $draft : null );
 			$this->redirect_to_page();
 		}
 
+		$this->offer_drops( [] );
 		$this->queue_follow_up_jobs( $previous, $candidate );
 		$this->set_notice( [], $result['warnings'], true, __( 'Config saved — the artifact was regenerated and the shield now runs this configuration.', 'post-404-shield' ) );
 		$this->redirect_to_page();
+	}
+
+	/**
+	 * The dropped statuses a refusal listed ("entry:status"), kept for this
+	 * user until the next save or restore, which may confirm only these.
+	 *
+	 * @param string[] $pairs Pairs listed ([] forgets them).
+	 *
+	 * @return void
+	 */
+	private function offer_drops( array $pairs ): void {
+		$key = 'post_shield_offered_drops_' . get_current_user_id();
+		if ( [] === $pairs ) {
+			delete_transient( $key );
+			return;
+		}
+		set_transient( $key, array_values( array_map( 'strval', $pairs ) ), HOUR_IN_SECONDS );
+	}
+
+	/**
+	 * The dropped statuses offered to this user, used once.
+	 *
+	 * @return string[]
+	 */
+	private function take_offered_drops(): array {
+		$key   = 'post_shield_offered_drops_' . get_current_user_id();
+		$pairs = get_transient( $key );
+		delete_transient( $key );
+		return is_array( $pairs ) ? array_values( array_filter( $pairs, 'is_string' ) ) : [];
 	}
 
 	/**
@@ -305,7 +341,7 @@ class PostShieldAdminController {
 	 * @return void
 	 */
 	public function handle_restore(): void {
-		check_admin_referer( 'post_shield_restore' );
+		check_admin_referer( 'post_shield_restore_nonce' );
 		$this->require_capability();
 
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
@@ -333,21 +369,22 @@ class PostShieldAdminController {
 			$this->current_user_label(),
 			[
 				'expect_revision'   => $revision,
-				'allow_status_drop' => ! empty( $_POST['ps_status_confirm'] ), // phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
+				'allow_status_drop' => ! empty( $_POST['ps_status_confirm'] ) ? $this->take_offered_drops() : [], // phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified by check_admin_referer above.
 				'shows_warnings'    => true,
 				'root_off_reason'   => __( 'a revision with it switched off was restored', 'post-404-shield' ),
 			]
 		);
 		if ( ! $result['ok'] && ! empty( $result['status_drop'] ) ) {
 			// Refused only over a status the revision drops: back to the confirm
-			// screen, which now offers to drop it anyway.
+			// screen, which now offers to drop it — the drops listed, no others.
+			$this->offer_drops( (array) ( $result['status_drop_pairs'] ?? [] ) );
 			$this->set_notice( $result['errors'], $result['warnings'], false );
 			wp_safe_redirect(
 				add_query_arg(
 					[
 						'page'            => self::PAGE_SLUG,
 						'ps_restore'      => rawurlencode( $stamp ),
-						'_wpnonce'        => wp_create_nonce( 'post_shield_restore_confirm' ),
+						'_wpnonce'        => wp_create_nonce( 'post_shield_restore_confirm_nonce' ),
 						'ps_status_offer' => '1',
 					],
 					admin_url( 'options-general.php' )
@@ -360,6 +397,7 @@ class PostShieldAdminController {
 			$this->redirect_to_page();
 		}
 
+		$this->offer_drops( [] );
 		$restored = $this->store->artifact();
 		if ( null !== $restored ) {
 			$this->queue_follow_up_jobs( $previous, $restored );
@@ -377,7 +415,7 @@ class PostShieldAdminController {
 	 * @return void
 	 */
 	public function handle_disable(): void {
-		check_admin_referer( 'post_shield_disable' );
+		check_admin_referer( 'post_shield_disable_nonce' );
 		$this->require_capability();
 
 		$current = $this->current_document();
@@ -420,7 +458,7 @@ class PostShieldAdminController {
 	 * @return void
 	 */
 	public function handle_discard_root(): void {
-		check_admin_referer( 'post_shield_discard_root' );
+		check_admin_referer( 'post_shield_discard_root_nonce' );
 		$this->require_capability();
 
 		$current = $this->current_document();
@@ -445,7 +483,8 @@ class PostShieldAdminController {
 			}
 		}
 		delete_option( ConfigStore::ROOT_OFF_OPTION );
-		$this->set_notice( [], [], true, __( 'The kept root settings were discarded.', 'post-404-shield' ) );
+		// Its own warnings are shown here: shows_warnings cleared the kept ones.
+		$this->set_notice( [], isset( $result ) ? $result['warnings'] : [], true, __( 'The kept root settings were discarded.', 'post-404-shield' ) );
 		$this->redirect_to_page();
 	}
 
@@ -979,7 +1018,7 @@ class PostShieldAdminController {
 	 * @return void
 	 */
 	public function ajax_rebuild(): void {
-		check_ajax_referer( 'post_shield_rebuild' );
+		check_ajax_referer( 'post_shield_rebuild_nonce' );
 		$this->require_capability_json();
 
 		$post_type = isset( $_POST['post_type'] ) ? sanitize_key( wp_unslash( $_POST['post_type'] ) ) : '';
@@ -1004,7 +1043,7 @@ class PostShieldAdminController {
 	 * @return void
 	 */
 	public function ajax_bake(): void {
-		check_ajax_referer( 'post_shield_bake_404' );
+		check_ajax_referer( 'post_shield_bake_404_nonce' );
 		$this->require_capability_json();
 
 		$state = $this->queue_bake();
@@ -1026,7 +1065,7 @@ class PostShieldAdminController {
 	 * @return void
 	 */
 	public function ajax_status(): void {
-		check_ajax_referer( 'post_shield_status' );
+		check_ajax_referer( 'post_shield_status_nonce' );
 		$this->require_capability_json();
 
 		$subject = isset( $_GET['subject'] ) ? sanitize_key( wp_unslash( $_GET['subject'] ) ) : '';
@@ -1064,7 +1103,7 @@ class PostShieldAdminController {
 	 * @return void
 	 */
 	public function handle_rebuild_request(): void {
-		check_admin_referer( 'post_shield_rebuild' );
+		check_admin_referer( 'post_shield_rebuild_nonce' );
 		$this->require_capability();
 
 		$post_type = isset( $_POST['post_type'] ) ? sanitize_key( wp_unslash( $_POST['post_type'] ) ) : '';
@@ -1081,7 +1120,7 @@ class PostShieldAdminController {
 	 * @return void
 	 */
 	public function handle_bake_request(): void {
-		check_admin_referer( 'post_shield_bake_404' );
+		check_admin_referer( 'post_shield_bake_404_nonce' );
 		$this->require_capability();
 
 		$this->redirect_back( $this->queue_bake(), '404' );
@@ -1212,7 +1251,7 @@ class PostShieldAdminController {
 		$stamp = isset( $_GET['ps_restore'] ) ? sanitize_text_field( wp_unslash( $_GET['ps_restore'] ) ) : '';
 		$nonce = isset( $_GET['_wpnonce'] ) ? sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ) ) : '';
 		// phpcs:enable WordPress.Security.NonceVerification.Recommended
-		return '' !== $stamp && false !== wp_verify_nonce( $nonce, 'post_shield_restore_confirm' ) ? $stamp : '';
+		return '' !== $stamp && false !== wp_verify_nonce( $nonce, 'post_shield_restore_confirm_nonce' ) ? $stamp : '';
 	}
 
 	/**
@@ -1275,7 +1314,7 @@ class PostShieldAdminController {
 			'status'     => $this->status_state( $config ),
 			'form'       => [
 				'site'               => $site,
-				'types'              => $this->types_state( $form_doc, $document ),
+				'types'              => $this->types_state( $form_doc, $document, null !== $draft ? (array) ( $draft['removed'] ?? [] ) : [] ),
 				'blocks'             => null !== $draft && is_array( $draft['blocks'] ?? null ) ? $draft['blocks'] : $this->blocks_state( $form_doc ),
 				'excludedOperator'   => implode( "\n", array_filter( (array) ( $form_doc['excluded_bases']['operator'] ?? [] ), 'is_string' ) ),
 				'revision'           => null !== $draft ? (string) ( $draft['revision'] ?? '' ) : $this->store->current_revision(),
@@ -1294,11 +1333,11 @@ class PostShieldAdminController {
 			'bake'       => $this->bake_state(),
 			'revisions'  => $this->revisions_state(),
 			'nonces'     => [
-				'save'    => wp_create_nonce( 'post_shield_save_config' ),
-				'disable' => wp_create_nonce( 'post_shield_disable' ),
-				'rebuild' => wp_create_nonce( 'post_shield_rebuild' ),
-				'bake'    => wp_create_nonce( 'post_shield_bake_404' ),
-				'status'  => wp_create_nonce( 'post_shield_status' ),
+				'save'    => wp_create_nonce( 'post_shield_save_config_nonce' ),
+				'disable' => wp_create_nonce( 'post_shield_disable_nonce' ),
+				'rebuild' => wp_create_nonce( 'post_shield_rebuild_nonce' ),
+				'bake'    => wp_create_nonce( 'post_shield_bake_404_nonce' ),
+				'status'  => wp_create_nonce( 'post_shield_status_nonce' ),
 			],
 			'urls'       => [
 				'adminPost' => admin_url( 'admin-post.php' ),
@@ -1340,7 +1379,7 @@ class PostShieldAdminController {
 					'url'   => add_query_arg(
 						[
 							'action'   => 'post_shield_discard_root',
-							'_wpnonce' => wp_create_nonce( 'post_shield_discard_root' ),
+							'_wpnonce' => wp_create_nonce( 'post_shield_discard_root_nonce' ),
 						],
 						admin_url( 'admin-post.php' )
 					),
@@ -1524,13 +1563,14 @@ class PostShieldAdminController {
 	 * One row per public post type (plus any configured entry whose post type
 	 * is no longer registered), carrying the entry's current settings.
 	 *
-	 * @param array<string, mixed>|null $document Document the form shows (a rejected save's draft, or the stored one).
-	 * @param array<string, mixed>|null $stored   The stored document, when it differs from $document.
+	 * @param array<string, mixed>|null           $document Document the form shows (a rejected save's draft, or the stored one).
+	 * @param array<string, mixed>|null           $stored   The stored document, when it differs from $document.
+	 * @param array<string, array<string, mixed>> $removed  A draft's removed rows as posted, switched off (posted_removed_rows()).
 	 *
 	 * @return array<int, array<string, mixed>>
 	 */
-	private function types_state( ?array $document, ?array $stored = null ): array {
-		$entry_by_cpt  = $this->allowlist_entries_by_cpt( $document );
+	private function types_state( ?array $document, ?array $stored = null, array $removed = [] ): array {
+		$entry_by_cpt  = $this->allowlist_entries_by_cpt( $document ) + $removed;
 		$stored_by_cpt = null === $stored ? $entry_by_cpt : $this->allowlist_entries_by_cpt( $stored );
 
 		// S4 (root-pages v2): a type earns a row iff it has a REAL public rewrite
@@ -1583,6 +1623,38 @@ class PostShieldAdminController {
 			}
 		}
 		return $by_cpt;
+	}
+
+	/**
+	 * The posted rows of stored entries this save removes (an unticked root
+	 * row, a based row unticked with its bases cleared), as switched-off
+	 * entries: what the rejected save's draft shows for them.
+	 *
+	 * @param array<string, mixed> $candidate The candidate built from the request.
+	 *
+	 * @return array<string, array<string, mixed>> Post type => entry.
+	 */
+	private function posted_removed_rows( array $candidate ): array {
+		$stored = $this->allowlist_entries_by_cpt( $this->current_document() );
+		$kept   = $this->allowlist_entries_by_cpt( $candidate );
+		$posted = isset( $_POST['ps_types'] ) && is_array( $_POST['ps_types'] ) ? wp_unslash( $_POST['ps_types'] ) : []; // phpcs:ignore WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- verified by the caller; each field sanitised below.
+		$out    = [];
+		foreach ( $posted as $raw_cpt => $row ) {
+			$cpt = sanitize_key( (string) $raw_cpt );
+			if ( '' === $cpt || ! is_array( $row ) || ! isset( $stored[ $cpt ] ) || isset( $kept[ $cpt ] ) ) {
+				continue;
+			}
+			$statuses = array_values( array_filter( array_map( static fn( $status ): string => sanitize_key( (string) $status ), (array) ( $row['post_status'] ?? [] ) ) ) );
+			$entry    = $this->based_entry_from_row( $cpt, $row, false, $this->lines_from_textarea( (string) ( $row['url_base'] ?? '' ) ), $statuses, $stored[ $cpt ] );
+			if ( true === ( $stored[ $cpt ]['root'] ?? false ) ) {
+				$entry['root']          = true;
+				$entry['url_base']      = [];
+				$entry['match']         = 'full-path';
+				$entry['depth_allowed'] = null;
+			}
+			$out[ $cpt ] = $entry;
+		}
+		return $out;
 	}
 
 	/**
@@ -1874,7 +1946,7 @@ class PostShieldAdminController {
 						[
 							'page'       => self::PAGE_SLUG,
 							'ps_restore' => rawurlencode( (string) $revision['stamp'] ),
-							'_wpnonce'   => wp_create_nonce( 'post_shield_restore_confirm' ),
+							'_wpnonce'   => wp_create_nonce( 'post_shield_restore_confirm_nonce' ),
 						],
 						admin_url( 'options-general.php' )
 					)
@@ -2081,7 +2153,7 @@ class PostShieldAdminController {
 				<input type="hidden" name="action" value="post_shield_restore" />
 				<input type="hidden" name="ps_stamp" value="<?php echo esc_attr( $stamp ); ?>" />
 				<input type="hidden" name="ps_revision" value="<?php echo esc_attr( $this->store->current_revision() ); ?>" />
-				<?php wp_nonce_field( 'post_shield_restore' ); ?>
+				<?php wp_nonce_field( 'post_shield_restore_nonce' ); ?>
 				<?php if ( $status_offer ) : ?>
 					<div class="post-shield-admin-notice post-shield-admin-notice--warning post-shield-confirm">
 						<label>

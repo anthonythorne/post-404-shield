@@ -62,6 +62,7 @@ class PostShieldFailedReadTest extends TestCase {
 		mkdir( $dest . '/Library', 0755, true );
 		copy( $plugin . '/Function/ConfigReader.php', $dest . '/Function/ConfigReader.php' );
 		copy( $plugin . '/Library/AllowlistBuilder.php', $dest . '/Library/AllowlistBuilder.php' );
+		copy( $plugin . '/Library/ReadFailure.php', $dest . '/Library/ReadFailure.php' );
 
 		ini_set( 'error_log', $this->root . '/error.log' ); // phpcs:ignore WordPress.PHP.IniSet.Risky -- the failure is logged; keep it off the test's output.
 		eval( // phpcs:ignore Squiz.PHP.Eval.Discouraged -- test-only global stubs, in a separate process.

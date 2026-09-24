@@ -16,6 +16,7 @@ use Post404Shield\Library\ConfigStore;
 
 require_once __DIR__ . '/../../post-404-shield/src/php/Function/ConfigReader.php';
 require_once __DIR__ . '/../../post-404-shield/src/php/Library/ConfigStore.php';
+require_once __DIR__ . '/../../post-404-shield/src/php/Library/ReadFailure.php';
 
 /**
  * Test class for rebuild_before_swap().
@@ -99,13 +100,27 @@ class PostShieldRebuildBeforeSwapTest extends TestCase {
 	 * @return void
 	 */
 	public function test_a_failed_read_propagates(): void {
-		$this->expectException( \RuntimeException::class );
+		$this->expectException( \Post404Shield\Library\ReadFailure::class );
 		$this->run_rebuild(
 			static function (): bool {
-				throw new \RuntimeException( 'Deadlock found' );
+				throw new \Post404Shield\Library\ReadFailure( 'Deadlock found' );
 			},
 			[ 'photographer' ]
 		);
+	}
+
+	/**
+	 * Any other RuntimeException (an SPL one from a bug) refuses; it is not
+	 * read as a database blip to retry.
+	 *
+	 * @return void
+	 */
+	public function test_another_runtime_exception_refuses(): void {
+		ini_set( 'error_log', sys_get_temp_dir() . '/postshield-rebuild-test.log' ); // phpcs:ignore WordPress.PHP.IniSet.Risky -- the contained error is logged; keep it off the test's output.
+		$bug = static function (): bool {
+			throw new \UnexpectedValueException( 'a bug' );
+		};
+		$this->assertSame( [ false, [ 'photographer' ] ], $this->run_rebuild( $bug, [ 'photographer' ] ) );
 	}
 
 	/**

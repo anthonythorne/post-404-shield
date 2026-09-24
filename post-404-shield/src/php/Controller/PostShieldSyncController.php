@@ -71,23 +71,14 @@ class PostShieldSyncController {
 	private array $before_revision = [];
 
 	/**
-	 * Same-type children of a post being deleted, keyed by the deleted post's
-	 * ID: core then re-parents them with a direct query that fires no post
-	 * hook, so their URLs change unseen (before_delete_post → after_delete_post).
+	 * Per hierarchical type, every post's slug, parent and status before a
+	 * trash or delete (snapshot_type()): core then moves the deleted post's
+	 * children, and WPML any translation of the type, with queries that fire
+	 * no post hook, so their URLs change unseen.
 	 *
-	 * @var array<int, array{0: string, 1: int[]}>
+	 * @var array<string, array<int, array{0: string, 1: int, 2: string}>>
 	 */
-	private array $orphans = [];
-
-	/**
-	 * The WPML translations of a deleted post's children, keyed by the deleted
-	 * post's ID, with the addresses their subtrees had: WPML moves them to
-	 * match the children with a direct query on delete_post — or, for a bulk
-	 * delete, at shutdown — that fires no post hook either.
-	 *
-	 * @var array<int, array{0: string, 1: int[], 2: array<int, string>}>
-	 */
-	private array $orphan_translations = [];
+	private array $type_nodes = [];
 
 	/**
 	 * Media of a post being deleted, keyed by its ID (root mode, or a
@@ -117,9 +108,9 @@ class PostShieldSyncController {
 	private ?array $batch = null;
 
 	/**
-	 * Addresses a deleted post's subtree had, or a re-parented post's WPML
-	 * translations' subtrees had, before core or WPML moved them with a
-	 * query no hook sees — compared after the move for the old addresses.
+	 * Addresses a re-parented post's WPML translations' subtrees had before
+	 * WPML moved them with a query no hook sees — compared after the move for
+	 * the old addresses.
 	 *
 	 * @var array<string, array<int, string>>
 	 */
@@ -187,6 +178,9 @@ class PostShieldSyncController {
 		// (after save_post priority 100) — both change real URLs unseen.
 		add_action( 'before_delete_post', $this->guarded( 'handle_before_delete' ), 10, 1 );
 		add_action( 'after_delete_post', $this->guarded( 'handle_after_delete' ), 10, 1 );
+		// WPML re-syncs translated parents on trash as well.
+		add_action( 'wp_trash_post', $this->guarded( 'handle_before_trash' ), 1, 1 ); // Before WPML's, which syncs on this hook.
+		add_action( 'trashed_post', $this->guarded( 'handle_trashed' ), 10, 0 );
 		add_action( 'save_post', $this->guarded( 'handle_translations_moved' ), 200, 1 );
 
 		// Every managed type, root or based: core stores the outgoing slug in
@@ -237,8 +231,9 @@ class PostShieldSyncController {
 
 
 	/**
-	 * A media item was uploaded or edited — append its resolved URI and bare
-	 * slug to the root-extras union so its URL never pre-boot-404s.
+	 * A media item was uploaded or edited — append its address (nested under
+	 * its parent's, or its bare slug when unattached) to the root-extras union
+	 * so its URL never pre-boot-404s.
 	 *
 	 * @param int $post_id Attachment ID.
 	 *
@@ -330,8 +325,8 @@ class PostShieldSyncController {
 	}
 
 	/**
-	 * A managed post is about to be deleted: note its same-type children, whose
-	 * URLs change when core moves them up to its parent.
+	 * A managed post is about to be deleted: note its media, and what its
+	 * type's posts' parents are before core and WPML move them.
 	 *
 	 * @param int $post_id Post being deleted.
 	 *
@@ -359,30 +354,10 @@ class PostShieldSyncController {
 				$this->orphan_media[ $post_id ] = array_map( 'intval', (array) $media );
 			}
 		}
-		if ( ! $this->managed( $post_type ) || ! is_post_type_hierarchical( $post_type ) ) {
-			return;
-		}
-		$children = get_children(
-			[
-				'post_parent' => $post_id,
-				'post_type'   => $post_type,
-				'post_status' => 'any',
-				'fields'      => 'ids',
-			]
-		);
-		if ( [] !== $children ) {
-			$this->orphans[ $post_id ]            = [ $post_type, array_map( 'intval', (array) $children ) ];
-			$this->moving[ 'delete-' . $post_id ] = $this->subtree_uris( $post_type, $this->orphans[ $post_id ][1] );
-			$translations                         = [];
-			foreach ( $this->orphans[ $post_id ][1] as $child ) {
-				foreach ( $this->translation_ids( $child, $post_type ) as $translation_id ) {
-					$translations[] = $translation_id;
-				}
-			}
-			if ( [] !== $translations ) {
-				$translations                          = array_values( array_unique( $translations ) );
-				$this->orphan_translations[ $post_id ] = [ $post_type, $translations, $this->subtree_uris( $post_type, $translations ) ];
-			}
+		// Its children (core moves them up a level) and any translation WPML
+		// re-parents to match: every move of the type, seen by a diff.
+		if ( $this->managed( $post_type ) && is_post_type_hierarchical( $post_type ) ) {
+			$this->snapshot_type( $post_type );
 		}
 	}
 
@@ -470,8 +445,8 @@ class PostShieldSyncController {
 	}
 
 	/**
-	 * A managed post was deleted and core moved its children up a level:
-	 * append their new addresses — each child and its subtree, as for a move.
+	 * A managed post was deleted: append its media under their new parent,
+	 * and every post core or WPML moved meanwhile (see apply_type_moves()).
 	 *
 	 * @param int $post_id Deleted post ID.
 	 *
@@ -486,76 +461,182 @@ class PostShieldSyncController {
 			$this->append_based_media( null, $this->orphan_media[ $post_id ] );
 			unset( $this->orphan_media[ $post_id ] );
 		}
-		if ( ! isset( $this->orphans[ $post_id ] ) ) {
-			return;
-		}
-		[ $post_type, $children ] = $this->orphans[ $post_id ];
-		unset( $this->orphans[ $post_id ] );
-		$this->in_batch(
-			function () use ( $children, $post_type ): void {
-				foreach ( $children as $child ) {
-					$this->fast_append( $child, $post_type, true );
-				}
-			}
-		);
-		// WordPress still 301s the addresses they left (its 404 guess finds
-		// them by name), so they are kept like any move's.
-		$this->publish_moved( 'delete-' . $post_id, $post_type );
+		$this->apply_all_type_moves();
+	}
 
-		// Their translations, which WPML has moved by now — unless this is a
-		// bulk delete, whose sync WPML defers to shutdown: then once more there.
-		if ( isset( $this->orphan_translations[ $post_id ] ) ) {
-			$this->append_moved_translations( $post_id );
-			if ( ! has_action( 'shutdown', [ $this, 'handle_deferred_translation_moves' ] ) ) {
-				add_action( 'shutdown', [ $this, 'handle_deferred_translation_moves' ], 20 );
-			}
+	/**
+	 * A managed hierarchical post is about to be trashed: WPML re-syncs every
+	 * translated parent of its type on trash too (see snapshot_type()).
+	 *
+	 * @param int $post_id Post being trashed.
+	 *
+	 * @return void
+	 */
+	public function handle_before_trash( int $post_id ): void {
+		$post_type = get_post_type( $post_id );
+		if ( is_string( $post_type ) && $this->managed( $post_type ) && is_post_type_hierarchical( $post_type ) ) {
+			$this->snapshot_type( $post_type );
 		}
 	}
 
 	/**
-	 * The translations of a deleted post's children: append each one's
-	 * address now (and its subtree), and keep every address they left.
-	 *
-	 * @param int $post_id Deleted post ID.
+	 * A post was trashed: append every post WPML moved meanwhile.
 	 *
 	 * @return void
 	 */
-	private function append_moved_translations( int $post_id ): void {
-		[ $post_type, $translations, $before ] = $this->orphan_translations[ $post_id ];
-		$this->family                          = [];
+	public function handle_trashed(): void {
+		$this->family = [];
+		$this->apply_all_type_moves();
+	}
+
+	/**
+	 * Every post of a hierarchical type — ID, slug, parent, status — straight
+	 * from the table (see subtree_uris() on why not through the post cache),
+	 * taken before a trash or delete. Core moves the deleted post's children
+	 * up a level, and WPML then re-syncs the parent of EVERY translation of the
+	 * type (not just those children's) whose original's parent differs — with
+	 * queries no post hook sees, on delete_post, on trash, or at shutdown for
+	 * a bulk delete. Diffing against this is the only way to see them all.
+	 *
+	 * @param string $type Post type.
+	 *
+	 * @return void
+	 */
+	private function snapshot_type( string $type ): void {
+		if ( ! isset( $this->type_nodes[ $type ] ) ) {
+			$this->type_nodes[ $type ] = $this->type_node_rows( $type );
+		}
+	}
+
+	/**
+	 * ID => [ slug, parent, status ] for every post of a type.
+	 *
+	 * @param string $type Post type.
+	 *
+	 * @return array<int, array{0: string, 1: int, 2: string}>
+	 */
+	private function type_node_rows( string $type ): array {
+		global $wpdb;
+		$out = [];
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- the table as it is, not the post cache.
+		foreach ( (array) $wpdb->get_results( $wpdb->prepare( "SELECT ID, post_name, post_parent, post_status FROM {$wpdb->posts} WHERE post_type = %s AND post_status NOT IN ( 'auto-draft', 'inherit' )", $type ) ) as $row ) {
+			$out[ (int) $row->ID ] = [ (string) $row->post_name, (int) $row->post_parent, (string) $row->post_status ];
+		}
+		return $out;
+	}
+
+	/**
+	 * Diff every snapshotted type against the table now, treat each moved post
+	 * as a move, and check again at shutdown (WPML's deferred bulk sync).
+	 *
+	 * @return void
+	 */
+	private function apply_all_type_moves(): void {
+		foreach ( array_keys( $this->type_nodes ) as $type ) {
+			$this->apply_type_moves( (string) $type );
+		}
+		if ( [] !== $this->type_nodes && ! has_action( 'shutdown', [ $this, 'handle_type_moves_at_shutdown' ] ) ) {
+			add_action( 'shutdown', [ $this, 'handle_type_moves_at_shutdown' ], 20 );
+		}
+	}
+
+	/**
+	 * Every post of a type whose parent changed since its snapshot: its new
+	 * address and its subtree's are appended (as for any move), and the
+	 * addresses they left are kept — WordPress still 301s them.
+	 *
+	 * @param string $type Post type.
+	 *
+	 * @return void
+	 */
+	private function apply_type_moves( string $type ): void {
+		$before = $this->type_nodes[ $type ] ?? [];
+		$now    = $this->type_node_rows( $type );
+		// The next diff (another delete in this request, or shutdown) starts here.
+		$this->type_nodes[ $type ] = $now;
+		$moved                     = [];
+		foreach ( $now as $id => $node ) {
+			if ( isset( $before[ $id ] ) && $before[ $id ][1] !== $node[1] ) {
+				$moved[] = $id;
+			}
+		}
+		if ( [] === $moved ) {
+			return;
+		}
+		$this->family = [];
 		$this->in_batch(
-			function () use ( $translations, $post_type ): void {
-				foreach ( $translations as $translation_id ) {
-					$this->fast_append( $translation_id, $post_type, true );
+			function () use ( $moved, $type ): void {
+				foreach ( $moved as $id ) {
+					$this->fast_append( $id, $type, true );
 				}
 			}
 		);
-		$old = [];
-		foreach ( [] === $before ? [] : $this->builder->uris_for( $post_type, array_keys( $before ) ) as $id => $uri ) {
-			if ( isset( $before[ $id ] ) && $before[ $id ] !== $uri ) {
-				$old[ $id ] = $before[ $id ];
+
+		// The addresses the moved posts and their subtrees left, where served.
+		$children = [];
+		foreach ( $now as $id => $node ) {
+			$children[ $node[1] ][] = $id;
+		}
+		$affected = [];
+		$queue    = $moved;
+		while ( [] !== $queue ) {
+			$id = (int) array_shift( $queue );
+			if ( isset( $affected[ $id ] ) ) {
+				continue;
+			}
+			$affected[ $id ] = true;
+			foreach ( $children[ $id ] ?? [] as $child ) {
+				$queue[] = $child;
+			}
+		}
+		$new_uris = $this->builder->uris_for( $type, array_keys( $affected ) );
+		$old      = [];
+		foreach ( array_keys( $affected ) as $id ) {
+			$old_uri = self::uri_in( $before, (int) $id );
+			if ( '' !== $old_uri && ( $new_uris[ $id ] ?? '' ) !== $old_uri && $this->was_served( $type, (string) ( $before[ $id ][2] ?? '' ) ) ) {
+				$old[ (int) $id ] = $old_uri;
 			}
 		}
 		if ( [] !== $old ) {
-			$this->publish_old_uris( $post_type, $old );
+			$this->publish_old_uris( $type, $old );
 		}
 	}
 
 	/**
-	 * After WPML's deferred shutdown sync (a bulk delete, priority 10): the
-	 * translations it moved there.
+	 * A post's address as a node snapshot has it: its slugs, root first.
+	 *
+	 * @param array<int, array{0: string, 1: int, 2: string}> $nodes Snapshot.
+	 * @param int                                             $id    Post ID.
+	 *
+	 * @return string '' when a slug on the way is empty or the chain loops.
+	 */
+	private static function uri_in( array $nodes, int $id ): string {
+		$parts = [];
+		for ( $depth = 0; $id > 0 && $depth < 100; $depth++ ) {
+			if ( ! isset( $nodes[ $id ] ) || '' === $nodes[ $id ][0] ) {
+				return '';
+			}
+			array_unshift( $parts, $nodes[ $id ][0] );
+			$id = $nodes[ $id ][1];
+		}
+		return $id > 0 ? '' : implode( '/', $parts );
+	}
+
+	/**
+	 * At shutdown, after WPML's deferred bulk sync (priority 10): the posts it
+	 * moved there.
 	 *
 	 * @return void
 	 */
-	public function handle_deferred_translation_moves(): void {
-		foreach ( array_keys( $this->orphan_translations ) as $post_id ) {
+	public function handle_type_moves_at_shutdown(): void {
+		foreach ( array_keys( $this->type_nodes ) as $type ) {
 			try {
-				$this->append_moved_translations( (int) $post_id );
+				$this->apply_type_moves( (string) $type );
 			} catch ( \RuntimeException | \TypeError $e ) {
-				error_log( '[post-404-shield] handle_deferred_translation_moves: ' . $e->getMessage() . ' — skipped; the nightly rebuild restores the list.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+				error_log( '[post-404-shield] handle_type_moves_at_shutdown: ' . $e->getMessage() . ' — skipped; the nightly rebuild restores the list.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			}
-			unset( $this->orphan_translations[ $post_id ] );
 		}
+		$this->type_nodes = [];
 	}
 
 	/**

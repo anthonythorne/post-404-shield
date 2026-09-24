@@ -62,12 +62,25 @@
 
 	// ── Small helpers ──────────────────────────────────────────────────────
 
+	/**
+	 * Split a textarea's value into trimmed lines, slashes stripped at both ends.
+	 *
+	 * @param {string} value Textarea value.
+	 * @return {string[]} Non-empty lines.
+	 */
 	const splitLines = (value) =>
 		String(value || '')
 			.split(/\r\n|\r|\n/)
 			.map((line) => line.trim().replace(/^\/+|\/+$/g, ''))
 			.filter(Boolean);
 
+	/**
+	 * Sort comparator: by each item's label.
+	 *
+	 * @param {Object} a First item.
+	 * @param {Object} b Second item.
+	 * @return {number} Sort order.
+	 */
 	const byLabel = (a, b) => a.label.localeCompare(b.label);
 
 	const storage = {
@@ -87,6 +100,14 @@
 		},
 	};
 
+	/**
+	 * A hidden form input.
+	 *
+	 * @param {Object} props
+	 * @param {string} props.name  Field name.
+	 * @param {*}      props.value Field value (null/undefined posts an empty string).
+	 * @return {Object} Element.
+	 */
 	function Hidden({ name, value }) {
 		return el('input', {
 			type: 'hidden',
@@ -95,6 +116,14 @@
 		});
 	}
 
+	/**
+	 * A row of code chips.
+	 *
+	 * @param {Object}   props
+	 * @param {string[]} props.items Chip texts.
+	 * @param {boolean}  props.muted Greyed (read-only rows).
+	 * @return {Object} Element.
+	 */
 	function Chips({ items, muted }) {
 		return el(
 			'div',
@@ -114,6 +143,14 @@
 		);
 	}
 
+	/**
+	 * A small status badge.
+	 *
+	 * @param {Object} props
+	 * @param {string} props.tone     Colour: success, warning, error, or none.
+	 * @param {*}      props.children Badge text.
+	 * @return {Object} Element.
+	 */
 	function Badge({ tone, children }) {
 		return el(
 			'span',
@@ -126,6 +163,16 @@
 		);
 	}
 
+	/**
+	 * A card with a title, an optional description and header actions.
+	 *
+	 * @param {Object} props
+	 * @param {string} props.title       Card title.
+	 * @param {string} props.description Text under the title.
+	 * @param {*}      props.actions     Header buttons.
+	 * @param {*}      props.children    Card body.
+	 * @return {Object} Element.
+	 */
 	function SectionCard({ title, description, actions, children }) {
 		return el(
 			Card,
@@ -210,6 +257,15 @@
 
 	// ── Status tiles and notices ───────────────────────────────────────────
 
+	/**
+	 * One status tile: a label, a value and an optional line under it.
+	 *
+	 * @param {Object} props
+	 * @param {string} props.label Tile label.
+	 * @param {*}      props.value Tile value.
+	 * @param {*}      props.sub   Line under the value.
+	 * @return {Object} Element.
+	 */
 	function Tile({ label, value, sub }) {
 		return el(
 			'div',
@@ -222,6 +278,12 @@
 		);
 	}
 
+	/**
+	 * The status tiles above the tabs: active or not, types shielded, themed
+	 * 404 pages and root mode.
+	 *
+	 * @return {Object} Element.
+	 */
 	function StatusTiles() {
 		const s = data.status;
 		const bake = data.bake;
@@ -305,6 +367,12 @@
 		);
 	}
 
+	/**
+	 * The notices from the last save, restore or disable, and the kept
+	 * automatic ones.
+	 *
+	 * @return {Object|null} Element, or null when there are none.
+	 */
 	function Notices() {
 		const [notices, setNotices] = useState(data.notices);
 		if (!notices.length) {
@@ -354,6 +422,15 @@
 
 	// ── Post type rows ─────────────────────────────────────────────────────
 
+	/**
+	 * A type's post-status checkboxes, with the statuses its posts are in that
+	 * it does not list.
+	 *
+	 * @param {Object}   props
+	 * @param {Object}   props.type     The type's row state.
+	 * @param {Function} props.onChange Called with the changed fields.
+	 * @return {Object} Element.
+	 */
 	function StatusChecklist({ type, onChange }) {
 		// Public statuses the type's posts are in that are still unticked: the
 		// shield 404s those posts, which is right only if the site hides them.
@@ -461,6 +538,15 @@
 		);
 	}
 
+	/**
+	 * The advanced cache-time fields of a type row.
+	 *
+	 * @param {Object}   props
+	 * @param {Object}   props.type     The type's row state.
+	 * @param {Function} props.onChange Called with the changed fields.
+	 * @param {string}   props.idPrefix Prefix for the disclosure's id.
+	 * @return {Object} Element.
+	 */
 	function CacheFields({ type, onChange, idPrefix }) {
 		return el(
 			Disclosure,
@@ -473,11 +559,11 @@
 				type: 'number',
 				min: 0,
 				label: __(
-					'How long browsers and the CDN may keep this 404 (seconds)',
+					'How long caches may keep this 404 (seconds)',
 					'post-404-shield'
 				),
 				help: __(
-					'Empty uses the default of 60 seconds. Keep it short: a post published later must not stay hidden behind a saved 404.',
+					'Browsers, the CDN and the server cache, unless the field below is set. Empty uses the default of 60 seconds. Keep it short: a post published later must not stay hidden behind a saved 404.',
 					'post-404-shield'
 				),
 				value: type.cacheTtl,
@@ -488,16 +574,28 @@
 				type: 'number',
 				min: 0,
 				label: __(
-					'How long the CDN alone may keep it (seconds)',
+					'How long browsers and the CDN may keep it (seconds)',
 					'post-404-shield'
 				),
-				help: __('Empty follows the setting above.', 'post-404-shield'),
+				help: __(
+					'Set it shorter than the field above: browsers and the CDN then keep the 404 this long, and only the server cache — purged when a post is published — keeps it the longer time. Empty follows the field above.',
+					'post-404-shield'
+				),
 				value: type.edgeTtl,
 				onChange: (value) => onChange({ edgeTtl: value }),
 			})
 		);
 	}
 
+	/**
+	 * The settings of one type row: bases, matching, depth, statuses,
+	 * reserved slugs and cache times.
+	 *
+	 * @param {Object}   props
+	 * @param {Object}   props.type     The type's row state.
+	 * @param {Function} props.onChange Called with the changed fields.
+	 * @return {Object[]} Elements.
+	 */
 	function TypeFields({ type, onChange }) {
 		const bases = splitLines(type.urlBase);
 		const exampleBase =
@@ -798,6 +896,14 @@
 		return el('div', { className: 'post-shield-admin__fields' }, fields);
 	}
 
+	/**
+	 * One post type's row: its toggle, badges, summary and settings.
+	 *
+	 * @param {Object}   props
+	 * @param {Object}   props.type     The type's row state.
+	 * @param {Function} props.onChange Called with the changed fields.
+	 * @return {Object} Element.
+	 */
 	function TypeRow({ type, onChange }) {
 		const [open, setOpen] = useState(false);
 		const regionId = 'post-shield-type-' + type.cpt;
@@ -949,6 +1055,14 @@
 
 	// ── Tabs ───────────────────────────────────────────────────────────────
 
+	/**
+	 * The Post types tab: every based type's row.
+	 *
+	 * @param {Object}   props
+	 * @param {Object[]} props.types      Row states.
+	 * @param {Function} props.updateType Called with a type and its changed fields.
+	 * @return {Object} Element.
+	 */
 	function TypesTab({ types, updateType }) {
 		const [filter, setFilter] = useState('');
 		const based = types.filter((t) => !t.root);
@@ -964,6 +1078,13 @@
 		const on = visible.filter((t) => t.enabled).sort(byLabel);
 		const off = visible.filter((t) => !t.enabled).sort(byLabel);
 
+		/**
+		 * A titled group of type rows.
+		 *
+		 * @param {string}   title Group title.
+		 * @param {Object[]} rows  Row states.
+		 * @return {Object} Element.
+		 */
 		const group = (title, rows) =>
 			rows.length
 				? el(
@@ -1041,6 +1162,19 @@
 		);
 	}
 
+	/**
+	 * The Pages & posts tab: the root rows, the acknowledgement and the
+	 * excluded-bases card.
+	 *
+	 * @param {Object}   props
+	 * @param {Object[]} props.types          Row states.
+	 * @param {Function} props.updateType     Called with a type and its changed fields.
+	 * @param {string}   props.operator       The operator's excluded bases, one per line.
+	 * @param {Function} props.setOperator    Called with the new operator rows.
+	 * @param {boolean}  props.rootConfirm    The acknowledgement is ticked.
+	 * @param {Function} props.setRootConfirm Called with the new acknowledgement.
+	 * @return {Object} Element.
+	 */
 	function RootTab({
 		types,
 		updateType,
@@ -1166,7 +1300,22 @@
 		);
 	}
 
+	/**
+	 * The Blocked sections tab: a repeater of name, bases and cache time.
+	 *
+	 * @param {Object}   props
+	 * @param {Object[]} props.blocks    Block rows.
+	 * @param {Function} props.setBlocks Called with the new rows.
+	 * @return {Object} Element.
+	 */
 	function BlockedTab({ blocks, setBlocks }) {
+		/**
+		 * Change one block row.
+		 *
+		 * @param {number} index Row index.
+		 * @param {Object} patch Changed fields.
+		 * @return {void}
+		 */
 		const update = (index, patch) =>
 			setBlocks(
 				blocks.map((row, i) =>
@@ -1292,6 +1441,16 @@
 		);
 	}
 
+	/**
+	 * The Site settings tab: the locale option, revision retention and
+	 * Disable shield.
+	 *
+	 * @param {Object}   props
+	 * @param {Object}   props.site       Site settings.
+	 * @param {Function} props.updateSite Called with the changed settings.
+	 * @param {Function} props.onDisable  Opens the disable dialog.
+	 * @return {Object} Element.
+	 */
 	function SiteTab({ site, updateSite, onDisable }) {
 		const modeHelp =
 			'wpml-directory' === site.localeMode
@@ -1431,6 +1590,12 @@
 
 	// ── Maintenance (background jobs) ──────────────────────────────────────
 
+	/**
+	 * The status endpoint for a queued job.
+	 *
+	 * @param {string} subject What the job works on (a post type, a locale).
+	 * @return {string} URL.
+	 */
 	const statusUrl = (subject) =>
 		data.urls.ajax +
 		'?action=post_shield_status&subject=' +
@@ -1458,6 +1623,12 @@
 		const maxTries = isBake ? 120 : 30; // Bake batches chain per cron tick.
 		const delay = isBake ? 5000 : 3000;
 
+		/**
+		 * Ask for the job's status, again later until it is done or given up.
+		 *
+		 * @param {number} attempt Attempts so far.
+		 * @return {void}
+		 */
 		const poll = (attempt) => {
 			if (!isLive()) {
 				return;
@@ -1516,6 +1687,12 @@
 			);
 	}
 
+	/**
+	 * Whether the component is still mounted, for callbacks that land after
+	 * it unmounts.
+	 *
+	 * @return {Function} Returns true while mounted.
+	 */
 	function useLive() {
 		const live = useRef(true);
 		useEffect(
@@ -1527,6 +1704,14 @@
 		return () => live.current;
 	}
 
+	/**
+	 * A queued job's status line.
+	 *
+	 * @param {Object} props
+	 * @param {string} props.message Status text.
+	 * @param {string} props.tone    Notice tone.
+	 * @return {Object} Element.
+	 */
 	function JobStatus({ message, tone }) {
 		return el(
 			'span',
@@ -1541,6 +1726,13 @@
 		);
 	}
 
+	/**
+	 * One type's Rebuild allowlist row on the Maintenance tab.
+	 *
+	 * @param {Object} props
+	 * @param {Object} props.row The type and its list's state.
+	 * @return {Object} Element.
+	 */
 	function AllowlistRow({ row }) {
 		const [info, setInfo] = useState(row);
 		const [busy, setBusy] = useState(false);
@@ -1548,6 +1740,11 @@
 		const [tone, setTone] = useState('');
 		const isLive = useLive();
 
+		/**
+		 * Queue this type's rebuild and follow it to the end.
+		 *
+		 * @return {void}
+		 */
 		const rebuild = () => {
 			setBusy(true);
 			setTone('');
@@ -1650,6 +1847,11 @@
 		);
 	}
 
+	/**
+	 * The Regenerate 404 pages row on the Maintenance tab.
+	 *
+	 * @return {Object} Element.
+	 */
 	function BakeRow() {
 		const [info, setInfo] = useState(data.bake);
 		const [busy, setBusy] = useState(false);
@@ -1658,6 +1860,11 @@
 		const [tone, setTone] = useState('');
 		const isLive = useLive();
 
+		/**
+		 * Queue the 404 bake and follow it to the end.
+		 *
+		 * @return {void}
+		 */
 		const bake = () => {
 			setBusy(true);
 			setTone('');
@@ -1783,6 +1990,11 @@
 		);
 	}
 
+	/**
+	 * The Maintenance tab: per-type rebuilds and the 404 bake.
+	 *
+	 * @return {Object} Element.
+	 */
 	function MaintenanceTab() {
 		return el(
 			'div',
@@ -1823,6 +2035,11 @@
 		);
 	}
 
+	/**
+	 * The Revisions tab: every stored revision with its Restore link.
+	 *
+	 * @return {Object} Element.
+	 */
 	function RevisionsTab() {
 		const revisions = data.revisions;
 		return el(
@@ -1903,6 +2120,19 @@
 
 	// ── The app ────────────────────────────────────────────────────────────
 
+	/**
+	 * The form's hidden inputs: every setting in the field names the PHP
+	 * handler reads, so the save is an ordinary form POST.
+	 *
+	 * @param {Object}   props
+	 * @param {Object}   props.site          Site settings.
+	 * @param {Object[]} props.types         Row states.
+	 * @param {Object[]} props.blocks        Block rows.
+	 * @param {string}   props.operator      The operator's excluded bases.
+	 * @param {boolean}  props.rootConfirm   The root acknowledgement is ticked.
+	 * @param {boolean}  props.statusConfirm The status-drop confirmation is ticked.
+	 * @return {Object} Element.
+	 */
 	function HiddenFields({
 		site,
 		types,
@@ -1974,6 +2204,13 @@
 
 		types.forEach((type) => {
 			const field = 'ps_types[' + type.cpt + ']';
+			/**
+			 * Add one hidden input for the current type row.
+			 *
+			 * @param {string} suffix Field name inside the row (`[enabled]` …).
+			 * @param {*}      value  Field value.
+			 * @return {void}
+			 */
 			const add = (suffix, value) =>
 				inputs.push(
 					el(Hidden, {
@@ -2045,6 +2282,13 @@
 		return el(Fragment, null, inputs);
 	}
 
+	/**
+	 * The Disable shield confirm dialog.
+	 *
+	 * @param {Object}   props
+	 * @param {Function} props.onClose Closes it.
+	 * @return {Object} Element.
+	 */
 	function DisableModal({ onClose }) {
 		return el(
 			Modal,
@@ -2096,6 +2340,13 @@
 		);
 	}
 
+	/**
+	 * The tab to open first: the URL hash, else the one this session last
+	 * used, else the first.
+	 *
+	 * @param {Object[]} tabs Tab definitions.
+	 * @return {string} Tab name.
+	 */
 	function initialTab(tabs) {
 		const names = tabs.map((tab) => tab.name);
 		const fromHash = window.location.hash.replace(/^#/, '');
@@ -2106,6 +2357,11 @@
 		return names.includes(stored) ? stored : names[0];
 	}
 
+	/**
+	 * The settings screen.
+	 *
+	 * @return {Object} Element.
+	 */
 	function App() {
 		const [site, setSite] = useState(data.form.site);
 		const [types, setTypes] = useState(data.form.types);
@@ -2130,6 +2386,12 @@
 			if (!dirty || submitting) {
 				return undefined;
 			}
+			/**
+			 * Ask the browser to confirm leaving with unsaved changes.
+			 *
+			 * @param {Event} event beforeunload event.
+			 * @return {void}
+			 */
 			const warn = (event) => {
 				event.preventDefault();
 				event.returnValue = '';
@@ -2138,7 +2400,19 @@
 			return () => window.removeEventListener('beforeunload', warn);
 		}, [dirty, submitting]);
 
+		/**
+		 * Mark the form as changed.
+		 *
+		 * @return {void}
+		 */
 		const touch = () => setDirty(true);
+		/**
+		 * Change one type row.
+		 *
+		 * @param {string} cpt   Post type.
+		 * @param {Object} patch Changed fields.
+		 * @return {void}
+		 */
 		const updateType = (cpt, patch) => {
 			touch();
 			setTypes((current) =>
@@ -2147,14 +2421,32 @@
 				)
 			);
 		};
+		/**
+		 * Change site settings.
+		 *
+		 * @param {Object} patch Changed settings.
+		 * @return {void}
+		 */
 		const updateSite = (patch) => {
 			touch();
 			setSite((current) => ({ ...current, ...patch }));
 		};
+		/**
+		 * Replace the block rows.
+		 *
+		 * @param {Object[]} next New rows.
+		 * @return {void}
+		 */
 		const setBlocks = (next) => {
 			touch();
 			setBlocksState(next);
 		};
+		/**
+		 * Replace the operator's excluded bases.
+		 *
+		 * @param {string} next New rows, one per line.
+		 * @return {void}
+		 */
 		const setOperator = (next) => {
 			touch();
 			setOperatorState(next);
@@ -2175,6 +2467,12 @@
 			{ name: 'revisions', title: __('Revisions', 'post-404-shield') },
 		];
 
+		/**
+		 * Remember the open tab for this session.
+		 *
+		 * @param {string} name Tab name.
+		 * @return {void}
+		 */
 		const rememberTab = (name) => {
 			storage.set(name);
 			if (window.history && window.history.replaceState) {
@@ -2182,6 +2480,12 @@
 			}
 		};
 
+		/**
+		 * One tab's content.
+		 *
+		 * @param {Object} tab Tab definition.
+		 * @return {Object} Element.
+		 */
 		const renderTab = (tab) => {
 			let content;
 			switch (tab.name) {

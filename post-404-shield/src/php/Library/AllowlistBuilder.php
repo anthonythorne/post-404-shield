@@ -17,6 +17,8 @@ declare(strict_types=1);
 
 namespace Post404Shield\Library;
 
+require_once __DIR__ . '/ReadFailure.php';
+
 /**
  * Queries shielded posts and writes their slug allowlists to uploads.
  */
@@ -238,7 +240,7 @@ class AllowlistBuilder {
 			$statuses = $this->post_statuses_for( $post_type );
 			try {
 				$allow = $this->build_allowlist( $this->raw_lines( $post_type, $match, $statuses ), $match );
-			} catch ( \RuntimeException $e ) {
+			} catch ( ReadFailure $e ) {
 				// The previous list stays: a failed read is not an empty type.
 				$this->failed[ $file ]            = true;
 				$this->failed_reads[ $post_type ] = true;
@@ -259,12 +261,12 @@ class AllowlistBuilder {
 	 *
 	 * @return void
 	 *
-	 * @throws \RuntimeException On a database error.
+	 * @throws ReadFailure On a database error.
 	 */
 	private static function assert_query(): void {
 		global $wpdb;
 		if ( isset( $wpdb ) && is_string( $wpdb->last_error ?? null ) && '' !== $wpdb->last_error ) {
-			throw new \RuntimeException( 'database query failed: ' . $wpdb->last_error ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- caught and logged, never printed.
+			throw new ReadFailure( 'database query failed: ' . $wpdb->last_error ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- caught and logged, never printed.
 		}
 	}
 
@@ -705,7 +707,7 @@ class AllowlistBuilder {
 	 *
 	 * @return string[] Unvalidated lines.
 	 *
-	 * @throws \RuntimeException On a database error.
+	 * @throws ReadFailure On a database error.
 	 */
 	public function type_media_lines( string $post_type, array $statuses, ?array $parent_ids = null, ?array $ids = null ): array {
 		global $wpdb;
@@ -1348,8 +1350,8 @@ class AllowlistBuilder {
 	 * because their slugs share the root namespace and their URLs are real
 	 * (with an attachment-redirect SEO plugin, WordPress must receive the
 	 * request to serve the 301). A parented attachment's URL is NESTED
-	 * (`{parent-uri}/{slug}`), so both the resolved URI and the bare slug are
-	 * written; lines outside the charset are dropped by build_allowlist() —
+	 * (`{parent-uri}/{slug}`) and only that is written; an unattached one's
+	 * is its bare slug. Lines outside the charset are dropped by build_allowlist() —
 	 * symmetric with the root matcher, whose charset guard passes those
 	 * requests to WordPress anyway (fail-open both sides).
 	 *
@@ -1432,7 +1434,7 @@ class AllowlistBuilder {
 	/**
 	 * Lines for attachment rows: the URL nested under the parent's own URL,
 	 * resolved per parent type (a flat parent's is its bare slug, whatever
-	 * stray post_parent it carries), and the bare slug.
+	 * stray post_parent it carries), or the bare slug for unattached media.
 	 *
 	 * @param object[] $rows Rows from attachment_rows().
 	 *
@@ -1457,6 +1459,10 @@ class AllowlistBuilder {
 			$parent_uris += $this->uris_for( (string) $type, $parents );
 		}
 
+		// The bare line only for media with no parent: WordPress serves an
+		// attached item only under its parent's address (get_page_by_path()
+		// needs the whole ancestry), so a bare line for one would match no
+		// page and only confirm its name — on a private or hidden post too.
 		$lines = [];
 		foreach ( $rows as $row ) {
 			$name   = (string) $row->post_name;
@@ -1464,7 +1470,9 @@ class AllowlistBuilder {
 			if ( '' !== $parent ) {
 				$lines[] = $parent . '/' . $name;
 			}
-			$lines[] = $name;
+			if ( 0 === (int) $row->post_parent ) {
+				$lines[] = $name;
+			}
 		}
 		return $lines;
 	}
@@ -1667,11 +1675,20 @@ class AllowlistBuilder {
 		// appended to the live list while the stream ran is copied in before
 		// the rename, so no append is lost and none waits more than a moment.
 		clearstatcache( true, $file );
-		$start  = is_file( $file ) ? [ (int) filesize( $file ), (int) fileinode( $file ) ] : null;
-		$lock   = null;
-		$stream = is_dir( dirname( $file ) ) ? fopen( dirname( $file ) . '/.stream', 'c' ) : false; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
-		if ( false !== $stream ) {
-			flock( $stream, LOCK_SH ); // Appends see the read in flight (stream_in_flight()).
+		// The live list, held open until the commit: its inode stays allocated,
+		// so a list that replaced it meanwhile can never reuse it and pass for
+		// the same file (copy_appended()).
+		$held  = is_file( $file ) ? fopen( $file, 'r' ) : false; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$stat  = false !== $held ? fstat( $held ) : false;
+		$start = false !== $stat ? [ (int) $stat['size'], (int) $stat['ino'] ] : null;
+		$lock  = null;
+		// Read and write: NFSv4 refuses a shared lock on a write-only handle.
+		$stream = is_dir( dirname( $file ) ) ? fopen( dirname( $file ) . '/.stream', 'c+' ) : false; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$shared = false !== $stream && flock( $stream, LOCK_SH ); // Appends see the read in flight (stream_in_flight()).
+		if ( ! $shared ) {
+			// Appends cannot see this stream: hold the list's lock for it
+			// instead, as a type's rebuild does — they wait, but none is lost.
+			$lock = $this->lock( dirname( $file ) );
 		}
 		try {
 			// Streamed straight to the temp file: the union is never held in
@@ -1681,7 +1698,9 @@ class AllowlistBuilder {
 				$this->root_extras_stream(),
 				$file,
 				function ( $handle ) use ( $file, $start, &$lock ): ?int {
-					$lock = $this->lock( dirname( $file ) );
+					if ( null === $lock ) {
+						$lock = $this->lock( dirname( $file ) );
+					}
 					return $this->copy_appended( $file, $start, $handle );
 				}
 			);
@@ -1701,8 +1720,13 @@ class AllowlistBuilder {
 		} finally {
 			$this->unlock( $lock );
 			if ( false !== $stream ) {
-				flock( $stream, LOCK_UN );
+				if ( $shared ) {
+					flock( $stream, LOCK_UN );
+				}
 				fclose( $stream ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+			}
+			if ( false !== $held ) {
+				fclose( $held ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			}
 		}
 	}
@@ -1710,7 +1734,9 @@ class AllowlistBuilder {
 	/**
 	 * Copy onto a list being committed the lines appended to the live one
 	 * since its stream started: the tail past the size it had then, or — when
-	 * another rebuild replaced the file meanwhile — the whole new body.
+	 * another rebuild replaced the file meanwhile — the whole new body. The
+	 * stream holds the original file open, so a replacement can never be
+	 * given its inode back.
 	 *
 	 * @param string                  $file   Live list path.
 	 * @param array{0:int,1:int}|null $start  Its size and inode when the stream began, or null.
@@ -2013,11 +2039,16 @@ class AllowlistBuilder {
 					++$count;
 				}
 			}
-		} catch ( \RuntimeException $e ) {
+		} catch ( ReadFailure $e ) {
 			// A read failed mid-stream: a truncated list must not go live.
 			error_log( '[post-404-shield] rebuild: ' . $e->getMessage() . ' — the previous list stays in place.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			$ok                       = false;
 			$this->stream_read_failed = true;
+		} catch ( \Throwable $e ) {
+			// Anything else is a failed write, never a retry: the temp file is
+			// still removed below and the previous list stays.
+			error_log( '[post-404-shield] rebuild: ' . $e->getMessage() . ' — the previous list stays in place.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+			$ok = false;
 		}
 		// Last lines before the rename (root-extras: what was appended to the
 		// live list while this one streamed), under the caller's lock.

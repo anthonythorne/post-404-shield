@@ -220,9 +220,10 @@ path (a flat type's is its bare slug — WordPress ignores its `post_parent`), a
 a slug/parent change re-appends the **entire affected subtree** in the same
 request — even when the moved post is itself a draft, since WordPress still
 serves its published children at the new path. A content-only edit walks
-nothing. With root mode on, three more instant appends run: a media upload adds
-the attachment's URI + slug to root-extras (`add_attachment` /
-`edit_attachment`) when its post is live, a post going live adds its media, and
+nothing. With root mode on, three more instant appends run: a media upload
+(`add_attachment` / `edit_attachment`) adds the attachment's address to
+root-extras — nested under its parent's, the bare slug only for unattached
+media, the one case WordPress serves it — when its post is live, a post going live adds its media, and
 a root-type slug/parent change appends the OLD address (bare + in both parent
 contexts) so WordPress keeps serving its 301 (`post_updated`, after core stores
 `_wp_old_slug`). A hierarchical post that moves — core keeps no old slug for
