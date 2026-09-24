@@ -137,6 +137,9 @@ Notes on the shape:
   WordPress, operator rows from the settings textarea) so the pre-boot loader —
   which has no WordPress — can read the whole list. Additive and optional: a
   document without it stays valid; root matching is simply inert without it.
+  It also records the permalink post base the snapshot was taken under
+  (`post_base`: '' at the root, null with no fixed base) and, once posts have
+  moved off the root, `posts_left_root: true`.
 - The entry **key** is a readable label; `post_type` names the registered CPT
   the entry queries (`null` for blocks). Keys and post types are charset-checked
   by the reader (they become file-path components).
@@ -189,7 +192,9 @@ also selects the baked 404 file (`404/<locale>.html`, falling back to
   embargoed parent, and the child's URL already shows the parent's slug.
 - **`full-path`**: the allowlist holds **full hierarchical paths** relative to
   the base (built via `get_page_uri()`); the loader exact-matches the entire
-  sub-path; depth fields are ignored and hidden. Core sub-routes of a real page
+  sub-path; depth fields are ignored and hidden. It carries the slug list's
+  first segments as well, so a slug config reading it (while an entry switches
+  mode) still passes every live post. Core sub-routes of a real page
   (`feed/…`, `embed`, `comment-page-N`, `page/N`, `trackback`) are stripped
   before the match so they pass through with their parent — and the whole path
   is tried too, so a real child whose slug is a number (`/parent/2024/`) passes
@@ -668,9 +673,14 @@ current rewrite slugs for exactly this reason. Structural caveats:
   or, when root mode no longer fits or that save fails, root matching is
   switched off with a notice. A minute later a follow-up runs from cron —
   the saving request still holds the old rewrite rules and no endpoints, so
-  only then is the snapshot true. The daily health check does the same; a
+  only then is the snapshot true. The same follow-up is queued when a term is
+  created, renamed or deleted, or the rewrite rules are stored again (a plugin
+  flushing them, on any request). The daily health check does the same; a
   plugin's rewrite routes changing (activated, deactivated) is caught there,
-  and the root-mode tile flags the stale snapshot meanwhile. These automatic
+  and the root-mode tile flags the stale snapshot meanwhile. When posts move
+  from the site root to a base, root-extras lists every live post's slug from
+  then on, so old `/{slug}/` links still reach WordPress's 301; a Posts base
+  that moves is kept in the skip-list for the same reason. These automatic
   writes are not held back by an error the live config already carries (a
   status whose plugin was switched off); a new error still refuses them, and
   with no live artifact they publish nothing. Only a busy lock or a failed

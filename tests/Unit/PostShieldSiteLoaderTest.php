@@ -114,6 +114,37 @@ class PostShieldSiteLoaderTest extends TestCase {
 	}
 
 	/**
+	 * A route change on a page view (a plugin flushing the rewrite rules, a
+	 * term saved) queues the one-minute re-check once, without loading the
+	 * write side: root matching's snapshot must learn the new routes.
+	 *
+	 * @return void
+	 */
+	public function test_a_route_change_on_a_page_view_queues_the_re_check(): void {
+		$this->stub_wordpress();
+		eval( // phpcs:ignore Squiz.PHP.Eval.Discouraged -- test-only global stubs, in a separate process.
+			'function wp_next_scheduled( $hook ) { return $GLOBALS["post_shield_test_queued"][ $hook ] ?? false; }
+			function wp_schedule_single_event( $at, $hook ) { $GLOBALS["post_shield_test_queued"][ $hook ] = $at; return true; }'
+		);
+		if ( ! defined( 'MINUTE_IN_SECONDS' ) ) {
+			define( 'MINUTE_IN_SECONDS', 60 );
+		}
+		$_SERVER['REQUEST_METHOD'] = 'GET';
+		$_SERVER['REQUEST_URI']    = '/global/about/';
+		require $this->site();
+
+		$route = array_values( array_filter( $GLOBALS['post_shield_test_hooks'], static fn( $hook ) => PHP_INT_MIN !== $hook[2] ) );
+		$names = array_column( $route, 0 );
+		sort( $names );
+		$this->assertSame( [ 'add_option_rewrite_rules', 'created_term', 'delete_term', 'edited_term', 'update_option_rewrite_rules' ], $names );
+		foreach ( $route as [ , $callback ] ) {
+			$callback();
+		}
+		$this->assertArrayHasKey( 'post_shield_revalidate', $GLOBALS['post_shield_test_queued'] );
+		$this->assertArrayNotHasKey( 'post_shield_test_loads', $GLOBALS, 'Queued without loading the generator.' );
+	}
+
+	/**
 	 * PublishPress's pre-apply filter loads the write side before the revision
 	 * is written, and passes the revision data through unchanged.
 	 *

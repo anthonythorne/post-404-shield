@@ -1430,9 +1430,10 @@ class ConfigStore {
 			'derived'   => $derived,
 			'operator'  => $clean,
 			'endpoints' => $endpoints,
-			// The permalink post base this snapshot was taken under: a later
-			// write that finds it moved keeps it passing (with_vacated_post_base_kept()).
-			'post_base' => $this->post_base_info()['supported'] ? $this->post_base_info()['base'] : '',
+			// The permalink post base this snapshot was taken under ('' at the
+			// site root, null with no fixed base): a later write that finds it
+			// moved keeps it passing (with_vacated_post_base_kept()).
+			'post_base' => $this->post_base_info()['supported'] ? $this->post_base_info()['base'] : null,
 		];
 	}
 
@@ -1521,6 +1522,31 @@ class ConfigStore {
 			return $type;
 		}
 		return sprintf( '%s (%s)', $object->labels->name, $type );
+	}
+
+	/**
+	 * The key of the root entry a blocked root URL takes its cache times from,
+	 * chosen as the loader and the root preflight choose it: the enabled root
+	 * Pages entry, else the first enabled root entry. Posts usually comes
+	 * first in the document (core registers it first), so document order is
+	 * not the loader's order.
+	 *
+	 * @param array<mixed> $entries Config entries.
+	 *
+	 * @return string '' when no root entry is enabled.
+	 */
+	private static function root_ttl_entry_key( array $entries ): string {
+		$first = '';
+		foreach ( $entries as $key => $entry ) {
+			if ( ! is_array( $entry ) || true !== ( $entry['root'] ?? false ) || ( isset( $entry['enabled'] ) && false === $entry['enabled'] ) || 'allowlist' !== ( $entry['mode'] ?? 'allowlist' ) ) {
+				continue;
+			}
+			if ( 'page' === (string) ( $entry['post_type'] ?? $key ) ) {
+				return (string) $key;
+			}
+			$first = '' === $first ? (string) $key : $first;
+		}
+		return $first;
 	}
 
 	/**
@@ -1710,12 +1736,7 @@ class ConfigStore {
 		$seen_bases         = [];
 		$enabled_root_types = [];
 		// The loader reads a root 404's cache times from this entry alone.
-		$first_root = '';
-		foreach ( $entries as $key => $entry ) {
-			if ( '' === $first_root && is_array( $entry ) && true === ( $entry['root'] ?? false ) && ( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] ) ) {
-				$first_root = (string) $key;
-			}
-		}
+		$first_root = self::root_ttl_entry_key( $entries );
 		foreach ( $entries as $key => $entry ) {
 			if ( ! is_string( $key ) || 1 !== preg_match( '/^[a-z0-9_-]+$/', $key ) || ! is_array( $entry ) ) {
 				$errors[] = __( 'An entry has a malformed key.', 'post-404-shield' );
@@ -2111,7 +2132,7 @@ class ConfigStore {
 		// pre-boot 404 instead of WordPress's 301 to the new address. Root
 		// entries kept switched off count too: the base must still be kept
 		// when root matching comes back on.
-		if ( [] !== array_filter( (array) $config['entries'], static fn( $entry ) => is_array( $entry ) && true === ( $entry['root'] ?? false ) ) ) {
+		if ( self::has_root_rows( (array) $config['entries'] ) ) {
 			$live_doc = $this->artifact() ?? $this->option();
 			if ( is_array( $live_doc ) ) {
 				[ $config, $vacated ] = $this->with_vacated_post_base_kept( $live_doc, $config );
@@ -2119,6 +2140,14 @@ class ConfigStore {
 			}
 		}
 		$redirect_fp = function_exists( 'get_option' ) ? $this->take_snapshots( $config ) : null;
+		// Posts just left the site root: root-extras lists their slugs from
+		// this save on (rebuilt after the swap, below).
+		$posts_leaving_root = self::has_root_rows( (array) $config['entries'] )
+			&& true === ( $config['excluded_bases']['posts_left_root'] ?? false )
+			&& true !== ( ( $this->artifact() ?? [] )['excluded_bases']['posts_left_root'] ?? false );
+		if ( $posts_leaving_root ) {
+			$flags['notes'] = array_merge( (array) ( $flags['notes'] ?? [] ), [ __( 'Posts no longer live at the site root: root matching keeps every post\'s old /{slug}/ link reaching WordPress, which redirects it to the post\'s new address.', 'post-404-shield' ) ] );
+		}
 
 		$validated             = $this->validate( $config );
 		$validated['warnings'] = array_merge( $validated['warnings'], $this->derivation_warnings, array_map( 'strval', (array) ( $flags['notes'] ?? [] ) ) );
@@ -2187,7 +2216,7 @@ class ConfigStore {
 			// no-op must not push the operator's revisions out of retention.
 			// The option is brought in line, so it stops reading as stale.
 			$live = ! empty( $flags['fail_open'] ) ? $this->artifact() : null;
-			if ( null !== $live && self::same_document( $config, $live ) ) {
+			if ( null !== $live && self::same_document( self::as_loaded( $config ), self::as_loaded( $live ) ) ) {
 				update_option( self::OPTION, $live, false );
 				if ( null !== $redirect_fp ) {
 					update_option( self::REDIRECT_FP_OPTION, $redirect_fp, false );
@@ -2255,6 +2284,11 @@ class ConfigStore {
 			$live_before                        = $this->artifact();
 			$root_switching_on                  = $this->has_enabled_root_entries( $config['entries'] )
 				&& ! ( null !== $live_before && $this->has_enabled_root_entries( (array) $live_before['entries'] ) );
+			// The gates can outlast LOCK_TTL: no list is written for a save
+			// that lost its lock (another save owns the lists now).
+			if ( ( [] !== $rebuild_before || $root_switching_on ) && ! $this->refresh_lock() ) {
+				return self::lock_lost( $validated['warnings'] );
+			}
 			if ( ! $this->rebuild_before_swap( $rebuild_before, $config ) ) {
 				return [
 					'ok'       => false,
@@ -2293,12 +2327,7 @@ class ConfigStore {
 			// have had its lock broken by another save, which then owns the swap.
 			if ( ! $this->refresh_lock() ) {
 				$this->discard_revision( $revision );
-				return [
-					'ok'       => false,
-					'errors'   => [ __( 'Another save took over while this one was running — nothing was saved. Reload the page and check the current settings.', 'post-404-shield' ) ],
-					'warnings' => $validated['warnings'],
-					'retry'    => true,
-				];
+				return self::lock_lost( $validated['warnings'] );
 			}
 
 			$previous = get_option( self::OPTION, null );
@@ -2335,8 +2364,7 @@ class ConfigStore {
 			// (Disable shield, a restored revision, a CLI write) are kept, as an
 			// automatic switch-off keeps them: the next save from another tab
 			// must not delete them (revalidate_root() records its own reason).
-			$has_root = [] !== array_filter( (array) $config['entries'], static fn( $entry ) => is_array( $entry ) && true === ( $entry['root'] ?? false ) );
-			if ( ! $has_root || $this->has_enabled_root_entries( $config['entries'] ) ) {
+			if ( ! self::has_root_rows( (array) $config['entries'] ) || $this->has_enabled_root_entries( $config['entries'] ) ) {
 				// Root on again, or no root settings left to keep: the state is over.
 				delete_option( self::ROOT_OFF_OPTION );
 			} elseif ( ! is_array( get_option( self::ROOT_OFF_OPTION ) ) ) {
@@ -2395,8 +2423,9 @@ class ConfigStore {
 			// A save that switched root mode on rebuilds root-extras once more
 			// too: until the swap, the live artifact had root mode off, so the
 			// media, old slugs and private pages made meanwhile were not appended.
-			if ( null !== $this->rebuild_handler && ( [] !== $rebuild_before || $root_switching_on ) ) {
-				( $this->rebuild_handler )( $rebuild_before, $config['entries'], $root_switching_on );
+			// So does a save after which posts no longer live at the root.
+			if ( null !== $this->rebuild_handler && ( [] !== $rebuild_before || $root_switching_on || $posts_leaving_root ) ) {
+				( $this->rebuild_handler )( $rebuild_before, $config['entries'], $root_switching_on || $posts_leaving_root );
 			}
 		} catch ( \Throwable $e ) {
 			error_log( '[post-404-shield] post-save rebuild: ' . $e->getMessage() . '; the previous lists stay until the nightly rebuild.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
@@ -2699,6 +2728,38 @@ class ConfigStore {
 	}
 
 	/**
+	 * Whether a document has root entries, switched on or kept off.
+	 *
+	 * @param array<mixed> $entries Config entries.
+	 *
+	 * @return bool
+	 */
+	private static function has_root_rows( array $entries ): bool {
+		return [] !== array_filter( $entries, static fn( $entry ) => is_array( $entry ) && true === ( $entry['root'] ?? false ) );
+	}
+
+	/**
+	 * A document as far as the loader reads it, for comparing an automatic
+	 * write with the live artifact: with no root entries the root stage never
+	 * runs, so the snapshot buckets only it reads change nothing, and a new
+	 * redirect source base must not archive a revision each night (pushing
+	 * the operator's own out of retention). The endpoints stay: based
+	 * matching strips them too.
+	 *
+	 * @param array<string, mixed> $doc Config document.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private static function as_loaded( array $doc ): array {
+		if ( ! self::has_root_rows( (array) ( $doc['entries'] ?? [] ) ) && is_array( $doc['excluded_bases'] ?? null ) ) {
+			foreach ( [ 'floor', 'derived', 'operator', 'post_base', 'posts_left_root' ] as $bucket ) {
+				unset( $doc['excluded_bases'][ $bucket ] );
+			}
+		}
+		return $doc;
+	}
+
+	/**
 	 * An array with every map's keys sorted, lists kept in order.
 	 *
 	 * @param array<mixed> $value Array.
@@ -2836,11 +2897,15 @@ class ConfigStore {
 		$locale_pattern           = self::locale_pattern_of( $config );
 		$operator                 = (array) ( $config['excluded_bases']['operator'] ?? [] );
 		$stored                   = $this->option();
+		$left_root                = $this->posts_left_the_root( $config );
 		$config['excluded_bases'] = $this->excluded_bases_snapshot(
 			$operator,
 			$locale_pattern,
 			(array) ( $config['excluded_bases']['endpoints'] ?? $stored['excluded_bases']['endpoints'] ?? [] )
 		);
+		if ( $left_root ) {
+			$config['excluded_bases']['posts_left_root'] = true;
+		}
 
 		// Reserved slugs derived from the site's redirect plugins are
 		// snapshotted the same way and for the same reason: the pre-boot
@@ -2948,7 +3013,7 @@ class ConfigStore {
 			return true;
 		}
 		try {
-			$result = ( $this->rebuild_handler )( $rebuild_before, $config['entries'], $root_switching_on );
+			$result = ( $this->rebuild_handler )( $rebuild_before, self::with_live_statuses( (array) $config['entries'], $live, $rebuild_before ), $root_switching_on );
 		} catch ( ReadFailure $e ) {
 			throw $e; // A failed read: write() refuses with a retry.
 		} catch ( \Throwable $e ) {
@@ -2966,6 +3031,53 @@ class ConfigStore {
 			$this->rebuild_failures = true === $result ? [] : $asked;
 		}
 		return [] === $this->rebuild_failures;
+	}
+
+	/**
+	 * Candidate entries with each pre-swap type's statuses joined by the ones
+	 * the live artifact lists for it. A pre-swap list is read by the artifact
+	 * that is live until the swap — or for good, when the save is refused
+	 * after it (a lost lock, a failed stage or swap) — so it must still hold
+	 * every post that artifact lists, although the save also drops a status.
+	 * The rebuild after the swap narrows it to the candidate's.
+	 *
+	 * @param array<mixed>              $entries Candidate entries.
+	 * @param array<string, mixed>|null $live    Live artifact.
+	 * @param string[]                  $types   Pre-swap types.
+	 *
+	 * @return array<mixed>
+	 */
+	private static function with_live_statuses( array $entries, ?array $live, array $types ): array {
+		$listed = [];
+		foreach ( (array) ( $live['entries'] ?? [] ) as $key => $entry ) {
+			if ( is_array( $entry ) && ( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] ) && 'allowlist' === ( $entry['mode'] ?? 'allowlist' ) ) {
+				$type            = (string) ( $entry['post_type'] ?? $key );
+				$listed[ $type ] = array_merge( $listed[ $type ] ?? [], (array) ( $entry['post_status'] ?? [ 'publish' ] ) );
+			}
+		}
+		foreach ( $entries as $key => $entry ) {
+			$type = is_array( $entry ) ? (string) ( $entry['post_type'] ?? $key ) : '';
+			if ( isset( $listed[ $type ] ) && in_array( $type, $types, true ) ) {
+				$entries[ $key ]['post_status'] = array_values( array_unique( array_merge( (array) ( $entry['post_status'] ?? [ 'publish' ] ), $listed[ $type ] ) ) );
+			}
+		}
+		return $entries;
+	}
+
+	/**
+	 * The refusal of a save whose lock another save broke.
+	 *
+	 * @param string[] $warnings Save warnings.
+	 *
+	 * @return array{ok: false, errors: string[], warnings: string[], retry: true}
+	 */
+	private static function lock_lost( array $warnings ): array {
+		return [
+			'ok'       => false,
+			'errors'   => [ __( 'Another save took over while this one was running — nothing was saved. Reload the page and check the current settings.', 'post-404-shield' ) ],
+			'warnings' => $warnings,
+			'retry'    => true,
+		];
 	}
 
 	/**
@@ -3515,10 +3627,13 @@ class ConfigStore {
 		if ( $this->redirect_read_failed ) {
 			$live['derived'] = array_values( array_unique( array_merge( (array) $live['derived'], array_filter( (array) ( $stored['derived'] ?? [] ), 'is_string' ) ) ) );
 		}
-		if ( (string) ( $stored['post_base'] ?? $live['post_base'] ) !== (string) $live['post_base'] ) {
+		// With no root entries the root stage never runs: only the endpoints
+		// (based matching strips them too) and the reserved slugs are read.
+		$root_rows = self::has_root_rows( (array) ( $config['entries'] ?? [] ) );
+		if ( $root_rows && array_key_exists( 'post_base', $stored ) && $stored['post_base'] !== $live['post_base'] ) {
 			return true; // The permalink post base moved.
 		}
-		foreach ( [ 'floor', 'derived', 'endpoints' ] as $bucket ) {
+		foreach ( $root_rows ? [ 'floor', 'derived', 'endpoints' ] : [ 'endpoints' ] as $bucket ) {
 			$a = array_values( array_filter( (array) ( $stored[ $bucket ] ?? [] ), 'is_string' ) );
 			$b = array_values( (array) $live[ $bucket ] );
 			sort( $a );
@@ -3581,6 +3696,46 @@ class ConfigStore {
 			__( 'Root mode: the Posts base moved, so /%s/ was added to the root skip-list to keep its old post links reaching WordPress\'s redirect. Remove it from Pages & posts when those links no longer matter.', 'post-404-shield' ),
 			$old_base
 		);
+	}
+
+	/**
+	 * Whether posts have left the site root since a config shielded them
+	 * there, or a snapshot found them there. Root mode must keep their old
+	 * `/{slug}/` links reaching WordPress, which 301s each to the post's new
+	 * address. A vacated base can be kept passing whole
+	 * (with_vacated_post_base_kept()); the root cannot, so root-extras lists
+	 * the posts' slugs instead. Carried from write to write until posts live
+	 * at the root again.
+	 *
+	 * @param array<string, mixed> $config Candidate document.
+	 *
+	 * @return bool
+	 */
+	private function posts_left_the_root( array $config ): bool {
+		$info = $this->post_base_info();
+		if ( $info['supported'] && '' === $info['base'] ) {
+			return false; // At the root again: a root Posts entry lists them.
+		}
+		$live = $this->artifact() ?? $this->option();
+		foreach ( [ $config, $live ] as $doc ) {
+			if ( is_array( $doc ) && true === ( $doc['excluded_bases']['posts_left_root'] ?? false ) ) {
+				return true;
+			}
+		}
+		if ( ! is_array( $live ) ) {
+			return false;
+		}
+		if ( '' === ( $live['excluded_bases']['post_base'] ?? null ) ) {
+			return true; // The last snapshot found posts at the root.
+		}
+		foreach ( (array) ( $live['entries'] ?? [] ) as $key => $entry ) {
+			if ( is_array( $entry ) && 'post' === (string) ( $entry['post_type'] ?? $key ) && true === ( $entry['root'] ?? false )
+				&& ( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] )
+			) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**

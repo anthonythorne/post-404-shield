@@ -313,6 +313,26 @@ Moved out of the sites that used it into its own repository.
 - Tests: the loader's switched-off and invalid-document guards and endpoints
   (child processes), the armed bodies through run()'s own helpers, nested
   trash and delete reads.
+- Posts moving from the site root to a base are remembered
+  (`excluded_bases.posts_left_root`): root-extras then lists every live post's
+  slug and old slugs, so old `/{slug}/` links keep reaching WordPress's 301.
+  The snapshot's `post_base` is null, not '', when the structure has no fixed
+  base.
+- The route re-check is also queued on a page view (the site loader) and when
+  the rewrite rules are re-added after a delete (`add_option_rewrite_rules`).
+  Sites vendoring the shield should copy the updated example loader.
+- On a site with no root entries an automatic write compares only what the
+  loader reads, so a new redirect source base no longer archives a revision.
+- Root cache-time warnings check the Pages entry, as the loader reads it.
+- Slug mode: renaming, restoring or moving a parent that is not live lists its
+  live children's new first segment at once.
+- Full-path lists of a hierarchical type carry every live post's first segment
+  too, so a slug artifact reading one (a mode switch, a failed rebuild) passes
+  them. A list rebuilt before the swap keeps the live artifact's statuses as
+  well, and is not written once the lock is lost.
+- Tests: the save-time WPML diff, a draft parent's rename, the page-view route
+  hooks, the moved-base paths, posts leaving the root, the full-path first
+  segments.
 
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing

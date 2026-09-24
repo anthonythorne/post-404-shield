@@ -95,6 +95,13 @@ class AllowlistBuilder {
 	private bool $follow_live = false;
 
 	/**
+	 * Whether posts have left the site root, when set (set_posts_left_root()).
+	 *
+	 * @var bool|null
+	 */
+	private ?bool $posts_left_root = null;
+
+	/**
 	 * The live entries last read, and the file state they were read at.
 	 *
 	 * @var array<string, array<string, mixed>>|null
@@ -682,9 +689,12 @@ class AllowlistBuilder {
 		// that of every live post, which is its top-level ancestor's slug —
 		// WordPress serves a published child under a draft, private or
 		// embargoed parent (get_page_by_path() does not check ancestors), and
-		// the child's own URL already shows the parent's slug.
-		if ( 'full-path' !== $match && $this->is_hierarchical( $post_type ) ) {
-			foreach ( $this->fetch_paths( $post_type, $statuses ) as $path ) {
+		// the child's own URL already shows the parent's slug. A full-path
+		// list carries the same first segments, so a slug artifact reading it
+		// (an entry switching mode, around the swap, after a failed rebuild)
+		// still matches every live post.
+		if ( $this->is_hierarchical( $post_type ) ) {
+			foreach ( 'full-path' === $match ? $lines : $this->fetch_paths( $post_type, $statuses ) as $path ) {
 				if ( false !== strpos( $path, '/' ) ) {
 					$lines[] = explode( '/', $path )[0];
 				}
@@ -1729,6 +1739,68 @@ class AllowlistBuilder {
 		$root_types = $this->root_types();
 		yield from $this->fetch_old_slug_lines( $root_types );
 		yield from $this->fetch_unpublished_lines( $root_types );
+		yield from $this->former_root_post_lines();
+	}
+
+	/**
+	 * Mark whether posts have left the site root (the config's
+	 * `excluded_bases.posts_left_root`), for a builder that does not read it
+	 * from the live artifact.
+	 *
+	 * @param bool $left Whether they have.
+	 *
+	 * @return self
+	 */
+	public function set_posts_left_root( bool $left ): self {
+		$this->posts_left_root = $left;
+		return $this;
+	}
+
+	/**
+	 * Whether posts have left the site root: as set, else as the live
+	 * artifact says (a save's own rebuilds run while the artifact that
+	 * recorded it is live, or just after this save put it there).
+	 *
+	 * @return bool
+	 */
+	private function posts_left_root(): bool {
+		if ( null !== $this->posts_left_root ) {
+			return $this->posts_left_root;
+		}
+		if ( ! function_exists( '\Post404Shield\read_config' ) || ! function_exists( '\Post404Shield\shield_dir' ) ) {
+			return false;
+		}
+		$live = \Post404Shield\read_config( \Post404Shield\shield_dir() . '/config.php' );
+		return true === ( $live['excluded_bases']['posts_left_root'] ?? false );
+	}
+
+	/**
+	 * Root mode, once posts have moved from the site root to a base: every
+	 * live post's bare slug and old slugs. Their old `/{slug}/` links reach
+	 * WordPress, which 301s each to the post's address under the base.
+	 *
+	 * @return string[] Lines (unvalidated).
+	 */
+	private function former_root_post_lines(): array {
+		global $wpdb;
+		if ( ! $this->posts_left_root() || $this->is_root_type( 'post' ) ) {
+			return [];
+		}
+		$statuses     = $this->post_statuses_for( 'post' );
+		$placeholders = implode( ', ', array_fill( 0, count( $statuses ), '%s' ) );
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$old = $wpdb->get_col(
+			$wpdb->prepare(
+				"SELECT pm.meta_value FROM {$wpdb->postmeta} pm
+				 INNER JOIN {$wpdb->posts} p ON p.ID = pm.post_id
+				 WHERE pm.meta_key = '_wp_old_slug' AND pm.meta_value <> ''
+				   AND p.post_type = 'post' AND p.post_status IN ($placeholders)",
+				$statuses
+			)
+		);
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		self::assert_query();
+		return array_merge( $this->fetch_paths( 'post', $statuses ), array_map( 'strval', (array) $old ) );
 	}
 
 	/**

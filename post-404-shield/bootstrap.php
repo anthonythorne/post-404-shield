@@ -190,9 +190,11 @@ add_action( 'update_option_category_base', $post_shield_revalidate );
 add_action( 'update_option_tag_base', $post_shield_revalidate );
 // Routes also change without a settings change: a category created or
 // renamed while an SEO plugin strips the category base (each gets its own
-// rules), or any plugin flushing the rewrite rules. The follow-up alone,
-// deduped, a minute later — it re-snapshots only when the snapshot is stale.
-foreach ( [ 'created_term', 'edited_term', 'delete_term', 'update_option_rewrite_rules' ] as $post_shield_route_hook ) {
+// rules), or any plugin flushing the rewrite rules (stored with add_option
+// when a plugin deleted them first). The follow-up alone, deduped, a minute
+// later — it re-snapshots only when the snapshot is stale. The site loader
+// queues the same on requests that skip this file (a flush on a page view).
+foreach ( [ 'created_term', 'edited_term', 'delete_term', 'update_option_rewrite_rules', 'add_option_rewrite_rules' ] as $post_shield_route_hook ) {
 	add_action(
 		$post_shield_route_hook,
 		static function (): void {

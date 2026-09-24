@@ -1195,7 +1195,10 @@ class PostShieldSyncController {
 			return;
 		}
 
-		if ( ! $live ) {
+		// A parent that is not live itself (a draft or embargoed parent renamed,
+		// restored from the trash, moved to the top level) still moves its live
+		// children's URLs, which now start with its new first segment.
+		if ( ! $live && ! ( ( $moved || isset( $this->moved[ $post_id ] ) ) && is_post_type_hierarchical( $post_type ) && $this->has_live_descendant( $post_id, $post_type ) ) ) {
 			return;
 		}
 		// Slug mode lists a URL's first segment: for a hierarchical type,
@@ -1206,8 +1209,27 @@ class PostShieldSyncController {
 			: get_post_field( 'post_name', $post_id );
 		if ( is_string( $slug ) && '' !== $slug ) {
 			$this->append_lines( $post_type, [ $slug ] );
-			$this->purge_page_cache( $post_id );
+			if ( $live ) {
+				$this->purge_page_cache( $post_id );
+			}
 		}
+	}
+
+	/**
+	 * Whether any descendant of a post is in a status its type lists.
+	 *
+	 * @param int    $post_id   Post ID.
+	 * @param string $post_type Managed hierarchical post type.
+	 *
+	 * @return bool
+	 */
+	private function has_live_descendant( int $post_id, string $post_type ): bool {
+		foreach ( $this->descendant_statuses( $post_id, $post_type ) as $child_status ) {
+			if ( $this->builder->is_shielding_status( $post_type, $child_status ) ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**

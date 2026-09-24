@@ -86,6 +86,21 @@ if ( $post_shield_needed ) {
 	foreach ( [ 'transition_post_status', 'post_updated', 'save_post', 'add_attachment', 'edit_attachment', 'before_delete_post', 'wp_trash_post', 'revision_applied' ] as $post_shield_write_hook ) {
 		add_action( $post_shield_write_hook, $post_shield_load, PHP_INT_MIN, 0 );
 	}
+	// A route change on a page view — a plugin flushing the rewrite rules
+	// after an update, a term saved — queues the one-minute re-check the
+	// generator would, without loading it: the cron run that follows does.
+	foreach ( [ 'created_term', 'edited_term', 'delete_term', 'update_option_rewrite_rules', 'add_option_rewrite_rules' ] as $post_shield_route_hook ) {
+		add_action(
+			$post_shield_route_hook,
+			static function (): void {
+				if ( false === wp_next_scheduled( 'post_shield_revalidate' ) ) {
+					wp_schedule_single_event( time() + MINUTE_IN_SECONDS, 'post_shield_revalidate' );
+				}
+			},
+			10,
+			0
+		);
+	}
 	// PublishPress fires this filter BEFORE it writes the revision over the
 	// live post: the generator must be loaded by then to note the addresses
 	// the revision may move. A filter, so its value passes through untouched.

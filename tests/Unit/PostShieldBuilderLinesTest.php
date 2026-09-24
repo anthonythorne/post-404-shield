@@ -1,0 +1,167 @@
+<?php
+/**
+ * Unit tests for two kinds of allowlist line the round-14 fixes added:
+ *
+ * - A full-path list of a hierarchical type carries the first segment of
+ *   every live post, as a slug list does. A slug artifact reads a full-path
+ *   list while an entry switches mode, around the swap, and after a failed
+ *   rebuild; without those lines a published child under a draft parent
+ *   gets a pre-boot 404 there.
+ * - Once posts have moved from the site root to a base, root-extras lists
+ *   every live post's slug and old slugs: old `/{slug}/` links must keep
+ *   reaching WordPress, which 301s them to the new address.
+ *
+ * Each test runs in its own process: the WordPress stubs and $wpdb are global.
+ *
+ * @package Post404Shield\Tests
+ */
+
+namespace Post404Shield\Tests;
+
+use PHPUnit\Framework\TestCase;
+
+/**
+ * Test class for the builder's lines.
+ *
+ * @runTestsInSeparateProcesses
+ * @preserveGlobalState disabled
+ */
+class PostShieldBuilderLinesTest extends TestCase {
+
+	/**
+	 * Stub WordPress and a table: a published `model-2` camera under a draft
+	 * top-level `draft-series`, and a published post `my-post` whose old slug
+	 * is `old-root-post`.
+	 *
+	 * @return void
+	 */
+	private function stub(): void {
+		eval( // phpcs:ignore Squiz.PHP.Eval.Discouraged -- test-only global stubs, in a separate process.
+			'function is_post_type_hierarchical( $type ) { return "post" !== $type; }
+			function post_type_exists( $type ) { return true; }
+			function get_post_status_object( $status ) { return (object) [ "private" => false, "public" => true ]; }
+			function is_post_status_viewable( $status ) { return true; }
+			function get_post_stati( $args = [] ) { return [ "publish" => "publish" ]; }'
+		);
+		$GLOBALS['wpdb'] = new class() {
+			/** @var string */
+			public $posts = 'wp_posts';
+			/** @var string */
+			public $postmeta = 'wp_postmeta';
+			/** @var string */
+			public $last_error = '';
+			/**
+			 * Stub prepare: the arguments put in, quoted.
+			 *
+			 * @param string $query SQL.
+			 * @param mixed  ...$args Arguments.
+			 * @return string
+			 */
+			public function prepare( $query, ...$args ) {
+				$args = 1 === count( $args ) && is_array( $args[0] ) ? $args[0] : $args;
+				foreach ( $args as $arg ) {
+					$query = (string) preg_replace( '/%[sd]/', is_int( $arg ) ? (string) $arg : "'" . $arg . "'", (string) $query, 1 );
+				}
+				return (string) $query;
+			}
+			/**
+			 * Rows by query.
+			 *
+			 * @param string $query SQL.
+			 * @return array<object>
+			 */
+			public function get_results( $query ) {
+				$row = static fn( int $id, string $name, int $parent ): object => (object) [
+					'ID'          => $id,
+					'post_name'   => $name,
+					'post_parent' => $parent,
+				];
+				if ( false !== strpos( $query, 'WHERE ID IN' ) ) {
+					return [ $row( 1, 'draft-series', 0 ) ];
+				}
+				if ( 0 === strpos( trim( $query ), 'SELECT ID, post_name, post_parent FROM' ) ) {
+					if ( false !== strpos( $query, "post_type = 'camera'" ) ) {
+						return [ $row( 2, 'model-2', 1 ) ];
+					}
+					if ( false !== strpos( $query, "post_type = 'post'" ) ) {
+						return [ $row( 3, 'my-post', 0 ) ];
+					}
+				}
+				return [];
+			}
+			/**
+			 * Columns by query.
+			 *
+			 * @param string $query SQL.
+			 * @return string[]
+			 */
+			public function get_col( $query ) {
+				return false !== strpos( $query, "p.post_type = 'post'" ) && false !== strpos( $query, '_wp_old_slug' ) ? [ 'old-root-post' ] : [];
+			}
+		};
+		require_once __DIR__ . '/../../post-404-shield/src/php/Function/ConfigReader.php';
+		require_once __DIR__ . '/../../post-404-shield/src/php/Library/ReadFailure.php';
+		require_once __DIR__ . '/../../post-404-shield/src/php/Library/AllowlistBuilder.php';
+	}
+
+	/**
+	 * A full-path list holds the live child's path and its top-level
+	 * ancestor, so a slug artifact reading it still passes the child.
+	 *
+	 * @return void
+	 */
+	public function test_a_full_path_list_carries_every_live_posts_first_segment(): void {
+		$this->stub();
+		$builder = new \Post404Shield\Library\AllowlistBuilder(
+			[
+				'camera' => [
+					'url_base'    => [ 'products/cameras' ],
+					'post_status' => [ 'publish' ],
+					'match'       => 'full-path',
+				],
+			]
+		);
+		$lines   = $builder->lines_for( 'camera' );
+		$this->assertContains( 'draft-series/model-2', $lines );
+		$this->assertContains( 'draft-series', $lines );
+	}
+
+	/**
+	 * After posts left the root, root-extras lists their slugs and old slugs;
+	 * before, or while Posts is a root type, it does not.
+	 *
+	 * @return void
+	 */
+	public function test_root_extras_list_posts_that_left_the_root(): void {
+		$this->stub();
+		$config = [
+			'page' => [
+				'root'        => true,
+				'post_type'   => 'page',
+				'post_status' => [ 'publish' ],
+			],
+			'post' => [
+				'url_base'    => [ 'blog' ],
+				'post_status' => [ 'publish' ],
+			],
+		];
+		$stream = static function ( \Post404Shield\Library\AllowlistBuilder $builder ): array {
+			$method = new \ReflectionMethod( $builder, 'root_extras_stream' );
+			$method->setAccessible( true );
+			return iterator_to_array( $method->invoke( $builder ), false );
+		};
+
+		$left = $stream( ( new \Post404Shield\Library\AllowlistBuilder( $config ) )->set_posts_left_root( true ) );
+		$this->assertContains( 'my-post', $left );
+		$this->assertContains( 'old-root-post', $left );
+
+		$this->assertNotContains( 'my-post', $stream( ( new \Post404Shield\Library\AllowlistBuilder( $config ) )->set_posts_left_root( false ) ) );
+
+		$config['post'] = [
+			'root'        => true,
+			'post_type'   => 'post',
+			'post_status' => [ 'publish' ],
+		];
+		$this->assertNotContains( 'old-root-post', $stream( ( new \Post404Shield\Library\AllowlistBuilder( $config ) )->set_posts_left_root( true ) ), 'At the root: the Posts list has them.' );
+	}
+}

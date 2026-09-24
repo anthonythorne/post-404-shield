@@ -871,8 +871,13 @@ function config_is_valid( $config ): bool {
 				}
 			}
 		}
-		// Optional: the permalink post base the snapshot was taken under.
+		// Optional: the permalink post base the snapshot was taken under ('' at
+		// the site root, null when the structure has no fixed base), and
+		// whether posts have left the root since a config shielded them there.
 		if ( isset( $excluded['post_base'] ) && ( ! is_string( $excluded['post_base'] ) || ( '' !== $excluded['post_base'] && ! url_base_is_valid( $excluded['post_base'] ) ) ) ) {
+			return false;
+		}
+		if ( isset( $excluded['posts_left_root'] ) && ! is_bool( $excluded['posts_left_root'] ) ) {
 			return false;
 		}
 		// Optional: rewrite endpoint names, stripped like sub-routes.
