@@ -63,7 +63,7 @@ class PostShieldRootPreflightTest extends TestCase {
 	 * @return void
 	 */
 	public function test_an_empty_root_list_is_measured_armed(): void {
-		$this->assertSame( "<?php exit;\n\n", $this->call( 'armed_body', [ '' ] ) );
+		$this->assertFalse( \Post404Shield\list_is_empty( $this->call( 'armed_body', [ '' ] ) ), 'Armed, not empty.' );
 		$this->assertSame( "<?php exit;\nabout\n", $this->call( 'armed_body', [ "<?php exit;\nabout\n" ] ) );
 
 		$candidates = [

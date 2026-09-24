@@ -94,10 +94,18 @@ class PostShieldSiteLoaderTest extends TestCase {
 		require $this->site();
 
 		$this->assertArrayNotHasKey( 'post_shield_test_loads', $GLOBALS, 'A page view skips the generator.' );
-		$hooks = array_column( $GLOBALS['post_shield_test_hooks'], 2, 0 );
-		foreach ( [ 'transition_post_status', 'post_updated', 'save_post', 'add_attachment', 'edit_attachment', 'before_delete_post', 'revision_applied', 'revision_published' ] as $hook ) {
-			$this->assertSame( PHP_INT_MIN, $hooks[ $hook ] ?? null, $hook . ' loads it first, ahead of any listener.' );
+		// Exactly these, each ahead of any listener: every hook the sync
+		// controller must see from its first moment (wp_trash_post before
+		// WPML's own handler re-parents translations), and nothing else.
+		$first = [];
+		foreach ( $GLOBALS['post_shield_test_hooks'] as [ $hook, , $priority ] ) {
+			if ( PHP_INT_MIN === $priority ) {
+				$first[] = $hook;
+			}
 		}
+		sort( $first );
+		$expected = [ 'add_attachment', 'before_delete_post', 'edit_attachment', 'post_updated', 'revision_applied', 'revisionary_apply_revision_data', 'save_post', 'transition_post_status', 'wp_trash_post' ];
+		$this->assertSame( $expected, $first );
 
 		$callback = $GLOBALS['post_shield_test_hooks'][0][1];
 		$callback();

@@ -205,11 +205,7 @@ final class BasedPreflight {
 		$bodies = [];
 		$read   = static function ( string $type ) use ( $builder, &$bodies ): ?string {
 			if ( ! array_key_exists( $type, $bodies ) ) {
-				// An empty list is measured ARMED, as the root preflight does:
-				// the loader passes everything while a list is empty, but the
-				// first post appended arms it, and no gate runs then.
-				$lines           = $builder->lines_for( $type );
-				$bodies[ $type ] = "<?php exit;\n" . ( [] === $lines ? "\n" : implode( "\n", $lines ) . "\n" );
+				$bodies[ $type ] = self::armed_body( $builder->lines_for( $type ) );
 			}
 			return $bodies[ $type ];
 		};
@@ -361,6 +357,21 @@ final class BasedPreflight {
 			'unlisted'  => $unlisted,
 			'private'   => $private,
 		];
+	}
+
+	/**
+	 * A list's body as the replay measures it. An empty list is measured
+	 * ARMED, as the root preflight does: the loader passes everything while a
+	 * list is empty, but the first post appended arms it, and no gate runs
+	 * then. So an empty list gets a line no slug can match (`#` is outside the
+	 * slug charset) — a guard and an empty line alone would read as empty.
+	 *
+	 * @param string[] $lines List lines.
+	 *
+	 * @return string
+	 */
+	private static function armed_body( array $lines ): string {
+		return "<?php exit;\n" . ( [] === $lines ? '#armed' : implode( "\n", $lines ) ) . "\n";
 	}
 
 	/**

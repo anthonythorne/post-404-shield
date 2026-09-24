@@ -365,4 +365,29 @@ class PostShieldDerivedReservedTest extends TestCase {
 			$this->assertSame( $warns, str_contains( $warnings, 'Root mode: the redirect "' . $pattern . '"' ), $pattern );
 		}
 	}
+
+	/**
+	 * A regex that spells a multi-segment base with an optional character
+	 * or a group inside it names the base: nothing can be reserved for it,
+	 * so the save says so.
+	 *
+	 * @return void
+	 */
+	public function test_a_base_spelled_with_optional_characters_warns(): void {
+		$this->routes( [] );
+		foreach ( [ '^products?/cameras/old-model/?$', '^products/camera(s)?/old-model/?$' ] as $pattern ) {
+			[ , $warnings ] = $this->derive_with(
+				$this->store(
+					[
+						[
+							'pattern' => $pattern,
+							'regex'   => true,
+						],
+					]
+				),
+				[ 'camera' => [ 'url_base' => [ 'products/cameras' ] ] ]
+			);
+			$this->assertStringContainsString( 'looks like it covers addresses under /products/cameras/', $warnings, $pattern );
+		}
+	}
 }

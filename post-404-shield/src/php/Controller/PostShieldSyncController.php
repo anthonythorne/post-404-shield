@@ -81,6 +81,16 @@ class PostShieldSyncController {
 	private array $type_nodes = [];
 
 	/**
+	 * Managed hierarchical posts being deleted right now: a delete deletes
+	 * its revisions, and WPML may delete its translations, each firing
+	 * after_delete_post inside the outer one — the diff runs once, when the
+	 * outermost delete ends.
+	 *
+	 * @var array<int, true>
+	 */
+	private array $deleting = [];
+
+	/**
 	 * Media of a post being deleted, keyed by its ID (root mode, or a
 	 * full-path type shielded under a base).
 	 *
@@ -152,8 +162,10 @@ class PostShieldSyncController {
 		// PublishPress Revisions renames the live post via a direct $wpdb->update()
 		// that bypasses save_post, then fires these — with the live post ID first,
 		// after cleaning the post cache. Harmless no-ops if the plugin is absent.
+		// Only revision_applied: revision_published ("Publish now" on a
+		// scheduled revision) fires BEFORE the revision is applied, and the
+		// apply that follows fires revision_applied anyway.
 		add_action( 'revision_applied', $this->guarded( 'handle_revision_applied' ), 10, 1 );
-		add_action( 'revision_published', $this->guarded( 'handle_revision_applied' ), 10, 1 );
 		add_filter( 'revisionary_apply_revision_data', $this->guarded( 'snapshot_before_revision' ), 10, 3 );
 
 		// Root mode only (root-pages v2): attachments join the root union the
@@ -358,6 +370,7 @@ class PostShieldSyncController {
 		// re-parents to match: every move of the type, seen by a diff.
 		if ( $this->managed( $post_type ) && is_post_type_hierarchical( $post_type ) ) {
 			$this->snapshot_type( $post_type );
+			$this->deleting[ $post_id ] = true;
 		}
 	}
 
@@ -461,7 +474,13 @@ class PostShieldSyncController {
 			$this->append_based_media( null, $this->orphan_media[ $post_id ] );
 			unset( $this->orphan_media[ $post_id ] );
 		}
-		$this->apply_all_type_moves();
+		if ( ! isset( $this->deleting[ $post_id ] ) ) {
+			return; // A revision, or a post of no shielded hierarchical type.
+		}
+		unset( $this->deleting[ $post_id ] );
+		if ( [] === $this->deleting ) {
+			$this->apply_all_type_moves();
+		}
 	}
 
 	/**
@@ -506,6 +525,10 @@ class PostShieldSyncController {
 		if ( ! isset( $this->type_nodes[ $type ] ) ) {
 			$this->type_nodes[ $type ] = $this->type_node_rows( $type );
 		}
+		// However the delete ends, the moves are checked once more at shutdown.
+		if ( ! has_action( 'shutdown', [ $this, 'handle_type_moves_at_shutdown' ] ) ) {
+			add_action( 'shutdown', [ $this, 'handle_type_moves_at_shutdown' ], 20 );
+		}
 	}
 
 	/**
@@ -526,17 +549,14 @@ class PostShieldSyncController {
 	}
 
 	/**
-	 * Diff every snapshotted type against the table now, treat each moved post
-	 * as a move, and check again at shutdown (WPML's deferred bulk sync).
+	 * Diff every snapshotted type against the table now and treat each moved
+	 * post as a move (shutdown checks again: WPML's deferred bulk sync).
 	 *
 	 * @return void
 	 */
 	private function apply_all_type_moves(): void {
 		foreach ( array_keys( $this->type_nodes ) as $type ) {
 			$this->apply_type_moves( (string) $type );
-		}
-		if ( [] !== $this->type_nodes && ! has_action( 'shutdown', [ $this, 'handle_type_moves_at_shutdown' ] ) ) {
-			add_action( 'shutdown', [ $this, 'handle_type_moves_at_shutdown' ], 20 );
 		}
 	}
 
@@ -698,6 +718,7 @@ class PostShieldSyncController {
 				$this->moving[ 'wpml-' . $post_id ] = $this->subtree_uris( $post_after->post_type, $this->translation_ids( $post_id, $post_after->post_type ) );
 			}
 		}
+		$this->append_media_under_old_slug( $post_after, $post_before );
 		if ( ! $this->builder->is_root_type( $post_after->post_type ) ) {
 			$this->append_based_old_slug( $post_after, $post_before );
 			return;
@@ -807,6 +828,43 @@ class PostShieldSyncController {
 			);
 		}
 		$this->append_lines( $type, $lines );
+	}
+
+	/**
+	 * A flat post was renamed: its media keep resolving under its old slug
+	 * (the attachment rule matches any first segment, by the media name), so
+	 * where its media lines are whole paths — root-extras in root mode, a
+	 * full-path type's list under a base — the old-prefixed ones are appended
+	 * too. The rebuild keeps them from `_wp_old_slug`.
+	 *
+	 * @param \WP_Post $after  Post after the update.
+	 * @param \WP_Post $before Post before the update.
+	 *
+	 * @return void
+	 */
+	private function append_media_under_old_slug( \WP_Post $after, \WP_Post $before ): void {
+		$type = $after->post_type;
+		if ( '' === $before->post_name || $before->post_name === $after->post_name || is_post_type_hierarchical( $type )
+			|| ! $this->managed( $type ) || ! $this->was_served( $type, (string) $before->post_status )
+		) {
+			return;
+		}
+		$prefix = $after->post_name . '/';
+		$swap   = static function ( array $lines ) use ( $prefix, $before ): array {
+			$out = [];
+			foreach ( $lines as $line ) {
+				if ( 0 === strpos( (string) $line, $prefix ) ) {
+					$out[] = $before->post_name . '/' . substr( (string) $line, strlen( $prefix ) );
+				}
+			}
+			return $out;
+		};
+		if ( $this->builder->is_root_type( $type ) && $this->builder->has_root_entries() ) {
+			$this->append_root_lines( $swap( $this->builder->attachment_lines( [ (int) $after->ID ] ) ) );
+		}
+		foreach ( $this->builder->based_media_lines( [ (int) $after->ID ], null ) as $list => $lines ) {
+			$this->append_lines( (string) $list, $swap( $lines ) );
+		}
 	}
 
 	/**

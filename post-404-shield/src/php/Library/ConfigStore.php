@@ -170,6 +170,15 @@ class ConfigStore {
 	private array $derivation_warnings = [];
 
 	/**
+	 * The (entry, status) drops the current write() confirmed so far: a
+	 * refusal by the other gate offers them again with its own, so one
+	 * confirmation can cover every drop the save makes.
+	 *
+	 * @var string[]
+	 */
+	private array $confirmed_drop_pairs = [];
+
+	/**
 	 * Messages in the current write()'s warnings that report a pass, not a
 	 * problem — left out of the automatic warnings kept for the screen.
 	 *
@@ -1194,7 +1203,8 @@ class ConfigStore {
 	/**
 	 * Whether a regex reading names a base: the base itself (or, unanchored,
 	 * any trailing run of its segments — `compatibility/cameras` for
-	 * support/compatibility/cameras — which is enough to cover it), or its
+	 * support/compatibility/cameras — which is enough to cover it), also with
+	 * optional characters and groups read away (`products?/cameras`), or its
 	 * first segment followed by a group or class (`products/(cameras|lenses)`,
 	 * `products/[a-z]+`), which may stand for the rest of it.
 	 *
@@ -1205,12 +1215,17 @@ class ConfigStore {
 	 * @return bool
 	 */
 	private function redirect_names_base( string $variant, string $base, bool $anchored ): bool {
-		$text     = strtolower( $variant );
+		$text = strtolower( $variant );
+		// Spelled with an optional character or a group inside a segment
+		// (`products?/cameras`, `camera(s)?`): read without them too.
+		$plain    = (string) preg_replace( '#[()?*+]#', '', (string) preg_replace( '#\(\?:#', '(', $text ) );
 		$segments = explode( '/', $base );
 		$runs     = $anchored ? [ $base ] : array_map( static fn( int $from ): string => implode( '/', array_slice( $segments, $from ) ), array_keys( $segments ) );
 		foreach ( $runs as $run ) {
-			if ( 1 === preg_match( '#(?<![a-z0-9_-])' . preg_quote( $run, '#' ) . '(?![a-z0-9_-])#', $text ) ) {
-				return true;
+			foreach ( [ $text, $plain ] as $candidate ) {
+				if ( 1 === preg_match( '#(?<![a-z0-9_-])' . preg_quote( $run, '#' ) . '(?![a-z0-9_-])#', $candidate ) ) {
+					return true;
+				}
 			}
 		}
 		return count( $segments ) > 1 && 1 === preg_match( '#(?<![a-z0-9_-])' . preg_quote( $segments[0], '#' ) . '/[(\[]#', $text );
@@ -1724,13 +1739,15 @@ class ConfigStore {
 			// The edge time is what browsers and the CDN keep; only the server
 			// cache is purged on publish. Longer than the cache time, it keeps a
 			// launch URL's 404 in browsers after the post goes live.
-			if ( isset( $entry['edge_ttl'], $entry['cache_ttl'] ) && is_int( $entry['edge_ttl'] ) && is_int( $entry['cache_ttl'] ) && $entry['edge_ttl'] > $entry['cache_ttl'] ) {
+			// A blank cache time is the loader's default (60 s, or POST_SHIELD_404_TTL).
+			$cache_time = isset( $entry['cache_ttl'] ) && is_int( $entry['cache_ttl'] ) ? $entry['cache_ttl'] : ( defined( 'POST_SHIELD_404_TTL' ) ? max( 0, (int) POST_SHIELD_404_TTL ) : 60 );
+			if ( 'block' !== $entry_mode && isset( $entry['edge_ttl'] ) && is_int( $entry['edge_ttl'] ) && $entry['edge_ttl'] > $cache_time ) {
 				$warnings[] = sprintf(
 					/* translators: 1: entry name, 2: the browser/CDN time, 3: the cache time, in seconds. */
 					__( '%1$s: browsers and the CDN keep its 404 for %2$d seconds, longer than the %3$d-second cache time; only the server cache is purged when a post is published, so a visitor can keep a new post\'s 404 that long. Set the browser and CDN time shorter.', 'post-404-shield' ),
 					$label,
 					$entry['edge_ttl'],
-					$entry['cache_ttl']
+					$cache_time
 				);
 			}
 
@@ -2032,8 +2049,9 @@ class ConfigStore {
 		// from the candidate) — restores therefore refresh a stale snapshot
 		// automatically, and only the pre-boot loader ever reads the stored
 		// copy. Skipped in pure unit contexts (no WordPress to derive from).
-		$this->derivation_warnings = [];
-		$this->passes              = [];
+		$this->derivation_warnings  = [];
+		$this->passes               = [];
+		$this->confirmed_drop_pairs = [];
 		// Before the snapshots, which would make a missing list an empty one:
 		// a document with no entries would publish a shield that shields nothing.
 		if ( ! is_array( $config['entries'] ?? null ) ) {
@@ -2042,6 +2060,17 @@ class ConfigStore {
 				'errors'   => [ __( 'Config has no entries list.', 'post-404-shield' ) ],
 				'warnings' => [],
 			];
+		}
+		// Root mode: a Posts base this save moves keeps passing to WordPress,
+		// whoever saves (the settings screen, the CLI, a restore, the
+		// automatic follow-up), or every old post link gets a pre-boot 404
+		// instead of WordPress's 301 to the new address.
+		if ( $this->has_enabled_root_entries( (array) $config['entries'] ) ) {
+			$live_doc = $this->artifact() ?? $this->option();
+			if ( is_array( $live_doc ) ) {
+				[ $config, $vacated ] = $this->with_vacated_post_base_kept( $live_doc, $config );
+				$flags['notes']       = array_merge( (array) ( $flags['notes'] ?? [] ), array_map( [ self::class, 'vacated_base_note' ], $vacated ) );
+			}
 		}
 		$redirect_fp = function_exists( 'get_option' ) ? $this->take_snapshots( $config ) : null;
 
@@ -2459,6 +2488,9 @@ class ConfigStore {
 			$confirmed = static fn( array $b ): bool => isset( $b['status'] ) && self::drop_is_confirmed( $flags, (string) ( $b['entry'] ?? '' ), (string) $b['status'] );
 			$dropped   = array_values( array_filter( $breaks, $confirmed ) );
 			$breaks    = array_values( array_filter( $breaks, static fn( array $b ): bool => ! $confirmed( $b ) ) );
+			foreach ( $dropped as $drop ) {
+				$this->confirmed_drop_pairs[] = (string) ( $drop['entry'] ?? '' ) . ':' . (string) $drop['status'];
+			}
 			if ( [] !== $dropped ) {
 				$which = array_values( array_unique( array_map( static fn( array $b ): string => $name( $b['entry'] ?? '' ) . ' — "' . (string) $b['status'] . '"', $dropped ) ) );
 				$warnings[] = sprintf(
@@ -2529,7 +2561,7 @@ class ConfigStore {
 				// Refused only over dropped statuses: the screen offers to confirm
 				// exactly these (entry, status) pairs.
 				'status_drop'       => [] === array_filter( $breaks, static fn( $b ) => ! isset( $b['status'] ) ),
-				'status_drop_pairs' => array_values( array_unique( array_map( static fn( $b ) => (string) ( $b['entry'] ?? '' ) . ':' . (string) $b['status'], array_filter( $breaks, static fn( $b ) => isset( $b['status'] ) ) ) ) ),
+				'status_drop_pairs' => array_values( array_unique( array_merge( $this->confirmed_drop_pairs, array_map( static fn( $b ) => (string) ( $b['entry'] ?? '' ) . ':' . (string) $b['status'], array_filter( $breaks, static fn( $b ) => isset( $b['status'] ) ) ) ) ) ),
 			];
 		}
 		$depth_hits = (array) ( $coverage['depth'] ?? [] );
@@ -2682,6 +2714,9 @@ class ConfigStore {
 		if ( [] !== $dropped ) {
 			$confirmed   = array_values( array_filter( $would_block, fn( string $url ): bool => isset( $dropped[ $url ] ) && self::drop_is_confirmed( $flags, ...explode( ':', $pair_of( $url ), 2 ) ) ) );
 			$would_block = array_values( array_diff( $would_block, $confirmed ) );
+			foreach ( $confirmed as $url ) {
+				$this->confirmed_drop_pairs[] = $pair_of( $url );
+			}
 			if ( [] !== $confirmed ) {
 				$warnings[] = sprintf(
 					/* translators: %d: number of real URLs. */
@@ -2718,7 +2753,7 @@ class ConfigStore {
 				// Refused only over dropped statuses: the screen offers to confirm
 				// exactly these (entry, status) pairs.
 				'status_drop'       => [] === array_diff( $new_blocks, array_keys( $dropped ) ),
-				'status_drop_pairs' => array_values( array_unique( array_map( $pair_of, array_values( array_intersect( $new_blocks, array_keys( $dropped ) ) ) ) ) ),
+				'status_drop_pairs' => array_values( array_unique( array_merge( $this->confirmed_drop_pairs, array_map( $pair_of, array_values( array_intersect( $new_blocks, array_keys( $dropped ) ) ) ) ) ) ),
 			];
 		}
 		if ( [] === $would_block && [] !== $confirmed ) {
@@ -3312,14 +3347,7 @@ class ConfigStore {
 			// the old base, and every old post link would get a pre-boot 404
 			// instead of WordPress's 301 to the new address. Keep it excluded.
 			[ $candidate, $vacated ] = $this->with_vacated_post_base_kept( $option, $candidate );
-			$notes                   = [];
-			foreach ( $vacated as $old_base ) {
-				$notes[] = sprintf(
-					/* translators: %s: the old Posts base. */
-					__( 'Root mode: the Posts base moved, so /%s/ was added to the root skip-list to keep its old post links reaching WordPress\'s redirect. Remove it from Pages & posts when those links no longer matter.', 'post-404-shield' ),
-					$old_base
-				);
-			}
+			$notes                   = array_map( [ self::class, 'vacated_base_note' ], $vacated );
 			if ( [] !== $vacated ) {
 				$label = 'auto: the Posts entry follows the permalink settings (old base kept) — ';
 			} else {
@@ -3495,6 +3523,21 @@ class ConfigStore {
 			}
 		}
 		return $config;
+	}
+
+	/**
+	 * The notice for a Posts base kept in the root skip-list.
+	 *
+	 * @param string $old_base The base the Posts entry left.
+	 *
+	 * @return string
+	 */
+	private static function vacated_base_note( string $old_base ): string {
+		return sprintf(
+			/* translators: %s: the old Posts base. */
+			__( 'Root mode: the Posts base moved, so /%s/ was added to the root skip-list to keep its old post links reaching WordPress\'s redirect. Remove it from Pages & posts when those links no longer matter.', 'post-404-shield' ),
+			$old_base
+		);
 	}
 
 	/**
@@ -3777,6 +3820,12 @@ class ConfigStore {
 					}
 				}
 				unset( $entry['merged_keys'] );
+			}
+			// A re-key must never land on another entry's key (a blocked
+			// section named like the merged prefix): the later one would
+			// replace it, and a type would go unshielded without a word.
+			if ( $new_key !== $key && ( isset( $final[ $new_key ] ) || isset( $entries[ $new_key ] ) ) ) {
+				$new_key = $key;
 			}
 			$final[ $new_key ] = $entry;
 		}

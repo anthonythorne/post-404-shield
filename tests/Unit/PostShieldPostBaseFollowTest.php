@@ -96,4 +96,25 @@ class PostShieldPostBaseFollowTest extends TestCase {
 	public function test_a_new_base_is_followed(): void {
 		$this->assertSame( [ 'news' ], $this->follow( 'with_current_post_base', '/news/%postname%/' )['url_base'] );
 	}
+
+	/**
+	 * Root mode: a Posts base a save moves stays in the skip-list, once.
+	 *
+	 * @return void
+	 */
+	public function test_a_vacated_posts_base_is_kept_once(): void {
+		$method = new \ReflectionMethod( ConfigStore::class, 'with_vacated_post_base_kept' );
+		$method->setAccessible( true );
+		$live      = $this->config();
+		$candidate = $this->config();
+		$candidate['entries']['post']['url_base'] = [ 'news' ];
+
+		[ $kept, $vacated ] = $method->invoke( new ConfigStore(), $live, $candidate );
+		$this->assertSame( [ 'blog' ], $vacated );
+		$this->assertSame( [ 'blog' ], $kept['excluded_bases']['operator'] );
+
+		[ $again, $vacated ] = $method->invoke( new ConfigStore(), $live, $kept );
+		$this->assertSame( [], $vacated, 'Already kept: not added twice.' );
+		$this->assertSame( [ 'blog' ], $again['excluded_bases']['operator'] );
+	}
 }

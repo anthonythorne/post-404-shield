@@ -703,16 +703,17 @@ class RootPreflight {
 	}
 
 	/**
-	 * A root list's body as the walk measures it: an empty one as ARMED — the
-	 * guard and an empty line, the list the builder writes and the first
-	 * appended post fills — never as '' (inert).
+	 * A root list's body as the walk measures it: an empty one as ARMED — a
+	 * line no slug can match (`#` is outside the slug charset), since a guard
+	 * and an empty line alone read as empty (list_is_empty()) — never as ''
+	 * (inert).
 	 *
 	 * @param string $body Body from body_from_lines().
 	 *
 	 * @return string
 	 */
 	private static function armed_body( string $body ): string {
-		return '' === $body ? "<?php exit;\n\n" : $body;
+		return '' === $body ? "<?php exit;\n#armed\n" : $body;
 	}
 
 	/**

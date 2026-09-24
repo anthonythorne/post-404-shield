@@ -756,13 +756,20 @@ class AllowlistBuilder {
 		);
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		self::assert_query();
-		$rows    = array_merge( (array) $rows, (array) $old );
-		$parents = $this->uris_for( $post_type, array_values( array_unique( array_map( static fn( $row ) => (int) $row->post_parent, $rows ) ) ) );
-		$lines   = [];
+		$rows       = array_merge( (array) $rows, (array) $old );
+		$parent_ids = array_values( array_unique( array_map( static fn( $row ) => (int) $row->post_parent, $rows ) ) );
+		$parents    = $this->uris_for( $post_type, $parent_ids );
+		// A flat post's media resolve under its old slugs too (see
+		// attachment_rows_lines()).
+		$old_slugs = $this->is_hierarchical( $post_type ) ? [] : $this->parent_old_slugs( $parent_ids );
+		$lines     = [];
 		foreach ( $rows as $row ) {
 			$parent = $parents[ (int) $row->post_parent ] ?? '';
 			if ( '' !== $parent ) {
 				$lines[] = $parent . '/' . (string) $row->post_name;
+				foreach ( $old_slugs[ (int) $row->post_parent ] ?? [] as $old_slug ) {
+					$lines[] = $old_slug . '/' . (string) $row->post_name;
+				}
 			}
 		}
 		return $lines;
@@ -1455,9 +1462,16 @@ class AllowlistBuilder {
 			}
 		}
 		$parent_uris = [];
+		$flat        = [];
 		foreach ( $by_type as $type => $parents ) {
 			$parent_uris += $this->uris_for( (string) $type, $parents );
+			if ( ! $this->is_hierarchical( (string) $type ) ) {
+				$flat = array_merge( $flat, $parents );
+			}
 		}
+		// A flat post's media also resolve under the post's old slugs: its
+		// attachment rule matches any first segment, by the media name alone.
+		$old_slugs = $this->parent_old_slugs( $flat );
 
 		// The bare line only for media with no parent: WordPress serves an
 		// attached item only under its parent's address (get_page_by_path()
@@ -1469,12 +1483,47 @@ class AllowlistBuilder {
 			$parent = $parent_uris[ (int) $row->post_parent ] ?? '';
 			if ( '' !== $parent ) {
 				$lines[] = $parent . '/' . $name;
+				foreach ( $old_slugs[ (int) $row->post_parent ] ?? [] as $old_slug ) {
+					$lines[] = $old_slug . '/' . $name;
+				}
 			}
 			if ( 0 === (int) $row->post_parent ) {
 				$lines[] = $name;
 			}
 		}
 		return $lines;
+	}
+
+	/**
+	 * The `_wp_old_slug` values of some posts (flat ones: WordPress 301s a
+	 * renamed flat post from them, and resolves its media under them).
+	 *
+	 * @param int[] $parent_ids Post IDs.
+	 *
+	 * @return array<int, string[]> Post ID => old slugs.
+	 *
+	 * @throws ReadFailure On a database error.
+	 */
+	public function parent_old_slugs( array $parent_ids ): array {
+		global $wpdb;
+		$parent_ids = array_values( array_unique( array_filter( array_map( 'intval', $parent_ids ) ) ) );
+		if ( ! isset( $wpdb ) || [] === $parent_ids ) {
+			return [];
+		}
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare -- one placeholder per ID.
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT post_id, meta_value FROM {$wpdb->postmeta} WHERE meta_key = '_wp_old_slug' AND meta_value <> '' AND post_id IN (" . implode( ', ', array_fill( 0, count( $parent_ids ), '%d' ) ) . ')',
+				$parent_ids
+			)
+		);
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare
+		self::assert_query();
+		$out = [];
+		foreach ( (array) $rows as $row ) {
+			$out[ (int) $row->post_id ][] = (string) $row->meta_value;
+		}
+		return $out;
 	}
 
 	/**

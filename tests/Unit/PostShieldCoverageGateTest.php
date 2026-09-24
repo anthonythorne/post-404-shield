@@ -142,4 +142,45 @@ class PostShieldCoverageGateTest extends TestCase {
 		);
 		$this->assertStringNotContainsString( 'Coverage check passed', $warnings );
 	}
+
+	/**
+	 * A confirmation covers the (entry, status) pairs it names, no others: a
+	 * drop nobody was shown refuses, and the refusal offers both — the one
+	 * confirmed too, so one more confirmation covers everything.
+	 *
+	 * @return void
+	 */
+	public function test_a_confirmation_covers_only_the_pairs_it_names(): void {
+		$breaks = $this->breaks( 2, 0 );
+		foreach ( [ 1, 2 ] as $i ) {
+			$breaks[] = [
+				'url'    => '/global/support/firmware/archived-' . $i . '/',
+				'marker' => 'blocked-unknown-slug',
+				'entry'  => 'firmware',
+				'status' => 'archived',
+			];
+		}
+		[ $refusal, $warnings ] = $this->gate(
+			[
+				'checked' => 10,
+				'breaks'  => $breaks,
+			],
+			[ 'allow_status_drop' => [ 'firmware:discontinued' ] ]
+		);
+		$this->assertNotNull( $refusal, 'The archived drop was never confirmed.' );
+		$this->assertTrue( $refusal['status_drop'] );
+		$this->assertEqualsCanonicalizing( [ 'firmware:discontinued', 'firmware:archived' ], $refusal['status_drop_pairs'] );
+		$this->assertStringContainsString( 'status "archived" is not listed', implode( "\n", $refusal['errors'] ) );
+		$this->assertStringNotContainsString( 'status "discontinued" is not listed', implode( "\n", $refusal['errors'] ) );
+		$this->assertStringContainsString( 'Dropped a status as confirmed: 2 real URLs', $warnings );
+
+		[ $refusal ] = $this->gate(
+			[
+				'checked' => 10,
+				'breaks'  => $breaks,
+			],
+			[ 'allow_status_drop' => $refusal['status_drop_pairs'] ]
+		);
+		$this->assertNull( $refusal, 'Both confirmed: the save goes on.' );
+	}
 }

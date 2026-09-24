@@ -165,4 +165,32 @@ class PostShieldBasedPreflightTest extends TestCase {
 		$this->assertSame( 'stories', BasedPreflight::base_of( '/stories/a-story/', '' ), 'No locale pattern.' );
 		$this->assertSame( '', BasedPreflight::base_of( '/intl/a-page/', $pattern ), 'Top-level: no base.' );
 	}
+
+	/**
+	 * An empty candidate list is measured armed: the loader's own decision
+	 * judges a real post against it (a 404, which the gate reports as a
+	 * dropped or unlisted status), never passes it as an empty list would.
+	 *
+	 * @return void
+	 */
+	public function test_an_empty_list_is_measured_armed(): void {
+		require_once __DIR__ . '/../../post-404-shield/src/php/Function/Matcher.php';
+		$armed = new \ReflectionMethod( BasedPreflight::class, 'armed_body' );
+		$armed->setAccessible( true );
+		$entries = [
+			'software' => [
+				'enabled'     => true,
+				'mode'        => 'allowlist',
+				'post_type'   => 'software',
+				'url_base'    => [ 'products/software' ],
+				'post_status' => [ 'publish' ],
+				'match'       => 'slug',
+			],
+		];
+		$decide  = static fn( string $body ): ?array => \Post404Shield\decide_based( '/global/products/software/pc-autosave/', '/global/products/software/pc-autosave/', $entries, static fn() => $body, '[a-z]{2}-[a-z]{2}|global' );
+
+		$this->assertSame( 'blocked-unknown-slug', $decide( $armed->invoke( null, [] ) )['marker'] ?? 'pass', 'Armed: judged.' );
+		$this->assertSame( 'pass', $decide( "<?php exit;\n\n" )['marker'] ?? 'pass', 'What the loader does with a truly empty list.' );
+		$this->assertSame( 'allowed-known-slug', $decide( $armed->invoke( null, [ 'pc-autosave' ] ) )['marker'] );
+	}
 }

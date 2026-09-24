@@ -1314,7 +1314,9 @@ class PostShieldAdminController {
 			'status'     => $this->status_state( $config ),
 			'form'       => [
 				'site'               => $site,
-				'types'              => $this->types_state( $form_doc, $document, null !== $draft ? (array) ( $draft['removed'] ?? [] ) : [] ),
+				// With a draft and nothing stored yet (the first save refused),
+				// nothing is stored: the draft's entries are not "stored" ones.
+				'types'              => $this->types_state( $form_doc, null !== $draft ? ( $document ?? [ 'entries' => [] ] ) : $document, null !== $draft ? (array) ( $draft['removed'] ?? [] ) : [] ),
 				'blocks'             => null !== $draft && is_array( $draft['blocks'] ?? null ) ? $draft['blocks'] : $this->blocks_state( $form_doc ),
 				'excludedOperator'   => implode( "\n", array_filter( (array) ( $form_doc['excluded_bases']['operator'] ?? [] ), 'is_string' ) ),
 				'revision'           => null !== $draft ? (string) ( $draft['revision'] ?? '' ) : $this->store->current_revision(),

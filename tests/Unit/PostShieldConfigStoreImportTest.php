@@ -265,4 +265,33 @@ class PostShieldConfigStoreImportTest extends TestCase {
 			$this->assertSame( $consumed, $got, $source );
 		}
 	}
+
+	/**
+	 * A merged entry's re-key never replaces another entry: a blocked section
+	 * named like the merged prefix keeps its key, and so does the type.
+	 *
+	 * @return void
+	 */
+	public function test_a_rekey_never_replaces_another_entry(): void {
+		$entries = $this->import(
+			[
+				'support-compatibility-cameras' => [
+					'post_type' => 'compat',
+					'url_base'  => 'support/compatibility/cameras',
+				],
+				'support-compatibility-lenses'  => [
+					'post_type' => 'compat',
+					'url_base'  => 'support/compatibility/lenses',
+				],
+				'support-compatibility'         => [
+					'mode'     => 'block',
+					'url_base' => 'support/compatibility-old',
+				],
+			]
+		);
+		$this->assertCount( 2, $entries );
+		$modes = array_column( $entries, 'mode' );
+		sort( $modes );
+		$this->assertSame( [ 'allowlist', 'block' ], $modes );
+	}
 }

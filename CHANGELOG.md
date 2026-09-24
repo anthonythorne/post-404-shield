@@ -271,6 +271,25 @@ Moved out of the sites that used it into its own repository.
 - Tests: the loader's root stage and prefilter (child processes), the root
   preflight's armed measure and line mapping, a stream commit across two
   replacements, numeric children.
+- The coverage replay's armed empty list is a line no slug can match (`#armed`):
+  a guard and an empty line alone read as empty, and the round-11 change did
+  nothing. The root preflight uses the same.
+- Every root-mode write keeps a Posts base it moves (the settings screen, the
+  CLI, restores), not only the automatic follow-up.
+- A refusal re-offers the drops the same save already confirmed, so the two
+  checks cannot take turns refusing; a regex spelling a base with an optional
+  character or group (`products?/cameras`) names it.
+- A legacy import never re-keys a merged entry onto another entry's key.
+- A delete diffs its type once, when the outermost delete ends (not per
+  revision or nested translation delete), and shutdown always checks again.
+- A renamed flat post's media stay listed under its old slug (WordPress
+  resolves them by name under any first segment), at once and on rebuild.
+- PublishPress's `revision_published` (fired before the revision is applied)
+  is no longer handled; `revision_applied` follows it.
+- A first refused save's draft keeps a new row's defaults; the longer
+  browser/CDN time warning compares against the default cache time too.
+- Tests: the exact lazy-load hook list, confirmations bound to their pairs,
+  the vacated base, optional-character bases, the import key collision.
 
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing

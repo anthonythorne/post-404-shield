@@ -214,8 +214,9 @@ Two mechanisms, split by urgency — and deliberately **no per-change rebuild**.
 slug is appended to the file **synchronously, in the same request**. Triggers
 (enabled types only): `transition_post_status` into a shielded status (publish,
 incl. scheduled auto-publish, which fires in cron), `save_post_<type>` (a slug
-rename), and PublishPress's `revision_applied` / `revision_published` (a revision
-that renames the live post). Full-path and root entries append the post's whole
+rename), and PublishPress's `revision_applied` (a revision that renames the live
+post; its `revision_published` fires before the revision is applied, so it is not
+used). Full-path and root entries append the post's whole
 path (a flat type's is its bare slug — WordPress ignores its `post_parent`), and
 a slug/parent change re-appends the **entire affected subtree** in the same
 request — even when the moved post is itself a draft, since WordPress still
@@ -327,8 +328,8 @@ revision/child rows never leak in.
 The catch: PublishPress Revisions applies the parent's **slug** with a direct
 `$wpdb->update()` that **bypasses `save_post`** — a plain save hook would miss a
 revision that renames the post. So the shield also listens on PublishPress's own
-`revision_applied` and `revision_published` actions (fired *after* the slug is
-written and the cache cleaned) and **appends** the new slug. Before the write,
+`revision_applied` action (fired *after* the slug is written and the cache
+cleaned) and **appends** the new slug. Before the write,
 PublishPress's `revisionary_apply_revision_data` filter hands over the live post
 — as a raw `wp_posts` row, not a `WP_Post` — and the shield notes its and its
 descendants' addresses then, so a revision that moves a page keeps the
