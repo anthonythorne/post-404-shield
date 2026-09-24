@@ -268,7 +268,8 @@ class PostShieldWriteTest extends TestCase {
 		$result = $store->write( $candidate, 'test', [ 'allow_status_drop' => true ] );
 
 		$this->assertTrue( $result['ok'], implode( ' | ', $result['errors'] ) );
-		$this->assertSame( [ 'publish' ], self::last_statuses_rebuilt( $calls, 'story' ), 'The narrowing pass still ran.' );
+		$this->assertCount( 3, $calls, 'Before the swap, then both post-swap passes, although the first failed.' );
+		$this->assertSame( [ 'publish' ], self::last_statuses_rebuilt( $calls, 'story' ), 'The narrowing pass ran.' );
 	}
 
 	/**
@@ -353,10 +354,11 @@ class PostShieldWriteTest extends TestCase {
 		$GLOBALS['post_shield_test_options'][ \Post404Shield\Library\ConfigStore::OPTION ] = $store->artifact();
 
 		$store->set_preflight_handler( static fn(): array => [ 'would_block' => [] ] );
-		$this->assertFalse( $store->revalidate_root( 'test' ), 'Nothing blocked: root stays on.' );
+		$this->assertFalse( $store->revalidate_root( 'test', true ), 'Nothing blocked: root stays on.' );
 
 		$store->set_preflight_handler( static fn(): array => [ 'would_block' => [ '/clothing/t-shirt/' ] ] );
-		$this->assertTrue( $store->revalidate_root( 'test' ), 'A real URL blocked: root goes off.' );
+		$this->assertFalse( $store->revalidate_root( 'a follow-up' ), 'A route follow-up does not replay the walk.' );
+		$this->assertTrue( $store->revalidate_root( 'the daily check', true ), 'The daily check does: a real URL blocked, root goes off.' );
 		$this->assertFalse( $store->artifact()['entries']['page']['enabled'] );
 	}
 

@@ -86,10 +86,13 @@ review; changing one is a design change, not a bug fix. Read
 - **Root mode ships inert** and engages only when its entries are switched on
   (Pages, and Posts too while posts have no base) and the acknowledgement is
   confirmed. A permalink change that no longer fits switches it off
-  automatically (fail open), keeping its settings. So does the daily check (and
-  the follow-up after a route change) when it replays the root preflight on
-  the live config and finds a real URL newly blocked — a type whose posts came
-  to live at the root, say. A failed read is no signal and switches nothing.
+  automatically (fail open), keeping its settings. So does the daily health
+  check when it replays the root preflight on the live config and finds a real
+  URL newly blocked — a type whose posts came to live at the root, say (only
+  daily: the walk is too costly for every route follow-up). A failed read is no
+  signal and switches nothing. Would-blocks accepted on a forced save are kept
+  per site in `post_shield_preflight_accepted`: stage that option with a
+  forced root config, or the new site's first daily check switches root off.
 - **Redirects the shield cannot place are warnings**: a regex with no leading
   literal, one not anchored at the start, or one under a blocked section.
 - **Operator excluded bases are entered without the language folder**: root

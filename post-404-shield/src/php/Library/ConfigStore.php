@@ -3613,13 +3613,16 @@ class ConfigStore {
 	 * Callers: the permalink settings hooks (at shutdown) and the daily
 	 * health check.
 	 *
-	 * @param string $reason What triggered it (the permalink settings changed,
-	 *                       the daily health check), for the revision label,
-	 *                       the log and the notice.
+	 * @param string $reason  What triggered it (the permalink settings changed,
+	 *                        the daily health check), for the revision label,
+	 *                        the log and the notice.
+	 * @param bool   $replay  Replay the root preflight on the live config when
+	 *                        nothing else changed (the daily health check: a
+	 *                        full walk, too costly for every route follow-up).
 	 *
 	 * @return bool True when root mode was switched off.
 	 */
-	public function revalidate_root( string $reason ): bool {
+	public function revalidate_root( string $reason, bool $replay = false ): bool {
 		$option = $this->option();
 		if ( null === $option ) {
 			return false;
@@ -3680,7 +3683,7 @@ class ConfigStore {
 				// whose permalink starts with a category, a plugin that drops
 				// a type's base): replay the root preflight on what is live,
 				// and switch root matching off over a real URL it now blocks.
-				$errors = $this->live_root_would_blocks( $option );
+				$errors = $replay ? $this->live_root_would_blocks( $option ) : [];
 				if ( [] === $errors ) {
 					return false;
 				}
