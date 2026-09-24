@@ -461,7 +461,8 @@ final class BasedPreflight {
 	}
 
 	/**
-	 * A sample of every public post type's real, published URLs, plus the
+	 * A sample of every public post type's real URLs in every status it is
+	 * served in (discontinued, private… as well as published), plus the
 	 * pages beneath the given bases — what a blocked section must not cover.
 	 *
 	 * @param string[] $bases Bases the pages must sit beneath.
@@ -472,17 +473,19 @@ final class BasedPreflight {
 		$types = function_exists( 'get_post_types' ) ? array_diff( array_values( get_post_types( [ 'public' => true ] ) ), [ 'attachment' ] ) : [];
 		$paths = [];
 		foreach ( $types as $type ) {
-			foreach ( $this->real_paths( (string) $type, 'page' === $type ? $bases : [] ) as $path ) {
+			$statuses = self::viewable_statuses( array_keys( AllowlistBuilder::in_use_statuses( (string) $type ) ) );
+			foreach ( $this->real_paths( (string) $type, 'page' === $type ? $bases : [], $statuses ) as $path ) {
 				$paths[ $path ] = true;
 			}
 		}
 		// A page AT a base (real_paths() finds the pages beneath one), and any
-		// published post whose slug is the base's last segment — a sample can
+		// served post whose slug is the base's last segment — a sample can
 		// miss the one post a base like `products/cameras/x-t5` would block.
 		global $wpdb;
+		$served = self::served_statuses();
 		foreach ( $bases as $base ) {
 			$page = function_exists( 'get_page_by_path' ) ? get_page_by_path( $base ) : null;
-			if ( $page instanceof \WP_Post && 'publish' === $page->post_status ) {
+			if ( $page instanceof \WP_Post && in_array( $page->post_status, $served, true ) ) {
 				$path = $this->public_path( (int) $page->ID, 'page' );
 				if ( null !== $path ) {
 					$paths[ $path ] = true;
@@ -492,11 +495,12 @@ final class BasedPreflight {
 				continue;
 			}
 			$placeholders = implode( ', ', array_fill( 0, count( $types ), '%s' ) );
+			$status_in    = implode( ', ', array_fill( 0, count( $served ), '%s' ) );
 			// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 			$rows = (array) $wpdb->get_results(
 				$wpdb->prepare(
-					"SELECT ID, post_type FROM {$wpdb->posts} WHERE post_status = 'publish' AND post_name = %s AND post_type IN ($placeholders) LIMIT 50",
-					array_merge( [ basename( $base ) ], array_values( $types ) )
+					"SELECT ID, post_type FROM {$wpdb->posts} WHERE post_status IN ($status_in) AND post_name = %s AND post_type IN ($placeholders) LIMIT 50",
+					array_merge( $served, [ basename( $base ) ], array_values( $types ) )
 				)
 			);
 			// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
@@ -566,7 +570,19 @@ final class BasedPreflight {
 	}
 
 	/**
-	 * Whether a published post or page (any type) carries this slug.
+	 * Every registered status WordPress serves at a post's address (to anyone,
+	 * or to staff for a private one): what a block or a removed reserved slug
+	 * must not cover, whatever the entries list.
+	 *
+	 * @return string[]
+	 */
+	private static function served_statuses(): array {
+		$statuses = function_exists( 'get_post_stati' ) ? array_keys( (array) get_post_stati() ) : [];
+		return self::viewable_statuses( $statuses );
+	}
+
+	/**
+	 * Whether a served post or page (any type) carries this slug.
 	 *
 	 * @param string $slug Slug.
 	 *
@@ -577,8 +593,10 @@ final class BasedPreflight {
 		if ( ! isset( $wpdb ) || '' === $slug ) {
 			return false;
 		}
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
-		return null !== $wpdb->get_var( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_name = %s AND post_status = 'publish' LIMIT 1", $slug ) );
+		$served    = self::served_statuses();
+		$status_in = implode( ', ', array_fill( 0, count( $served ), '%s' ) );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- an IN list holds one placeholder per status, built from a count.
+		return null !== $wpdb->get_var( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_name = %s AND post_status IN ($status_in) LIMIT 1", array_merge( [ $slug ], $served ) ) );
 	}
 
 	/**
@@ -680,10 +698,11 @@ final class BasedPreflight {
 			}
 			$leaf = basename( $base );
 			// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
-			$parents = (array) $wpdb->get_col(
+			$status_in = implode( ', ', array_fill( 0, count( $statuses ), '%s' ) );
+			$parents   = (array) $wpdb->get_col(
 				$wpdb->prepare(
-					"SELECT ID FROM {$wpdb->posts} WHERE post_type = 'page' AND post_status = 'publish' AND post_name = %s",
-					$leaf
+					"SELECT ID FROM {$wpdb->posts} WHERE post_type = 'page' AND post_status IN ($status_in) AND post_name = %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- an IN list holds one placeholder per status, built from a count.
+					array_merge( $statuses, [ $leaf ] )
 				)
 			);
 			// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
@@ -696,7 +715,7 @@ final class BasedPreflight {
 					[
 						'post_parent' => (int) $parent,
 						'post_type'   => 'page',
-						'post_status' => 'publish',
+						'post_status' => $statuses,
 						'numberposts' => self::SAMPLE_PAGES,
 						'fields'      => 'ids',
 					]

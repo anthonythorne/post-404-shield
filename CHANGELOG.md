@@ -368,6 +368,11 @@ Moved out of the sites that used it into its own repository.
   on the live config and switch root matching off over a newly blocked real URL
   (a type that came to live at the root). Once posts have left the root, a
   change to the Posts entry's statuses rebuilds root-extras too.
+- The blocked-section gate, a removed reserved slug and the root sample of other
+  types replay every served status, not only published; the root sample reads
+  based types at their real address. The daily replay switches root off only
+  over URLs a second pass blocks again, and its notice describes the live state.
+  Root-extras is not streamed a third time in one save.
 - The two post-swap rebuild passes run separately; an instant append starts on
   a fresh line after a write cut short; the restore confirm screen shows the
   errors a restore would be refused over and disables the button.

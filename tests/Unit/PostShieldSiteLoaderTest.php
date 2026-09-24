@@ -191,4 +191,16 @@ class PostShieldSiteLoaderTest extends TestCase {
 		$bootstrap = (string) file_get_contents( dirname( __DIR__, 2 ) . '/post-404-shield/bootstrap.php' );
 		$this->assertMatchesRegularExpression( '/\$post_shield_builder\s*=\s*\(\s*new \\\\Post404Shield\\\\Library\\\\AllowlistBuilder\(\s*\$post_shield_entries\s*\)\s*\)->follow_live\(\);/', $bootstrap );
 	}
+
+	/**
+	 * The daily health check replays the root preflight (the one caller that
+	 * does): without the flag, a type that came to live at the root keeps its
+	 * pre-boot 404s.
+	 *
+	 * @return void
+	 */
+	public function test_the_daily_check_replays_the_root_preflight(): void {
+		$cron = (string) file_get_contents( dirname( __DIR__, 2 ) . '/post-404-shield/src/php/Controller/PostShieldCronController.php' );
+		$this->assertMatchesRegularExpression( "/->revalidate_root\\(\\s*'the daily health check',\\s*true\\s*\\)/", $cron );
+	}
 }

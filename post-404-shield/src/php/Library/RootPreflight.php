@@ -167,7 +167,10 @@ class RootPreflight {
 	 * A sample of the other URLs WordPress serves, which root mode must pass:
 	 * term archives of every public taxonomy (an SEO plugin can strip the
 	 * category base, putting them at the root), and posts of every public
-	 * type that is neither a root type nor shielded under a base.
+	 * type that is not a root type — types shielded under a base included, at
+	 * their real address: while that stays under the base the based stage
+	 * decides it (a warning at most), and once a plugin or theme drops the
+	 * base it lands in the root stage, which is what this must catch.
 	 *
 	 * @param string[]             $root_types Effective CPTs of the enabled root entries.
 	 * @param array<string, mixed> $entries    Candidate entries.
@@ -178,12 +181,6 @@ class RootPreflight {
 		global $wpdb;
 		if ( ! isset( $wpdb ) || [] === $root_types || ! function_exists( 'get_taxonomies' ) ) {
 			return [];
-		}
-		$based = [];
-		foreach ( $entries as $key => $settings ) {
-			if ( is_array( $settings ) && true !== ( $settings['root'] ?? false ) && 'allowlist' === ( $settings['mode'] ?? 'allowlist' ) ) {
-				$based[] = (string) ( $settings['post_type'] ?? $key );
-			}
 		}
 		$path_of = static function ( $link ): ?string {
 			if ( ! is_string( $link ) || '' === $link || false !== strpos( $link, '?' ) ) {
@@ -209,12 +206,16 @@ class RootPreflight {
 				}
 			}
 		}
+		// Every status WordPress serves at a post's address (discontinued,
+		// private… as well as published).
+		$served    = array_values( array_filter( function_exists( 'get_post_stati' ) ? array_keys( (array) get_post_stati() ) : [ 'publish' ], static fn( $status ): bool => 'publish' === $status || ( null !== get_post_status_object( (string) $status ) && AllowlistBuilder::is_servable_status( (string) $status ) ) ) );
+		$status_in = implode( ', ', array_fill( 0, count( $served ), '%s' ) );
 		foreach ( get_post_types( [ 'public' => true ], 'names' ) as $type ) {
-			if ( 'attachment' === $type || in_array( $type, $root_types, true ) || in_array( $type, $based, true ) ) {
+			if ( 'attachment' === $type || in_array( $type, $root_types, true ) ) {
 				continue;
 			}
-			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
-			foreach ( (array) $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_status = 'publish' AND post_name <> '' ORDER BY ID DESC LIMIT %d", $type, self::OTHER_SAMPLE ) ) as $id ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- an IN list holds one placeholder per status, built from a count.
+			foreach ( (array) $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_status IN ($status_in) AND post_name <> '' ORDER BY ID DESC LIMIT %d", array_merge( [ $type ], $served, [ self::OTHER_SAMPLE ] ) ) ) as $id ) {
 				$path = $path_of( get_permalink( (int) $id ) );
 				if ( null !== $path ) {
 					$paths[] = $path;

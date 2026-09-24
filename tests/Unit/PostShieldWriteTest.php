@@ -356,10 +356,80 @@ class PostShieldWriteTest extends TestCase {
 		$store->set_preflight_handler( static fn(): array => [ 'would_block' => [] ] );
 		$this->assertFalse( $store->revalidate_root( 'test', true ), 'Nothing blocked: root stays on.' );
 
+		// Blocked in one pass only (a page published while the walk ran):
+		// the fresh second pass passes it, and root stays on.
+		$passes = 0;
+		$store->set_preflight_handler(
+			static function () use ( &$passes ): array {
+				return [ 'would_block' => 1 === ++$passes ? [ '/spring-sale/' ] : [] ];
+			}
+		);
+		$this->assertFalse( $store->revalidate_root( 'the daily check', true ), 'One pass is not enough.' );
+		$this->assertSame( 2, $passes, 'A second, fresh pass ran.' );
+
 		$store->set_preflight_handler( static fn(): array => [ 'would_block' => [ '/clothing/t-shirt/' ] ] );
 		$this->assertFalse( $store->revalidate_root( 'a follow-up' ), 'A route follow-up does not replay the walk.' );
-		$this->assertTrue( $store->revalidate_root( 'the daily check', true ), 'The daily check does: a real URL blocked, root goes off.' );
+		$this->assertTrue( $store->revalidate_root( 'the daily check', true ), 'The daily check does: blocked twice, root goes off.' );
 		$this->assertFalse( $store->artifact()['entries']['page']['enabled'] );
+		$said = implode( ' | ', (array) ( $GLOBALS['post_shield_test_options'][ \Post404Shield\Library\ConfigStore::ROOT_OFF_OPTION ]['errors'] ?? [] ) );
+		$this->assertStringContainsString( '1 real URL now gets a pre-boot 404', $said );
+		$this->assertStringContainsString( 'Blocked: /clothing/t-shirt/', $said );
+		$this->assertStringNotContainsString( 'nothing was saved', $said, 'The switch-off was saved.' );
+	}
+
+	/**
+	 * A save that switches root mode on and changes the Posts entry's
+	 * statuses (posts off the root) streams root-extras once before the swap
+	 * and once after, not a third time.
+	 *
+	 * @return void
+	 */
+	public function test_root_extras_is_not_streamed_a_third_time(): void {
+		$live                      = self::doc(
+			[
+				'page' => [
+					'enabled'     => false,
+					'mode'        => 'allowlist',
+					'post_type'   => 'page',
+					'root'        => true,
+					'url_base'    => [],
+					'post_status' => [ 'publish' ],
+				],
+				'post' => [
+					'enabled'     => true,
+					'mode'        => 'allowlist',
+					'post_type'   => 'post',
+					'url_base'    => [ 'blog' ],
+					'post_status' => [ 'publish', 'private' ],
+				],
+			]
+		);
+		$live['root_acknowledged'] = true;
+		$live['excluded_bases']    = [
+			'floor'           => [],
+			'derived'         => [],
+			'operator'        => [],
+			'endpoints'       => [],
+			'post_base'       => 'blog',
+			'posts_left_root' => true,
+		];
+		[ $store, $calls ]         = $this->store( $live, '/blog/%postname%/' );
+		$candidate                 = $live;
+		$candidate['entries']['page']['enabled']     = true;
+		$candidate['entries']['post']['post_status'] = [ 'publish' ];
+
+		$result = $store->write(
+			$candidate,
+			'test',
+			[
+				'skip_root_preflight' => true,
+				'allow_status_drop'   => true,
+			]
+		);
+
+		$this->assertTrue( $result['ok'], implode( ' | ', $result['errors'] ) );
+		$streams = array_filter( $calls->getArrayCopy(), static fn( array $call ): bool => true === ( $call[2] ?? false ) );
+		$this->assertCount( 2, $streams, 'Before the swap, and once after.' );
 	}
 
 	/**

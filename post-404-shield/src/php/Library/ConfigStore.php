@@ -2493,7 +2493,9 @@ class ConfigStore {
 		// Then the lists that drop a status. Once posts have left the root,
 		// root-extras lists their slugs in the Posts entry's statuses, so a
 		// change to those (or the entry switched off) rebuilds it as well.
-		$former_posts_changed = self::posts_left_root_of( $config ) && $this->has_enabled_root_entries( $config['entries'] )
+		// Not when the first pass just rebuilt root-extras from this document.
+		$former_posts_changed = ! ( $root_switching_on || $posts_leaving_root )
+			&& self::posts_left_root_of( $config ) && $this->has_enabled_root_entries( $config['entries'] )
 			&& self::former_post_statuses( (array) $config['entries'] ) !== self::former_post_statuses( (array) ( $live_before['entries'] ?? [] ) );
 		$this->post_swap_rebuild( $rebuild_after, $config, $former_posts_changed, [] !== $rebuild_after || $former_posts_changed );
 
@@ -3157,29 +3159,47 @@ class ConfigStore {
 	}
 
 	/**
-	 * The root preflight replayed on the live config: the refusal a save
-	 * would get for the real URLs it now blocks (none accepted on an earlier
+	 * The root preflight replayed on the live config: what to tell the
+	 * operator about the real URLs it now blocks (none accepted on an earlier
 	 * forced save), or [] when none — or when it cannot be measured (no
 	 * preflight here, a failed read), which is no signal to switch root
-	 * matching off on.
+	 * matching off on. One pass reads the lists and the URLs at different
+	 * moments, so a page published or renamed in between reads as blocked:
+	 * only the URLs a second, fresh pass blocks again count.
 	 *
 	 * @param array<string, mixed> $config The stored config.
 	 *
-	 * @return string[] Errors.
+	 * @return string[] Messages.
 	 */
 	private function live_root_would_blocks( array $config ): array {
 		if ( null === $this->preflight_handler ) {
 			return [];
 		}
-		$warnings = [];
-		$accepted = null;
+		$accepted = array_values( array_filter( (array) get_option( self::PREFLIGHT_ACCEPTED_OPTION, [] ), 'is_string' ) );
+		$blocked  = function () use ( $config, $accepted ): array {
+			$result = (array) ( $this->preflight_handler )( $config );
+			$would  = array_filter( (array) ( $result['would_block'] ?? ( isset( $result['dropped'] ) ? [] : $result ) ), 'is_string' );
+			return array_values( array_diff( $would, $accepted ) );
+		};
 		try {
-			$refused = $this->root_preflight_gate( $config, [], $warnings, $accepted );
+			$first = $blocked();
+			$urls  = [] === $first ? [] : array_values( array_intersect( $first, $blocked() ) );
 		} catch ( \Throwable $e ) {
 			error_log( '[post-404-shield] root revalidation: the preflight could not run: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			return [];
 		}
-		return null === $refused ? [] : array_map( 'strval', (array) $refused['errors'] );
+		if ( [] === $urls ) {
+			return [];
+		}
+		$messages = [
+			/* translators: %d: number of real URLs. */
+			sprintf( _n( '%d real URL now gets a pre-boot 404.', '%d real URLs now get a pre-boot 404.', count( $urls ), 'post-404-shield' ), count( $urls ) ),
+		];
+		foreach ( array_slice( $urls, 0, 10 ) as $url ) {
+			/* translators: %s: a URL root matching blocks. */
+			$messages[] = sprintf( __( 'Blocked: %s', 'post-404-shield' ), $url );
+		}
+		return $messages;
 	}
 
 	/**

@@ -63,6 +63,9 @@ review; changing one is a design change, not a bug fix. Read
 - **Every save runs the gates**: the based-entry coverage gate replays real URLs
   through the loader's decision, and in root mode the root preflight walks real
   URLs. An empty candidate list is measured **armed**, stricter than the loader.
+  A blocked section, a removed reserved slug and root mode's sample of other
+  types replay content in every status WordPress serves (discontinued,
+  private…), not only published.
 - **Lists that must exist before the swap are written first**, from the union of
   the live and candidate statuses, and only while the save still holds its
   lock; the post-swap rebuild narrows them. A save refused after that leaves the
@@ -88,8 +91,10 @@ review; changing one is a design change, not a bug fix. Read
   confirmed. A permalink change that no longer fits switches it off
   automatically (fail open), keeping its settings. So does the daily health
   check when it replays the root preflight on the live config and finds a real
-  URL newly blocked — a type whose posts came to live at the root, say (only
-  daily: the walk is too costly for every route follow-up). A failed read is no
+  URL newly blocked — a type whose posts came to live at the root, say, shielded
+  under a base or not (only daily: the walk is too costly for every route
+  follow-up). A URL counts only when a second, fresh pass blocks it again (a
+  page published mid-walk reads as blocked once), and a failed read is no
   signal and switches nothing. Would-blocks accepted on a forced save are kept
   per site in `post_shield_preflight_accepted`: stage that option with a
   forced root config, or the new site's first daily check switches root off.

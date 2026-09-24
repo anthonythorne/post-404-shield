@@ -203,6 +203,90 @@ echo "FELL-THROUGH";
 	}
 
 	/**
+	 * The response headers a request gets from the loader, served by PHP's
+	 * built-in web server (the CLI records no headers).
+	 *
+	 * @param string $uri Request URI.
+	 *
+	 * @return array<string, string> Lower-cased header name => value.
+	 */
+	private function headers_for( string $uri ): array {
+		file_put_contents(
+			$this->root . '/server.php',
+			'<?php
+require __DIR__ . "/wp-content/mu-plugins/post-404-shield/bootstrap-front-end-post-404-shield.php";
+echo "FELL-THROUGH";
+'
+		);
+		$port   = random_int( 20000, 40000 );
+		$server = proc_open(
+			[ PHP_BINARY, '-S', '127.0.0.1:' . $port, $this->root . '/server.php' ],
+			[
+				1 => [ 'file', '/dev/null', 'w' ],
+				2 => [ 'file', '/dev/null', 'w' ],
+			],
+			$pipes
+		);
+		$headers = [];
+		try {
+			for ( $try = 0; $try < 50; $try++ ) {
+				$socket = @fsockopen( '127.0.0.1', $port ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- polling for the server to listen.
+				if ( false !== $socket ) {
+					fclose( $socket );
+					break;
+				}
+				usleep( 100000 );
+			}
+			$context = stream_context_create(
+				[
+					'http' => [
+						'ignore_errors' => true,
+						'header'        => "Host: example.test\r\n",
+					],
+				]
+			);
+			file_get_contents( 'http://127.0.0.1:' . $port . $uri, false, $context ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+			foreach ( (array) ( $http_response_header ?? [] ) as $line ) {
+				if ( false !== strpos( $line, ':' ) ) {
+					[ $name, $value ]                    = explode( ':', $line, 2 );
+					$headers[ strtolower( trim( $name ) ) ] = trim( $value );
+				}
+			}
+		} finally {
+			proc_terminate( $server );
+			proc_close( $server );
+		}
+		return $headers;
+	}
+
+	/**
+	 * A blocked root URL is sent with the Pages entry's cache times, even
+	 * when Posts comes first in the document (as a first save stores them).
+	 *
+	 * @return void
+	 */
+	public function test_a_blocked_root_url_gets_the_pages_entrys_cache_times(): void {
+		$config            = $this->config();
+		$page              = $config['entries']['page'];
+		$post              = $config['entries']['post'];
+		$page['cache_ttl'] = 120;
+		$page['edge_ttl']  = 30;
+		$post['cache_ttl'] = 7;
+		$post['edge_ttl']  = 7;
+		unset( $config['entries']['page'], $config['entries']['post'] );
+		$config['entries'] = [
+			'post' => $post,
+			'page' => $page,
+		] + $config['entries'];
+		$this->write_config( $config );
+
+		$headers = $this->headers_for( '/definitely-fake/' );
+		$this->assertSame( 'blocked-unknown-slug', $headers['x-post-shield'] ?? '' );
+		$this->assertSame( 'public, max-age=30, s-maxage=120', $headers['cache-control'] ?? '' );
+		$this->assertSame( 'max-age=30', $headers['cdn-cache-control'] ?? '' );
+	}
+
+	/**
 	 * Real root addresses pass, an unknown one gets the pre-boot 404.
 	 *
 	 * @return void
