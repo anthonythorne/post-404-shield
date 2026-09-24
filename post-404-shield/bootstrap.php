@@ -254,7 +254,6 @@ $post_shield_store->set_preflight_handler(
 				'checked'     => $result['checked'],
 				'would_block' => count( $result['would_block'] ),
 				'warn_block'  => count( $result['warn_block'] ),
-				'sample'      => array_slice( array_merge( $result['would_block'], $result['warn_block'] ), 0, 10 ),
 				'warn_sample' => array_slice( $result['warn_block'], 0, 10 ),
 			],
 			false
@@ -444,7 +443,6 @@ if ( defined( 'WP_CLI' ) && WP_CLI && class_exists( '\WP_CLI' ) ) {
 					'checked'     => $result['checked'],
 					'would_block' => count( $result['would_block'] ),
 					'warn_block'  => count( $result['warn_block'] ),
-					'sample'      => array_slice( array_merge( $result['would_block'], $result['warn_block'] ), 0, 10 ),
 					'warn_sample' => array_slice( $result['warn_block'], 0, 10 ),
 				],
 				false

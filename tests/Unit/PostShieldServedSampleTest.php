@@ -83,13 +83,20 @@ class PostShieldServedSampleTest extends TestCase {
 				return (string) $query;
 			}
 			/**
-			 * A served post named old-camera: only discontinued.
+			 * Served posts by slug: firmware's old-camera, only discontinued,
+			 * and a published reusable block (wp_block, not public) named
+			 * newsletter. A query that lists types matches only those types.
 			 *
 			 * @param string $query SQL.
 			 * @return string|null
 			 */
 			public function get_var( $query ) {
-				return false !== strpos( $query, "'old-camera'" ) && false !== strpos( $query, "'discontinued'" ) ? '9' : null;
+				foreach ( [ [ '9', 'old-camera', 'discontinued', 'firmware' ], [ '30', 'newsletter', 'publish', 'wp_block' ] ] as [ $id, $slug, $status, $type ] ) {
+					if ( false !== strpos( $query, "'$slug'" ) && false !== strpos( $query, "'$status'" ) && ( false === strpos( $query, 'post_type' ) || false !== strpos( $query, "'$type'" ) ) ) {
+						return $id;
+					}
+				}
+				return null;
 			}
 			/**
 			 * Statuses in use: firmware's one post is discontinued.
@@ -241,5 +248,19 @@ class PostShieldServedSampleTest extends TestCase {
 		$method->setAccessible( true );
 		$this->assertTrue( $method->invoke( new \Post404Shield\Library\BasedPreflight(), 'old-camera' ) );
 		$this->assertFalse( $method->invoke( new \Post404Shield\Library\BasedPreflight(), 'never-used' ) );
+	}
+
+	/**
+	 * A slug carried only by a post of a non-public type (a reusable block,
+	 * a template part, a form) has no content: WordPress never serves it at
+	 * a URL, so removing it is not replayed.
+	 *
+	 * @return void
+	 */
+	public function test_a_slug_on_a_non_public_post_has_no_content(): void {
+		$this->stub();
+		$method = new \ReflectionMethod( \Post404Shield\Library\BasedPreflight::class, 'slug_has_content' );
+		$method->setAccessible( true );
+		$this->assertFalse( $method->invoke( new \Post404Shield\Library\BasedPreflight(), 'newsletter' ) );
 	}
 }

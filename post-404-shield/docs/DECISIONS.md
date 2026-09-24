@@ -67,7 +67,9 @@ review; changing one is a design change, not a bug fix. Read
   types replay content in every status WordPress serves (discontinued,
   private…), not only published; a type shielded under a base is sampled in
   the statuses its entries list (its posts in any other status 404 under the
-  base by design, and have their own warning). Private posts are read at the
+  base by design, and have their own warning). A removed reserved slug counts
+  as content only when a post of a public type carries it: a reusable block,
+  template part or form has no URL to protect. Private posts are read at the
   address a reader sees, also from WP-CLI and cron. Pages beneath a base are
   replayed in every public status and are always a break when swallowed,
   whichever entry claims them. **A status-drop refusal names every (entry,

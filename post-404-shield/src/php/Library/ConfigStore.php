@@ -2972,7 +2972,6 @@ class ConfigStore {
 			$tile = get_option( self::PREFLIGHT_OPTION );
 			if ( is_array( $tile ) ) {
 				$tile['would_block'] = count( $would_block );
-				$tile['sample']      = array_slice( array_merge( $would_block, (array) ( $tile['warn_sample'] ?? [] ) ), 0, 10 );
 				update_option( self::PREFLIGHT_OPTION, $tile, false );
 			}
 		}

@@ -592,7 +592,9 @@ final class BasedPreflight {
 	}
 
 	/**
-	 * Whether a served post or page (any type) carries this slug.
+	 * Whether a served post or page of a public type carries this slug. A
+	 * non-public type's post (a reusable block, a template part, a form) has
+	 * no URL, so its slug protects nothing.
 	 *
 	 * @param string $slug Slug.
 	 *
@@ -600,13 +602,15 @@ final class BasedPreflight {
 	 */
 	private function slug_has_content( string $slug ): bool {
 		global $wpdb;
-		if ( ! isset( $wpdb ) || '' === $slug ) {
+		$types = function_exists( 'get_post_types' ) ? array_diff( array_values( get_post_types( [ 'public' => true ] ) ), [ 'attachment' ] ) : [];
+		if ( ! isset( $wpdb ) || '' === $slug || [] === $types ) {
 			return false;
 		}
 		$served    = self::served_statuses();
 		$status_in = implode( ', ', array_fill( 0, count( $served ), '%s' ) );
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- an IN list holds one placeholder per status, built from a count.
-		return null !== $wpdb->get_var( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_name = %s AND post_status IN ($status_in) LIMIT 1", array_merge( [ $slug ], $served ) ) );
+		$type_in   = implode( ', ', array_fill( 0, count( $types ), '%s' ) );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- the IN lists hold one placeholder per status and per type, built from a count.
+		return null !== $wpdb->get_var( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_name = %s AND post_status IN ($status_in) AND post_type IN ($type_in) LIMIT 1", array_merge( [ $slug ], $served, $types ) ) );
 	}
 
 	/**

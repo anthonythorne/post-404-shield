@@ -418,7 +418,6 @@ class PostShieldWriteTest extends TestCase {
 		$stale();
 		$GLOBALS['post_shield_test_options'][ \Post404Shield\Library\ConfigStore::PREFLIGHT_OPTION ] = [
 			'would_block' => 1,
-			'sample'      => [ '/spring-sale/' ],
 			'warn_sample' => [],
 		];
 		$passes = 0;
@@ -432,7 +431,7 @@ class PostShieldWriteTest extends TestCase {
 		$this->assertTrue( $store->artifact()['entries']['page']['enabled'] );
 		$this->assertNotContains( 'a-route-that-is-gone', (array) $store->artifact()['excluded_bases']['floor'], 'The refresh landed.' );
 		$tile = $GLOBALS['post_shield_test_options'][ \Post404Shield\Library\ConfigStore::PREFLIGHT_OPTION ];
-		$this->assertSame( [ 0, [] ], [ $tile['would_block'], $tile['sample'] ], 'The tile says what both passes blocked.' );
+		$this->assertSame( 0, $tile['would_block'], 'The tile says what both passes blocked.' );
 
 		// Blocked in both: root goes off, and the notice says what is blocked.
 		$stale();
