@@ -98,6 +98,14 @@ class PostShieldAdminController {
 	private array $blocked_bases;
 
 	/**
+	 * Whether this request's queued rebuilds have streamed root-extras yet:
+	 * the jobs a save queues run together, one per type.
+	 *
+	 * @var bool
+	 */
+	private bool $root_extras_rebuilt = false;
+
+	/**
 	 * Construct the admin controller.
 	 *
 	 * @param AllowlistBuilder        $builder       Shared builder.
@@ -1176,8 +1184,10 @@ class PostShieldAdminController {
 		try {
 			$this->builder->rebuild_type( $post_type );
 			// A root type's statuses also shape root-extras (its nested media,
-			// old slugs and old addresses): rebuild that union with it.
-			if ( $this->builder->is_root_type( $post_type ) ) {
+			// old slugs and old addresses): rebuild that union with it, once
+			// for all the root types' jobs this request runs.
+			if ( ! $this->root_extras_rebuilt && $this->builder->is_root_type( $post_type ) ) {
+				$this->root_extras_rebuilt = true;
 				$this->builder->rebuild_root_extras();
 			}
 		} catch ( \Throwable $e ) {

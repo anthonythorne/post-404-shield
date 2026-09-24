@@ -369,11 +369,80 @@ class PostShieldWriteTest extends TestCase {
 
 		$store->set_preflight_handler( static fn(): array => [ 'would_block' => [ '/clothing/t-shirt/' ] ] );
 		$this->assertFalse( $store->revalidate_root( 'a follow-up' ), 'A route follow-up does not replay the walk.' );
+		$GLOBALS['post_shield_test_options'][ \Post404Shield\Library\ConfigStore::PREFLIGHT_ACCEPTED_OPTION ] = [ '/clothing/t-shirt/' ];
+		$this->assertFalse( $store->revalidate_root( 'the daily check', true ), 'Accepted on an earlier forced save: root stays on.' );
+		unset( $GLOBALS['post_shield_test_options'][ \Post404Shield\Library\ConfigStore::PREFLIGHT_ACCEPTED_OPTION ] );
 		$this->assertTrue( $store->revalidate_root( 'the daily check', true ), 'The daily check does: blocked twice, root goes off.' );
 		$this->assertFalse( $store->artifact()['entries']['page']['enabled'] );
 		$said = implode( ' | ', (array) ( $GLOBALS['post_shield_test_options'][ \Post404Shield\Library\ConfigStore::ROOT_OFF_OPTION ]['errors'] ?? [] ) );
 		$this->assertStringContainsString( '1 real URL now gets a pre-boot 404', $said );
 		$this->assertStringContainsString( 'Blocked: /clothing/t-shirt/', $said );
+		$this->assertStringNotContainsString( 'nothing was saved', $said, 'The switch-off was saved.' );
+	}
+
+	/**
+	 * A stale snapshot (a new route, a redirect) is refreshed by a save, whose
+	 * root preflight must block a URL in two passes before root matching goes
+	 * off; the notice names the URLs, and says nothing about "nothing saved".
+	 *
+	 * @return void
+	 */
+	public function test_a_stale_snapshot_refresh_needs_two_blocking_passes(): void {
+		$root = static fn( string $type ): array => [
+			'enabled'     => true,
+			'mode'        => 'allowlist',
+			'post_type'   => $type,
+			'root'        => true,
+			'url_base'    => [],
+			'post_status' => [ 'publish' ],
+		];
+		$doc  = self::doc(
+			[
+				'page' => $root( 'page' ),
+				'post' => $root( 'post' ),
+			]
+		);
+		$doc['root_acknowledged'] = true;
+		[ $store ]                = $this->store( $doc );
+		$store->set_preflight_handler( static fn(): array => [ 'would_block' => [] ] );
+		$this->assertTrue( $store->write( $doc, 'test' )['ok'] );
+		$stale = static function () use ( $store ): void {
+			$option = $store->artifact();
+			$option['excluded_bases']['floor'][] = 'a-route-that-is-gone';
+			$GLOBALS['post_shield_test_options'][ \Post404Shield\Library\ConfigStore::OPTION ] = $option;
+			$store->write_artifact( $option ); // Live with the old snapshot too.
+		};
+
+		// Blocked in the refresh's first pass only (a page published while
+		// the walk ran): the refresh lands, and root stays on.
+		$stale();
+		$GLOBALS['post_shield_test_options'][ \Post404Shield\Library\ConfigStore::PREFLIGHT_OPTION ] = [
+			'would_block' => 1,
+			'sample'      => [ '/spring-sale/' ],
+			'warn_sample' => [],
+		];
+		$passes = 0;
+		$store->set_preflight_handler(
+			static function () use ( &$passes ): array {
+				return [ 'would_block' => 1 === ++$passes ? [ '/spring-sale/' ] : [] ];
+			}
+		);
+		$this->assertFalse( $store->revalidate_root( 'a follow-up check' ), 'One pass is not enough.' );
+		$this->assertSame( 2, $passes, 'A second pass ran.' );
+		$this->assertTrue( $store->artifact()['entries']['page']['enabled'] );
+		$this->assertNotContains( 'a-route-that-is-gone', (array) $store->artifact()['excluded_bases']['floor'], 'The refresh landed.' );
+		$tile = $GLOBALS['post_shield_test_options'][ \Post404Shield\Library\ConfigStore::PREFLIGHT_OPTION ];
+		$this->assertSame( [ 0, [] ], [ $tile['would_block'], $tile['sample'] ], 'The tile says what both passes blocked.' );
+
+		// Blocked in both: root goes off, and the notice says what is blocked.
+		$stale();
+		$store->set_preflight_handler( static fn(): array => [ 'would_block' => [ '/spring-sale/' ] ] );
+		$this->assertTrue( $store->revalidate_root( 'a follow-up check' ) );
+		$this->assertFalse( $store->artifact()['entries']['page']['enabled'] );
+		$said = implode( ' | ', (array) ( $GLOBALS['post_shield_test_options'][ \Post404Shield\Library\ConfigStore::ROOT_OFF_OPTION ]['errors'] ?? [] ) );
+		$this->assertStringContainsString( '1 real URL now gets a pre-boot 404', $said );
+		$this->assertStringContainsString( 'Blocked: /spring-sale/', $said );
+		$this->assertStringContainsString( 'The snapshot refresh root matching needs was refused', $said );
 		$this->assertStringNotContainsString( 'nothing was saved', $said, 'The switch-off was saved.' );
 	}
 
@@ -430,6 +499,49 @@ class PostShieldWriteTest extends TestCase {
 		$this->assertTrue( $result['ok'], implode( ' | ', $result['errors'] ) );
 		$streams = array_filter( $calls->getArrayCopy(), static fn( array $call ): bool => true === ( $call[2] ?? false ) );
 		$this->assertCount( 2, $streams, 'Before the swap, and once after.' );
+	}
+
+	/**
+	 * One save that widens one root list and narrows another streams
+	 * root-extras before the swap and once after, not a third time for the
+	 * narrowed list: the first post-swap pass built it from this document.
+	 *
+	 * @return void
+	 */
+	public function test_a_widen_and_a_narrow_stream_root_extras_twice(): void {
+		$root                      = static fn( string $type, array $statuses ): array => [
+			'enabled'     => true,
+			'mode'        => 'allowlist',
+			'post_type'   => $type,
+			'root'        => true,
+			'url_base'    => [],
+			'post_status' => $statuses,
+		];
+		$live                      = self::doc(
+			[
+				'page' => $root( 'page', [ 'publish' ] ),
+				'post' => $root( 'post', [ 'publish', 'private' ] ),
+			]
+		);
+		$live['root_acknowledged'] = true;
+		[ $store, $calls ]         = $this->store( $live );
+		$candidate                 = $live;
+		$candidate['entries']['page']['post_status'] = [ 'publish', 'private' ];
+		$candidate['entries']['post']['post_status'] = [ 'publish' ];
+
+		$result = $store->write(
+			$candidate,
+			'test',
+			[
+				'skip_root_preflight' => true,
+				'allow_status_drop'   => true,
+			]
+		);
+
+		$this->assertTrue( $result['ok'], implode( ' | ', $result['errors'] ) );
+		$this->assertSame( [ [ 'page' ], [ 'page' ], [ 'post' ] ], array_map( static fn( array $call ): array => (array) $call[0], $calls->getArrayCopy() ), 'Page before and after the swap, then post.' );
+		$streams = array_filter( $calls->getArrayCopy(), static fn( array $call ): bool => true === ( $call[2] ?? false ) );
+		$this->assertCount( 2, $streams, 'Root-extras before the swap, and once after.' );
 	}
 
 	/**
@@ -572,5 +684,70 @@ class PostShieldWriteTest extends TestCase {
 
 		$this->assertTrue( $result['ok'], implode( ' | ', $result['errors'] ) );
 		$this->assertStringContainsString( 'looks like a language folder', implode( ' | ', $result['warnings'] ) );
+	}
+
+	/**
+	 * A self-heal leaves a held lock alone (a save or heal of a large site
+	 * outlives the lock's TTL), and heals once the lock is old enough to be
+	 * a crashed save's.
+	 *
+	 * @return void
+	 */
+	public function test_a_heal_waits_for_a_held_lock(): void {
+		[ $store ] = $this->store( self::doc( [ 'story' => self::story( [ 'publish' ] ) ] ) );
+		eval( // phpcs:ignore Squiz.PHP.Eval.Discouraged -- test-only global stubs, in a separate process.
+			'function get_transient( $name ) { return false; }
+			function set_transient( $name, $value, $ttl = 0 ) { return true; }
+			function delete_transient( $name ) { return true; }'
+		);
+		if ( ! defined( 'MINUTE_IN_SECONDS' ) ) {
+			define( 'MINUTE_IN_SECONDS', 60 );
+		}
+		unlink( $store->artifact_path() );
+		$GLOBALS['wpdb'] = new class( $GLOBALS['wpdb'] ) {
+			/** @var object */
+			private $inner;
+			/** @var string */
+			public $options = 'wp_options';
+			/** @var string */
+			public $posts = 'wp_posts';
+			/** @var string */
+			public $postmeta = 'wp_postmeta';
+			/** @var string */
+			public $last_error = '';
+			/**
+			 * Wrap the harness's $wpdb.
+			 *
+			 * @param object $inner The harness's $wpdb.
+			 */
+			public function __construct( $inner ) {
+				$this->inner = $inner;
+			}
+			/**
+			 * The lock row: stamped at post_shield_test_lock_at.
+			 *
+			 * @return string
+			 */
+			public function get_var() {
+				return $GLOBALS['post_shield_test_lock_at'] . ':another-save';
+			}
+			/**
+			 * Everything else as the harness does it.
+			 *
+			 * @param string $name Method.
+			 * @param array  $args Arguments.
+			 * @return mixed
+			 */
+			public function __call( $name, $args ) {
+				return $this->inner->$name( ...$args );
+			}
+		};
+		$GLOBALS['post_shield_test_lock_at'] = time() - 120;
+		$store->self_heal();
+		$this->assertNull( $store->artifact(), 'A two-minute-old lock is a live save: the heal waits.' );
+
+		$GLOBALS['post_shield_test_lock_at'] = time() - 700;
+		$store->self_heal();
+		$this->assertNotNull( $store->artifact(), 'An old lock is a crashed save\'s: the heal runs.' );
 	}
 }

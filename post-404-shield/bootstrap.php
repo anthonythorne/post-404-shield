@@ -118,11 +118,13 @@ $post_shield_store->set_rebuild_handler(
 	// Returns true, or the names of the lists that could not be written.
 	// $posts_left_root is the CANDIDATE's excluded_bases.posts_left_root: the
 	// live artifact may not say so yet.
-	static function ( array $post_types, array $entries, bool $root_switching_on = false, bool $posts_left_root = false ) {
+	static function ( array $post_types, array $entries, bool $root_extras = false, bool $posts_left_root = false ) use ( $post_shield_store ) {
 		$candidate_builder = ( new \Post404Shield\Library\AllowlistBuilder( $entries ) )->set_posts_left_root( $posts_left_root );
 		$failed            = [];
 		$read_failed       = false;
 		foreach ( $post_types as $rebuild_type ) {
+			// A large site's lists outlast the save lock: keep it fresh.
+			$post_shield_store->keep_lock();
 			try {
 				$candidate_builder->rebuild_type( (string) $rebuild_type );
 			} catch ( \Throwable $e ) {
@@ -134,14 +136,14 @@ $post_shield_store->set_rebuild_handler(
 		// Root mode (root-pages v2): the extras union member (attachments + old
 		// slugs) must exist BEFORE a root-enabling artifact swaps in — the
 		// loader refuses to run root matching without it (fail-open). Built
-		// when root mode is being switched on, or the file is missing; while
+		// when the save asks (root mode switching on, a root type's list
+		// rebuilt, posts leaving the root: ConfigStore decides, so one save
+		// request streams it at most twice), or the file is missing; while
 		// root mode stays on, the appends and the nightly rebuild keep it.
-		// Also when a root type's list is rebuilt (its statuses widened, say):
-		// root-extras' nested media, old slugs and old addresses follow the
-		// same statuses.
 		if ( $candidate_builder->has_root_entries()
-			&& ( $root_switching_on || ! is_file( $candidate_builder->get_root_extras_file() ) || [] !== array_intersect( array_map( 'strval', $post_types ), $candidate_builder->root_types() ) )
+			&& ( $root_extras || ! is_file( $candidate_builder->get_root_extras_file() ) )
 		) {
+			$post_shield_store->keep_lock();
 			try {
 				$candidate_builder->rebuild_root_extras();
 			} catch ( \Throwable $e ) {

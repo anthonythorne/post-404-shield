@@ -131,7 +131,9 @@ class PostShield404Controller {
 	 * @return string
 	 */
 	public function disallow_probe_path( $output ): string {
-		return (string) $output . "\nUser-agent: *\nDisallow: /*/" . Static404Baker::PROBE_PATH . "/\n";
+		// `/*` matches none or more segments: the probe sits under a locale
+		// (`/{locale}/…`), or at the root when the locale mode is none.
+		return (string) $output . "\nUser-agent: *\nDisallow: /*" . Static404Baker::PROBE_PATH . "/\n";
 	}
 
 	/**

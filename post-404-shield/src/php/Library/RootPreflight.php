@@ -168,9 +168,10 @@ class RootPreflight {
 	 * term archives of every public taxonomy (an SEO plugin can strip the
 	 * category base, putting them at the root), and posts of every public
 	 * type that is not a root type — types shielded under a base included, at
-	 * their real address: while that stays under the base the based stage
-	 * decides it (a warning at most), and once a plugin or theme drops the
-	 * base it lands in the root stage, which is what this must catch.
+	 * their real address and in the statuses their entries list: while that
+	 * stays under the base the based stage decides it, and once a plugin or
+	 * theme drops the base it lands in the root stage, which is what this
+	 * must catch.
 	 *
 	 * @param string[]             $root_types Effective CPTs of the enabled root entries.
 	 * @param array<string, mixed> $entries    Candidate entries.
@@ -209,15 +210,26 @@ class RootPreflight {
 		// Every status WordPress serves at a post's address (discontinued,
 		// private… as well as published).
 		$served    = array_values( array_filter( function_exists( 'get_post_stati' ) ? array_keys( (array) get_post_stati() ) : [ 'publish' ], static fn( $status ): bool => 'publish' === $status || ( null !== get_post_status_object( (string) $status ) && AllowlistBuilder::is_servable_status( (string) $status ) ) ) );
+		// A type shielded under a base is sampled in the statuses its entries
+		// list: its posts in any other status 404 under the base by design
+		// (the status warning says so, reserving their slugs would confirm
+		// them), and the listed ones show a dropped base as well.
+		$listed = [];
+		foreach ( $entries as $key => $entry ) {
+			if ( is_array( $entry ) && true !== ( $entry['root'] ?? false ) && ( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] ) && 'allowlist' === ( $entry['mode'] ?? 'allowlist' ) ) {
+				$type            = (string) ( $entry['post_type'] ?? $key );
+				$listed[ $type ] = array_merge( $listed[ $type ] ?? [], \Post404Shield\effective_statuses( $entry ) );
+			}
+		}
 		foreach ( get_post_types( [ 'public' => true ], 'names' ) as $type ) {
 			if ( 'attachment' === $type || in_array( $type, $root_types, true ) ) {
 				continue;
 			}
 			// Per status, so private rows never crowd the published ones out.
-			foreach ( $served as $status ) {
+			foreach ( isset( $listed[ $type ] ) ? array_intersect( $served, $listed[ $type ] ) : $served as $status ) {
 				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
 				foreach ( (array) $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_status = %s AND post_name <> '' ORDER BY ID DESC LIMIT %d", $type, $status, self::OTHER_SAMPLE ) ) as $id ) {
-					$path = $path_of( self::permalink_as_reader( (int) $id ) );
+					$path = $path_of( AllowlistBuilder::permalink_as_reader( (int) $id ) );
 					if ( null !== $path ) {
 						$paths[] = $path;
 					}
@@ -225,32 +237,6 @@ class RootPreflight {
 			}
 		}
 		return $paths;
-	}
-
-	/**
-	 * A post's pretty permalink as a user who may read it: WordPress gives a
-	 * private post its pretty address only to such a user, and the daily
-	 * replay runs from cron, with no user at all.
-	 *
-	 * @param int $id Post ID.
-	 *
-	 * @return string|false
-	 */
-	private static function permalink_as_reader( int $id ) {
-		$reader = static function ( array $allcaps, array $caps, array $args ) use ( $id ): array {
-			if ( 'read_post' === ( $args[0] ?? '' ) && (int) ( $args[2] ?? 0 ) === $id ) {
-				foreach ( $caps as $cap ) {
-					$allcaps[ $cap ] = true;
-				}
-			}
-			return $allcaps;
-		};
-		add_filter( 'user_has_cap', $reader, 10, 3 );
-		try {
-			return get_permalink( $id );
-		} finally {
-			remove_filter( 'user_has_cap', $reader, 10 );
-		}
 	}
 
 	/**

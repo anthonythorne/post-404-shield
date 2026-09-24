@@ -101,7 +101,7 @@ class PostShieldValidateTest extends TestCase {
 	 *
 	 * @return void
 	 */
-	public function test_an_operator_base_with_a_language_folder_is_refused(): void {
+	public function test_an_operator_base_with_a_language_folder_is_only_warned_about(): void {
 		$this->stub();
 		$config = static fn( string $base ): array => [
 			'locale'         => [
@@ -122,5 +122,31 @@ class PostShieldValidateTest extends TestCase {
 			$this->assertStringContainsString( 'looks like a language folder', implode( ' | ', $result['warnings'] ), $base );
 		}
 		$this->assertStringNotContainsString( 'language folder', implode( ' | ', $store->validate( $config( 'special-route' ) )['warnings'] ) );
+	}
+
+	/**
+	 * Two enabled root entries for one post type are refused: the loader
+	 * keys root settings by type, so each reader would take a different one.
+	 *
+	 * @return void
+	 */
+	public function test_two_root_entries_for_one_type_are_refused(): void {
+		$this->stub();
+		$root    = static fn( int $ttl ): array => [
+			'enabled'   => true,
+			'mode'      => 'allowlist',
+			'post_type' => 'page',
+			'root'      => true,
+			'url_base'  => [],
+			'ttl'       => $ttl,
+		];
+		$method  = new \ReflectionMethod( ConfigStore::class, 'shared_type_errors' );
+		$method->setAccessible( true );
+		$errors  = implode( ' | ', $method->invoke( new ConfigStore(), [ 'page' => $root( 60 ), 'page-2' => $root( 300 ) ] ) );
+		$this->assertStringContainsString( 'more than one root entry (page, page-2)', $errors );
+		$this->assertSame( [], $method->invoke( new ConfigStore(), [ 'page' => $root( 60 ) ] ) );
+		$off            = $root( 300 );
+		$off['enabled'] = false;
+		$this->assertSame( [], $method->invoke( new ConfigStore(), [ 'page' => $root( 60 ), 'page-2' => $off ] ), 'A switched-off copy is kept settings, not a second entry.' );
 	}
 }

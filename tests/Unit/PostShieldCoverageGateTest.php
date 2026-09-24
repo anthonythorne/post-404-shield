@@ -1,9 +1,13 @@
 <?php
 /**
- * Unit tests for what the based-entry coverage gate says about a FORCED save
- * (CLI --force): every broken real URL it lets through is reported, whatever
- * else the save confirmed (a status drop) or forced (a wrong base) — a forced
- * restore must never read as if only the confirmed part broke anything.
+ * Unit tests for what the gates say:
+ *
+ * - about a FORCED save (CLI --force): every broken real URL the based-entry
+ *   coverage gate lets through is reported, whatever else the save confirmed
+ *   (a status drop) or forced (a wrong base) — a forced restore must never
+ *   read as if only the confirmed part broke anything;
+ * - about a status drop, in both gates: every (entry, status) pair the
+ *   confirmation covers is named, not only those among the sampled URLs.
  *
  * @package Post404Shield\Tests
  */
@@ -182,5 +186,77 @@ class PostShieldCoverageGateTest extends TestCase {
 			[ 'allow_status_drop' => $refusal['status_drop_pairs'] ]
 		);
 		$this->assertNull( $refusal, 'Both confirmed: the save goes on.' );
+	}
+
+	/**
+	 * Every (entry, status) pair a confirmation would cover is named in the
+	 * refusal, with its count, even when its URLs fall past the ten sampled.
+	 *
+	 * @return void
+	 */
+	public function test_every_pair_is_named_past_the_sampled_urls(): void {
+		$breaks = $this->breaks( 12, 0 );
+		foreach ( [ 1, 2, 3 ] as $i ) {
+			$breaks[] = [
+				'url'    => '/global/support/firmware/archived-' . $i . '/',
+				'marker' => 'blocked-unknown-slug',
+				'entry'  => 'firmware',
+				'status' => 'archived',
+			];
+		}
+		[ $refusal ] = $this->gate(
+			[
+				'checked' => 20,
+				'breaks'  => $breaks,
+			],
+			[]
+		);
+		$said = implode( "\n", $refusal['errors'] );
+		$this->assertStringNotContainsString( 'archived-1', $said, 'Past the ten sampled URLs.' );
+		$this->assertStringContainsString( 'firmware — status "discontinued" is not listed: 12 real URLs checked would 404.', $said );
+		$this->assertStringContainsString( 'firmware — status "archived" is not listed: 3 real URLs checked would 404.', $said );
+		$this->assertEqualsCanonicalizing( [ 'firmware:discontinued', 'firmware:archived' ], $refusal['status_drop_pairs'] );
+	}
+
+	/**
+	 * The root gate names every dropped (entry, status) pair too.
+	 *
+	 * @return void
+	 */
+	public function test_the_root_gate_names_every_pair(): void {
+		$store   = new ConfigStore();
+		$blocked = [];
+		$dropped = [];
+		$types   = [];
+		foreach ( range( 1, 11 ) as $i ) {
+			$blocked[]                        = '/news-' . $i . '/';
+			$dropped[ '/news-' . $i . '/' ]   = 'private';
+			$types[ '/news-' . $i . '/' ]     = 'post';
+		}
+		$blocked[]              = '/about-old/';
+		$dropped['/about-old/'] = 'archived';
+		$types['/about-old/']   = 'page';
+		$store->set_preflight_handler(
+			static fn(): array => [
+				'would_block'   => $blocked,
+				'dropped'       => $dropped,
+				'dropped_types' => $types,
+			]
+		);
+		$method = new \ReflectionMethod( ConfigStore::class, 'root_preflight_gate' );
+		$method->setAccessible( true );
+		$warnings = [];
+		$accepted = null;
+		$config   = [
+			'entries' => [
+				'post' => [ 'post_type' => 'post', 'root' => true ],
+				'page' => [ 'post_type' => 'page', 'root' => true ],
+			],
+		];
+		$refusal  = $method->invokeArgs( $store, [ $config, [], &$warnings, &$accepted ] );
+		$said     = implode( "\n", $refusal['errors'] );
+		$this->assertStringContainsString( 'post — status "private" is not listed: 11 real URLs checked would 404.', $said );
+		$this->assertStringContainsString( 'page — status "archived" is not listed: 1 real URL checked would 404.', $said, 'Past the ten sampled URLs.' );
+		$this->assertEqualsCanonicalizing( [ 'post:private', 'page:archived' ], $refusal['status_drop_pairs'] );
 	}
 }

@@ -82,4 +82,52 @@ class PostShieldAdminRowTest extends TestCase {
 		$this->assertFalse( $this->posts_row( $draft, $stored )['offerMatch'], 'The draft of a refused save.' );
 		$this->assertSame( 'slug', $this->posts_row( $stored, $stored )['match'] );
 	}
+
+	/**
+	 * The rebuild jobs a save queues (one per changed type, run together in
+	 * one cron request) stream root-extras once between them, not once per
+	 * root type.
+	 *
+	 * @return void
+	 */
+	public function test_queued_rebuilds_stream_root_extras_once(): void {
+		$this->stub();
+		$builder = new class( [] ) extends \Post404Shield\Library\AllowlistBuilder {
+			/** @var string[] */
+			public $done = [];
+			/**
+			 * Record a type's rebuild.
+			 *
+			 * @param string $post_type Post type.
+			 * @return int
+			 */
+			public function rebuild_type( string $post_type ): int {
+				$this->done[] = $post_type;
+				return 0;
+			}
+			/**
+			 * Pages and posts live at the root.
+			 *
+			 * @param string $post_type Post type.
+			 * @return bool
+			 */
+			public function is_root_type( string $post_type ): bool {
+				return in_array( $post_type, [ 'page', 'post' ], true );
+			}
+			/**
+			 * Record the root-extras stream.
+			 *
+			 * @return int
+			 */
+			public function rebuild_root_extras(): int {
+				$this->done[] = 'root-extras';
+				return 0;
+			}
+		};
+		$admin   = new \Post404Shield\Controller\PostShieldAdminController( $builder, new \Post404Shield\Library\ConfigStore(), [ 'page', 'post', 'story' ] );
+		foreach ( [ 'page', 'story', 'post' ] as $type ) {
+			$admin->run_type_rebuild( $type );
+		}
+		$this->assertSame( [ 'page', 'root-extras', 'story', 'post' ], $builder->done );
+	}
 }

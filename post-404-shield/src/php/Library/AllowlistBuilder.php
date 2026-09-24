@@ -187,6 +187,12 @@ class AllowlistBuilder {
 	public const ROOT_EXTRAS_DIR = 'root-extras';
 
 	/**
+	 * The root-extras directory's record of its last streamed commit:
+	 * `inode:size:inode it replaced` (copy_appended()).
+	 */
+	private const COMMIT_MARKER = '.committed';
+
+	/**
 	 * Rebuild the allowlist for every enabled managed post type, then reconcile
 	 * uploads so a type switched off (or removed from config) self-cleans.
 	 * Multiple entries sharing one CPT (via `post_type`, e.g. the category-
@@ -535,6 +541,33 @@ class AllowlistBuilder {
 	}
 
 	/**
+	 * A post's pretty permalink as a user who may read it. Core gives a
+	 * private post its pretty address only to such a user, and WP-CLI and
+	 * cron run as nobody: the gates must measure a CLI save and the daily
+	 * replay like a settings save.
+	 *
+	 * @param int $id Post ID.
+	 *
+	 * @return string|false
+	 */
+	public static function permalink_as_reader( int $id ) {
+		$reader = static function ( array $allcaps, array $caps, array $args ) use ( $id ): array {
+			if ( 'read_post' === ( $args[0] ?? '' ) && (int) ( $args[2] ?? 0 ) === $id ) {
+				foreach ( $caps as $cap ) {
+					$allcaps[ $cap ] = true;
+				}
+			}
+			return $allcaps;
+		};
+		add_filter( 'user_has_cap', $reader, 10, 3 );
+		try {
+			return get_permalink( $id );
+		} finally {
+			remove_filter( 'user_has_cap', $reader, 10 );
+		}
+	}
+
+	/**
 	 * Whether WordPress serves a post in this status at its own address, to
 	 * anyone: a public status, or private (for readers who may). Drafts,
 	 * pending and scheduled posts are not — their previews are `?p=` links —
@@ -846,8 +879,10 @@ class AllowlistBuilder {
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		self::assert_query();
 		$lines = [];
+		// One verdict per (type, status): each re-reads the live config.
+		$shields = [];
 		foreach ( (array) $rows as $row ) {
-			if ( $this->is_shielding_status( (string) $row->post_type, (string) $row->post_status ) ) {
+			if ( $shields[ (string) $row->post_type ][ (string) $row->post_status ] ??= $this->is_shielding_status( (string) $row->post_type, (string) $row->post_status ) ) {
 				$lines[] = (string) $row->uri;
 			}
 		}
@@ -1861,16 +1896,33 @@ class AllowlistBuilder {
 			// Streamed straight to the temp file: the union is never held in
 			// memory. A duplicate line (an old slug that is also a media name)
 			// is harmless — the loader matches it once.
-			$count = $this->write_lines_atomically(
+			$replaced = 0;
+			$count    = $this->write_lines_atomically(
 				$this->root_extras_stream(),
 				$file,
-				function ( $handle ) use ( $file, $start, &$lock ): ?int {
+				function ( $handle ) use ( $file, $start, $held, &$lock, &$replaced ): ?int {
 					if ( null === $lock ) {
 						$lock = $this->lock( dirname( $file ) );
 					}
-					return $this->copy_appended( $file, $start, $handle );
+					clearstatcache( true, $file );
+					$replaced = is_file( $file ) ? (int) fileinode( $file ) : 0;
+					return $this->copy_appended( $file, $start, $handle, $held );
 				}
 			);
+			if ( null !== $count ) {
+				// What this commit is, for a stream that started before it and
+				// commits after — only under the list's lock, or an append
+				// could land between the rename and the size recorded. Without
+				// it (or when the write fails) no marker: the next stream then
+				// copies the whole body, which loses nothing.
+				$marker = dirname( $file ) . '/' . self::COMMIT_MARKER;
+				clearstatcache( true, $file );
+				$value = (int) fileinode( $file ) . ':' . (int) filesize( $file ) . ':' . $replaced;
+				// phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_file_put_contents
+				if ( ( ! is_resource( $lock ) || strlen( $value ) !== file_put_contents( $marker, $value ) ) && file_exists( $marker ) ) {
+					unlink( $marker ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_unlink
+				}
+			}
 			if ( null === $count && $this->stream_read_failed ) {
 				// A failed read, not a failed write: a retry, as rebuild_type() says.
 				$this->failed[ $file ]                       = true;
@@ -1900,25 +1952,36 @@ class AllowlistBuilder {
 
 	/**
 	 * Copy onto a list being committed the lines appended to the live one
-	 * since its stream started: the tail past the size it had then, or — when
-	 * another rebuild replaced the file meanwhile — the whole new body. The
-	 * stream holds the original file open, so a replacement can never be
-	 * given its inode back.
+	 * since its stream started: the tail past the size it had then. When one
+	 * other stream committed meanwhile (its marker says it replaced the file
+	 * this one started from), the original's tail past that size — the
+	 * stream holds it open — and the replacement's tail past its commit, so
+	 * the other stream's own lines (a status it had and this one drops) are
+	 * not carried over. Otherwise, after two or more replacements, the whole
+	 * new body: extra lines until the next rebuild, but none lost. Holding
+	 * the original open also means a replacement can never be given its
+	 * inode back.
 	 *
 	 * @param string                  $file   Live list path.
 	 * @param array{0:int,1:int}|null $start  Its size and inode when the stream began, or null.
 	 * @param resource                $handle The temp file being written.
+	 * @param resource|false          $held   The original list, open since the stream began.
 	 *
 	 * @return int|null Lines copied, or null when a write failed.
 	 */
-	private function copy_appended( string $file, ?array $start, $handle ): ?int {
+	private function copy_appended( string $file, ?array $start, $handle, $held = false ): ?int {
 		clearstatcache( true, $file );
 		if ( null === $start || ! is_file( $file ) ) {
 			return 0;
 		}
-		$raw = (string) file_get_contents( $file ); // phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
-		if ( (int) fileinode( $file ) === $start[1] ) {
+		$raw   = (string) file_get_contents( $file ); // phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
+		$inode = (int) fileinode( $file );
+		// phpcs:ignore WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- local file, not remote.
+		$marker = array_map( 'intval', explode( ':', (string) @file_get_contents( dirname( $file ) . '/' . self::COMMIT_MARKER ) ) ) + [ 0, 0, 0 ]; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- no marker yet reads as none.
+		if ( $inode === $start[1] ) {
 			$tail = (string) substr( $raw, $start[0] );
+		} elseif ( false !== $held && $marker[0] === $inode && $marker[2] === $start[1] && 0 === fseek( $held, $start[0] ) ) {
+			$tail = (string) stream_get_contents( $held ) . "\n" . (string) substr( $raw, $marker[1] );
 		} else {
 			$tail = (string) substr( $raw, (int) strpos( $raw, "\n" ) + 1 );
 		}
@@ -2114,7 +2177,7 @@ class AllowlistBuilder {
 			return;
 		}
 		foreach ( $entries as $entry ) {
-			if ( in_array( $entry, [ 'allowlist.php', 'index.php', '.lock', '.stream' ], true ) || \Post404Shield\is_temp_file_name( $entry ) ) {
+			if ( in_array( $entry, [ 'allowlist.php', 'index.php', '.lock', '.stream', self::COMMIT_MARKER ], true ) || \Post404Shield\is_temp_file_name( $entry ) ) {
 				$path = trailingslashit( $dir ) . $entry;
 				if ( is_file( $path ) ) {
 					unlink( $path ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_unlink

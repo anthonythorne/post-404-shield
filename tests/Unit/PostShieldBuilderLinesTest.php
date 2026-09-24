@@ -222,4 +222,64 @@ class PostShieldBuilderLinesTest extends TestCase {
 		);
 		$this->assertContains( 'spec-child', $builder->lines_for( 'post' ) );
 	}
+
+	/**
+	 * Old addresses are judged once per (type, status), not per row: each
+	 * verdict re-reads the live config, inside the list's lock.
+	 *
+	 * @return void
+	 */
+	public function test_old_addresses_judge_each_type_and_status_once(): void {
+		require_once __DIR__ . '/../../post-404-shield/src/php/Function/ConfigReader.php';
+		require_once __DIR__ . '/../../post-404-shield/src/php/Library/ReadFailure.php';
+		require_once __DIR__ . '/../../post-404-shield/src/php/Library/AllowlistBuilder.php';
+		$GLOBALS['wpdb'] = new class() {
+			/** @var string */
+			public $posts = 'wp_posts';
+			/** @var string */
+			public $postmeta = 'wp_postmeta';
+			/** @var string */
+			public $last_error = '';
+			/**
+			 * Stub prepare.
+			 *
+			 * @param string $query SQL.
+			 * @return string
+			 */
+			public function prepare( $query ) {
+				return (string) $query;
+			}
+			/**
+			 * Three old addresses: two published, one draft.
+			 *
+			 * @return array<object>
+			 */
+			public function get_results() {
+				return [
+					(object) [ 'uri' => 'news/one', 'post_type' => 'page', 'post_status' => 'publish' ],
+					(object) [ 'uri' => 'news/two', 'post_type' => 'page', 'post_status' => 'publish' ],
+					(object) [ 'uri' => 'news/three', 'post_type' => 'page', 'post_status' => 'draft' ],
+				];
+			}
+		};
+		$builder = new class( [] ) extends \Post404Shield\Library\AllowlistBuilder {
+			/** @var int */
+			public $asked = 0;
+			/**
+			 * Count the verdicts; published shields.
+			 *
+			 * @param string $post_type Post type.
+			 * @param string $status    Post status.
+			 * @return bool
+			 */
+			public function is_shielding_status( string $post_type, string $status ): bool {
+				++$this->asked;
+				return 'publish' === $status;
+			}
+		};
+		$method  = new \ReflectionMethod( \Post404Shield\Library\AllowlistBuilder::class, 'old_uri_lines' );
+		$method->setAccessible( true );
+		$this->assertSame( [ 'news/one', 'news/two' ], $method->invoke( $builder, [ 'page' ] ) );
+		$this->assertSame( 2, $builder->asked );
+	}
 }

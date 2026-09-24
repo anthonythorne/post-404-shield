@@ -203,4 +203,28 @@ class PostShieldSiteLoaderTest extends TestCase {
 		$cron = (string) file_get_contents( dirname( __DIR__, 2 ) . '/post-404-shield/src/php/Controller/PostShieldCronController.php' );
 		$this->assertMatchesRegularExpression( "/->revalidate_root\\(\\s*'the daily health check',\\s*true\\s*\\)/", $cron );
 	}
+
+	/**
+	 * The rebuild handler keeps the save lock fresh between lists: a large
+	 * site's rebuild outlasts the lock, which the next save would break.
+	 *
+	 * @return void
+	 */
+	public function test_the_rebuild_handler_keeps_the_save_lock_fresh(): void {
+		$bootstrap = (string) file_get_contents( dirname( __DIR__, 2 ) . '/post-404-shield/bootstrap.php' );
+		$this->assertMatchesRegularExpression( '/foreach \( \$post_types as \$rebuild_type \) \{\s*(?:\/\/[^\n]*\s*)*\$post_shield_store->keep_lock\(\);/', $bootstrap );
+		$this->assertMatchesRegularExpression( '/\$post_shield_store->keep_lock\(\);\s*try \{\s*\$candidate_builder->rebuild_root_extras\(\);/', $bootstrap );
+	}
+
+	/**
+	 * The rebuild handler streams root-extras when the save asks (or the
+	 * file is missing), never on its own reading of the types: the store
+	 * decides, so one save streams it at most twice.
+	 *
+	 * @return void
+	 */
+	public function test_the_rebuild_handler_streams_root_extras_when_asked(): void {
+		$bootstrap = (string) file_get_contents( dirname( __DIR__, 2 ) . '/post-404-shield/bootstrap.php' );
+		$this->assertMatchesRegularExpression( '/\$candidate_builder->has_root_entries\(\)\s*&& \( \$root_extras \|\| ! is_file\( \$candidate_builder->get_root_extras_file\(\) \) \)\s*\) \{/', $bootstrap );
+	}
 }

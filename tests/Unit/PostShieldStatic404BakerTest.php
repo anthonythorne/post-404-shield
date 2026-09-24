@@ -21,6 +21,7 @@ use Post404Shield\Library\Static404Baker;
 // effects, and sanitize_markup() is a pure static.
 require_once __DIR__ . '/../../post-404-shield/src/php/Function/ConfigReader.php';
 require_once __DIR__ . '/../../post-404-shield/src/php/Library/Static404Baker.php';
+require_once __DIR__ . '/../../post-404-shield/src/php/Controller/PostShield404Controller.php';
 
 /**
  * Test class for Static404Baker::sanitize_markup().
@@ -44,6 +45,21 @@ class PostShieldStatic404BakerTest extends TestCase {
 		$this->assertStringContainsString( 'https://www.example.com/pt-br/"', $clean, 'Trailing-slash link → locale home.' );
 		$this->assertStringContainsString( 'https://www.example.com/ko-kr/"', $clean, 'Bare link → locale home.' );
 		$this->assertStringContainsString( '/global/team/', $clean, 'Unrelated links untouched.' );
+	}
+
+	/**
+	 * The robots.txt rule covers the probe under a locale and at the root
+	 * (locale mode none), read the way crawlers read `*`.
+	 *
+	 * @return void
+	 */
+	public function test_robots_rule_covers_every_probe_shape(): void {
+		$robots = ( new \ReflectionClass( \Post404Shield\Controller\PostShield404Controller::class ) )->newInstanceWithoutConstructor()->disallow_probe_path( '' );
+		$this->assertSame( 1, preg_match( '/^Disallow: (\S+)$/m', $robots, $rule ) );
+		$pattern = '#^' . str_replace( '\*', '.*', preg_quote( $rule[1], '#' ) ) . '#';
+		$this->assertMatchesRegularExpression( $pattern, '/pt-br/post-shield-404-probe/' );
+		$this->assertMatchesRegularExpression( $pattern, '/post-shield-404-probe/', 'Locale mode none probes at the root.' );
+		$this->assertDoesNotMatchRegularExpression( $pattern, '/global/about/' );
 	}
 
 	/**

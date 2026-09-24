@@ -65,16 +65,33 @@ review; changing one is a design change, not a bug fix. Read
   URLs. An empty candidate list is measured **armed**, stricter than the loader.
   A blocked section, a removed reserved slug and root mode's sample of other
   types replay content in every status WordPress serves (discontinued,
-  private…), not only published. Pages beneath a base are replayed in every
-  public status and are always a break when swallowed, whichever entry claims
-  them.
+  private…), not only published; a type shielded under a base is sampled in
+  the statuses its entries list (its posts in any other status 404 under the
+  base by design, and have their own warning). Private posts are read at the
+  address a reader sees, also from WP-CLI and cron. Pages beneath a base are
+  replayed in every public status and are always a break when swallowed,
+  whichever entry claims them. **A status-drop refusal names every (entry,
+  status) pair it would let the confirmation cover**, with a count, before the
+  ten sampled URLs.
 - **Lists that must exist before the swap are written first**, from the union of
   the live and candidate statuses, and only while the save still holds its
   lock; the post-swap rebuild narrows them. A save refused after that leaves the
   union list until the nightly rebuild. **A status a save drops is rebuilt out
   after the swap**, on every save path (settings, restore, CLI) — root-extras
   too, when it lists former root posts in the Posts entry's statuses. The two
-  post-swap passes run separately, so a failed one never skips the other.
+  post-swap passes run separately, so a failed one never skips the other, and
+  **a save request streams root-extras at most twice** (before the swap and
+  once after): the save decides, not the rebuild handler. The follow-up jobs it
+  queues stream it once more between them.
+- **A long save keeps its lock fresh** between lists, so the next save does
+  not break it at the 30 s mark, and a self-heal leaves a lock stamped in the
+  last ten minutes alone (a heal of a large site outlives the TTL, and heals a
+  minute apart would each break the one before).
+- **Overlapping root-extras streams**: a commit records itself; a stream that
+  finds exactly one other commit landed meanwhile copies only what was
+  appended (the other stream's own lines are not carried over, so a status it
+  had stays dropped). After two or more, the whole new body is copied: extra
+  lines until the next rebuild, never a lost one.
 - **An instant append always starts on a fresh line**, so a write cut short
   (a full disk, a killed worker) never fuses two slugs.
 - **A restore that would be refused says so on its confirm screen**, and the
@@ -95,9 +112,11 @@ review; changing one is a design change, not a bug fix. Read
   check when it replays the root preflight on the live config and finds a real
   URL newly blocked — a type whose posts came to live at the root, say, shielded
   under a base or not (only daily: the walk is too costly for every route
-  follow-up). A URL counts only when a second, fresh pass blocks it again (a
-  page published mid-walk reads as blocked once), and a failed read is no
-  signal and switches nothing. Would-blocks accepted on a forced save are kept
+  follow-up). A stale snapshot is refreshed by a save instead, whose refusal
+  switches root off the same way. Either way, a URL counts only when a second,
+  fresh pass blocks it again (a page published mid-walk reads as blocked once),
+  the notice names the blocked URLs, and a failed read is no signal and
+  switches nothing. Would-blocks accepted on a forced save are kept
   per site in `post_shield_preflight_accepted`: stage that option with a
   forced root config, or the new site's first daily check switches root off.
 - **Redirects the shield cannot place are warnings**: a regex with no leading
@@ -109,6 +128,8 @@ review; changing one is a design change, not a bug fix. Read
 - **Root-extras is one file read whole** on a blocked root request (built in
   batches); the per-request cost is documented.
 - **A blocked root URL takes the Pages entry's cache times.**
+- **One root entry per post type**: the loader keys root settings by type, so a
+  second enabled one is refused.
 
 ## Content changes and other plugins
 
@@ -138,7 +159,9 @@ the case it covers.
 - `manage_options` is the settings capability, also on multisite.
 - Switching root mode on streams root-extras twice in that request (before the
   swap, so the loader has it, and once more after, for what was published in
-  between) and again from the queued jobs. It is a rare operator action.
+  between) and again from the queued jobs. It is a rare operator action. A
+  save with no live artifact (a self-heal) streams it after the swap too, for
+  the media uploaded while it ran.
 - Two saves racing past the lock can each write a candidate list; the later
   one's post-swap rebuild, or the nightly rebuild, settles it.
 - The Root mode tile shows the last root preflight that ran, even for a save

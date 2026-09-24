@@ -791,23 +791,8 @@ final class BasedPreflight {
 		if ( is_string( $lang ) && '' !== $lang ) {
 			\Post404Shield\switch_language( $lang );
 		}
-		// Core gives a private post its pretty address only for a user who can
-		// read it; WP-CLI and cron run as nobody, and a CLI restore must be
-		// measured like a settings save. So read this one address as a reader.
-		$reader = static function ( array $allcaps, array $caps, array $args ) use ( $id ): array {
-			if ( 'read_post' === ( $args[0] ?? '' ) && (int) ( $args[2] ?? 0 ) === $id ) {
-				foreach ( $caps as $cap ) {
-					$allcaps[ $cap ] = true;
-				}
-			}
-			return $allcaps;
-		};
-		add_filter( 'user_has_cap', $reader, 10, 3 );
-		try {
-			$link = get_permalink( $id );
-		} finally {
-			remove_filter( 'user_has_cap', $reader, 10 );
-		}
+		// A private post is measured at its pretty address, as a reader sees it.
+		$link = AllowlistBuilder::permalink_as_reader( $id );
 		if ( ! is_string( $link ) || '' === $link || false !== strpos( $link, '?' ) ) {
 			return null;
 		}

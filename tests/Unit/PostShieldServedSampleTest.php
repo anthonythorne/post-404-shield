@@ -42,9 +42,21 @@ class PostShieldServedSampleTest extends TestCase {
 			function get_page_uri( $id ) { return 20 === (int) $id ? "news" : get_post_field( "post_name", $id ); }
 			function get_children( $args ) { return 20 === (int) $args["post_parent"] && in_array( "discontinued", (array) $args["post_status"], true ) ? [ 21 ] : []; }
 			function get_page_by_path( $path ) { return null; }
-			function add_filter( ...$args ) { return true; }
-			function remove_filter( ...$args ) { return true; }
-			function get_permalink( $id ) { $map = [ 9 => "https://example.test/support/firmware/old-camera/", 5 => "https://example.test/svc-post/", 21 => "https://example.test/news/old-child/" ]; return $map[ (int) $id ] ?? "https://example.test/?p=" . (int) $id; }
+			function add_filter( $hook, $callback, $priority = 10, $args = 1 ) { $GLOBALS["post_shield_test_filters"][ $hook ][] = $callback; return true; }
+			function remove_filter( $hook, $callback, $priority = 10 ) { foreach ( $GLOBALS["post_shield_test_filters"][ $hook ] ?? [] as $i => $filter ) { if ( $filter === $callback ) { unset( $GLOBALS["post_shield_test_filters"][ $hook ][ $i ] ); } } return true; }
+			function get_permalink( $id ) {
+				// Private post 6: its pretty link only for a reader (core asks
+				// current_user_can( "read_post", 6 ), which runs user_has_cap).
+				if ( 6 === (int) $id ) {
+					$caps = [];
+					foreach ( $GLOBALS["post_shield_test_filters"]["user_has_cap"] ?? [] as $filter ) {
+						$caps = $filter( $caps, [ "read_private_posts" ], [ "read_post", 0, 6 ] );
+					}
+					return empty( $caps["read_private_posts"] ) ? "https://example.test/?p=6" : "https://example.test/svc-private/";
+				}
+				$map = [ 9 => "https://example.test/support/firmware/old-camera/", 5 => "https://example.test/svc-post/", 21 => "https://example.test/news/old-child/" ];
+				return $map[ (int) $id ] ?? "https://example.test/?p=" . (int) $id;
+			}
 			function wp_parse_url( $url, $component = -1 ) { return parse_url( $url, $component ); }
 			function get_taxonomies( $args = [], $output = "names" ) { return []; }
 			function get_terms( $args = [] ) { return []; }'
@@ -69,6 +81,15 @@ class PostShieldServedSampleTest extends TestCase {
 					$query = (string) preg_replace( '/%[sd]/', is_int( $arg ) ? (string) $arg : "'" . $arg . "'", (string) $query, 1 );
 				}
 				return (string) $query;
+			}
+			/**
+			 * A served post named old-camera: only discontinued.
+			 *
+			 * @param string $query SQL.
+			 * @return string|null
+			 */
+			public function get_var( $query ) {
+				return false !== strpos( $query, "'old-camera'" ) && false !== strpos( $query, "'discontinued'" ) ? '9' : null;
 			}
 			/**
 			 * Statuses in use: firmware's one post is discontinued.
@@ -167,5 +188,58 @@ class PostShieldServedSampleTest extends TestCase {
 			]
 		);
 		$this->assertContains( '/svc-post/', $paths, 'The published post is sampled, although newer private rows exist.' );
+	}
+
+	/**
+	 * A type shielded under a base is sampled in the statuses its entries
+	 * list, not in one it leaves out by design (its posts 404 under the base,
+	 * and a warning to reserve their slugs would confirm them); a listed
+	 * private post is read as a reader, and a type with no entry in every
+	 * served status.
+	 *
+	 * @return void
+	 */
+	public function test_the_root_sample_takes_a_based_types_listed_statuses(): void {
+		$this->stub();
+		$method = new \ReflectionMethod( \Post404Shield\Library\RootPreflight::class, 'other_public_sample' );
+		$method->setAccessible( true );
+		$sample = static fn( array $entries ): array => $method->invoke( new \Post404Shield\Library\RootPreflight(), [ 'page' ], $entries );
+		$entry  = static fn( array $statuses ): array => [
+			'mode'        => 'allowlist',
+			'post_type'   => 'service',
+			'url_base'    => [ 'services' ],
+			'post_status' => $statuses,
+		];
+		$this->assertNotContains( '/svc-private/', $sample( [ 'service' => $entry( [ 'publish' ] ) ] ), 'Private is not listed.' );
+		$this->assertContains( '/svc-private/', $sample( [ 'service' => $entry( [ 'publish', 'private' ] ) ] ), 'Listed, and read at its pretty address with no user.' );
+		$this->assertContains( '/svc-private/', $sample( [] ), 'No entry: every served status.' );
+		$this->assertSame( [], $GLOBALS['post_shield_test_filters']['user_has_cap'] ?? [], 'The reader filter is removed again.' );
+	}
+
+	/**
+	 * The based gate reads a private post at its pretty address with no user
+	 * (WP-CLI, cron), as a settings save does.
+	 *
+	 * @return void
+	 */
+	public function test_the_based_gate_reads_a_private_post_as_a_reader(): void {
+		$this->stub();
+		$method = new \ReflectionMethod( \Post404Shield\Library\BasedPreflight::class, 'real_paths' );
+		$method->setAccessible( true );
+		$this->assertContains( '/svc-private/', $method->invoke( new \Post404Shield\Library\BasedPreflight(), 'service', [ 'services' ], [ 'private' ] ) );
+	}
+
+	/**
+	 * A reserved slug carried only by a discontinued post still has content:
+	 * removing it is replayed.
+	 *
+	 * @return void
+	 */
+	public function test_a_slug_on_a_discontinued_post_has_content(): void {
+		$this->stub();
+		$method = new \ReflectionMethod( \Post404Shield\Library\BasedPreflight::class, 'slug_has_content' );
+		$method->setAccessible( true );
+		$this->assertTrue( $method->invoke( new \Post404Shield\Library\BasedPreflight(), 'old-camera' ) );
+		$this->assertFalse( $method->invoke( new \Post404Shield\Library\BasedPreflight(), 'never-used' ) );
 	}
 }

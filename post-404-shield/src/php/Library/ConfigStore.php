@@ -65,6 +65,16 @@ class ConfigStore {
 	private const LOCK_TTL = 30;
 
 	/**
+	 * How long a self-heal leaves a held lock alone before contending for it
+	 * (seconds): a heal or save of a large site outlives LOCK_TTL, and heals a
+	 * minute apart would each break the one before, so none would commit. A
+	 * lock older than this is a crashed save's.
+	 *
+	 * @var int
+	 */
+	private const HEAL_LOCK_WAIT = 600;
+
+	/**
 	 * Filename stamp format for phased-out revisions (UTC).
 	 */
 	private const STAMP_FORMAT = 'Ymd-His';
@@ -150,9 +160,10 @@ class ConfigStore {
 
 	/**
 	 * Optional rebuild seam for the match-mode-switch ordering (SPEC §3.2c).
-	 * Signature: fn( string[] $post_types, array $entries, bool $root_switching_on = false ): true|string[]
+	 * Signature: fn( string[] $post_types, array $entries, bool $root_extras = false, bool $posts_left_root = false ): true|string[]
 	 * — rebuild the named effective CPTs' allowlists against the given
-	 * (candidate) entries; true when all were written, else the names of the
+	 * (candidate) entries, and root-extras when $root_extras says so (or its
+	 * file is missing); true when all were written, else the names of the
 	 * lists that could not be (any other value fails them all), and a
 	 * ReadFailure when a database read failed (a retry, not a refusal).
 	 * Injected by the bootstrap; absent in pure unit contexts.
@@ -293,8 +304,8 @@ class ConfigStore {
 	 * Inject the allowlist rebuild handler used for synchronous mode-switch
 	 * rebuilds inside write().
 	 *
-	 * @param callable $handler fn( string[] $post_types, array $entries, bool $root_switching_on ): true|string[] —
-	 *                          the lists that failed to write, when any did.
+	 * @param callable $handler fn( string[] $post_types, array $entries, bool $root_extras, bool $posts_left_root ): true|string[] —
+	 *                          the lists that failed to write, when any did (see $rebuild_handler).
 	 *
 	 * @return void
 	 */
@@ -1626,7 +1637,7 @@ class ConfigStore {
 	 * builder would take whichever entry comes first — a based `page` entry
 	 * ahead of the root one would reduce the root page list to top-level slugs
 	 * and 404 every child page. Based entries sharing a type likewise share
-	 * one list and must agree on its format.
+	 * one list and must agree on its format; and one root entry per type.
 	 *
 	 * @param array<string, mixed> $entries   Candidate entries.
 	 * @param bool                 $root_only Only a based entry sharing a root type.
@@ -1635,6 +1646,7 @@ class ConfigStore {
 	 */
 	private function shared_type_errors( array $entries, bool $root_only = false ): array {
 		$root_types  = [];
+		$root_keys   = [];
 		$based_types = [];
 		$formats     = [];
 		foreach ( $entries as $key => $entry ) {
@@ -1644,6 +1656,7 @@ class ConfigStore {
 			$type = (string) ( $entry['post_type'] ?? $key );
 			if ( true === ( $entry['root'] ?? false ) ) {
 				$root_types[ $type ] = true;
+				$root_keys[ $type ][] = (string) $key;
 			} else {
 				$based_types[ $type ] = true;
 			}
@@ -1659,6 +1672,18 @@ class ConfigStore {
 		}
 		if ( $root_only ) {
 			return $errors;
+		}
+		// One root entry per type: the loader keys root settings by type, so a
+		// second would win there while the settings row shows the first.
+		foreach ( $root_keys as $type => $keys ) {
+			if ( count( $keys ) > 1 ) {
+				$errors[] = sprintf(
+					/* translators: 1: post type name and slug, 2: entry keys. */
+					__( '%1$s has more than one root entry (%2$s). Keep one.', 'post-404-shield' ),
+					$this->entry_label( (string) $type, [ 'post_type' => (string) $type ] ),
+					implode( ', ', $keys )
+				);
+			}
 		}
 		// Entries sharing a post type share ONE list, so they must agree on its
 		// format — otherwise one of them reads lines in the other's shape.
@@ -2152,6 +2177,9 @@ class ConfigStore {
 	 *                                           root-preflight would-blocks (CLI --force for a knowing operator);
 	 *                                           `skip_root_preflight` => true skips the URL-walking root
 	 *                                           preflight (the self-heal republishing an already-vetted option);
+	 *                                           `confirm_root_blocks` => true refuses only over the URLs a
+	 *                                           second root preflight pass blocks again (an automatic refresh,
+	 *                                           whose refusal switches root matching off), listed in `blocked`;
 	 *                                           `expect_revision` => string refuses the save (`stale` => true)
 	 *                                           unless the stored settings still have that current_revision() —
 	 *                                           checked under the lock, so two forms cannot both pass it;
@@ -2172,8 +2200,10 @@ class ConfigStore {
 	 *                                           `notes` => string[] are added to the warnings (what an
 	 *                                           automatic write did beyond the obvious).
 	 *
-	 * @return array{ok: bool, errors: string[], warnings: string[], stale?: bool, retry?: bool} `retry` marks
-	 *         a refusal that says nothing about the config (a busy or lost lock, a failed read).
+	 * @return array{ok: bool, errors: string[], warnings: string[], stale?: bool, retry?: bool, root_refused?: bool, blocked?: string[], based_errors?: string[]} `retry` marks
+	 *         a refusal that says nothing about the config (a busy or lost lock, a failed read);
+	 *         `root_refused` one by the root preflight, over the `blocked` URLs (and the based
+	 *         gate's `based_errors`, shown with it over a dropped status).
 	 */
 	public function write( array $config, string $generated_by, array $flags = [] ): array {
 		// Root-pages v2: the floor + derived excluded-bases buckets are
@@ -2315,8 +2345,9 @@ class ConfigStore {
 						$refused['warnings']          = array_values( array_unique( array_merge( (array) $refused['warnings'], $based_warnings ) ) );
 						$refused['status_drop_pairs'] = array_values( array_unique( array_merge( (array) ( $refused['status_drop_pairs'] ?? [] ), $this->confirmed_drop_pairs, (array) ( $based['status_drop_pairs'] ?? [] ) ) ) );
 						if ( null !== $based ) {
-							$refused['errors']      = array_merge( $refused['errors'], $based['errors'] );
-							$refused['status_drop'] = ! empty( $based['status_drop'] );
+							$refused['errors']       = array_merge( $refused['errors'], $based['errors'] );
+							$refused['based_errors'] = $based['errors'];
+							$refused['status_drop']  = ! empty( $based['status_drop'] );
 						}
 					}
 					return $refused;
@@ -2489,15 +2520,18 @@ class ConfigStore {
 		// once more too: until the swap, the live artifact had root mode off,
 		// so the media, old slugs and private pages made meanwhile were not
 		// appended. So does a save after which posts no longer live at the root.
-		$this->post_swap_rebuild( $rebuild_before, $config, $root_switching_on || $posts_leaving_root, [] !== $rebuild_before || $root_switching_on || $posts_leaving_root );
+		// Root-extras' nested media, old slugs and old addresses follow a root
+		// type's statuses, so rebuilding a root type's list rebuilds it too.
+		$first_extras = $root_switching_on || $posts_leaving_root || self::has_root_type_in( $rebuild_before, (array) $config['entries'] );
+		$this->post_swap_rebuild( $rebuild_before, $config, $first_extras, [] !== $rebuild_before || $first_extras );
 		// Then the lists that drop a status. Once posts have left the root,
 		// root-extras lists their slugs in the Posts entry's statuses, so a
 		// change to those (or the entry switched off) rebuilds it as well.
 		// Not when the first pass just rebuilt root-extras from this document.
-		$former_posts_changed = ! ( $root_switching_on || $posts_leaving_root )
-			&& self::posts_left_root_of( $config ) && $this->has_enabled_root_entries( $config['entries'] )
+		$former_posts_changed = self::posts_left_root_of( $config ) && $this->has_enabled_root_entries( $config['entries'] )
 			&& self::former_post_statuses( (array) $config['entries'] ) !== self::former_post_statuses( (array) ( $live_before['entries'] ?? [] ) );
-		$this->post_swap_rebuild( $rebuild_after, $config, $former_posts_changed, [] !== $rebuild_after || $former_posts_changed );
+		$after_extras         = ! $first_extras && ( $former_posts_changed || self::has_root_type_in( $rebuild_after, (array) $config['entries'] ) );
+		$this->post_swap_rebuild( $rebuild_after, $config, $after_extras, [] !== $rebuild_after || $after_extras );
 
 		$this->record_warnings( $flags, $generated_by, $validated['warnings'] );
 		return [
@@ -2687,6 +2721,19 @@ class ConfigStore {
 				);
 			}
 
+			// Every (entry, status) pair the confirmation covers is named, not
+			// only those among the sampled URLs below.
+			$per_pair = [];
+			foreach ( $breaks as $break ) {
+				if ( isset( $break['status'] ) ) {
+					$pair              = (string) ( $break['entry'] ?? '' ) . "\0" . (string) $break['status'];
+					$per_pair[ $pair ] = ( $per_pair[ $pair ] ?? 0 ) + 1;
+				}
+			}
+			foreach ( $per_pair as $pair => $count ) {
+				[ $pair_entry, $pair_status ] = explode( "\0", (string) $pair, 2 );
+				$coverage_errors[]            = self::status_drop_line( $name( $pair_entry ), $pair_status, $count );
+			}
 			foreach ( array_slice( $breaks, 0, 10 ) as $break ) {
 				$coverage_errors[] = sprintf(
 					isset( $break['status'] )
@@ -2881,7 +2928,7 @@ class ConfigStore {
 	 */
 	private function root_preflight_gate( array $config, array $flags, array &$warnings, ?array &$accepted_after ): ?array {
 		$result      = (array) ( $this->preflight_handler )( $config );
-		$would_block = array_values( array_filter( (array) ( $result['would_block'] ?? ( isset( $result['dropped'] ) ? [] : $result ) ), 'is_string' ) );
+		$would_block = self::would_block_of( $result );
 		$dropped     = array_filter( (array) ( $result['dropped'] ?? [] ), 'is_string' );
 		$confirmed   = [];
 		// Each dropped would-block as its (root entry, status) pair.
@@ -2913,6 +2960,22 @@ class ConfigStore {
 		}
 		$accepted   = array_values( array_filter( (array) get_option( self::PREFLIGHT_ACCEPTED_OPTION, [] ), 'is_string' ) );
 		$new_blocks = array_values( array_diff( $would_block, $accepted ) );
+		// An automatic refresh (a stale snapshot): one pass reads the lists
+		// and the URLs at different moments, so a page published in between
+		// reads as blocked, and the refusal switches root matching off. Only
+		// what a second pass blocks again counts.
+		if ( [] !== $new_blocks && empty( $flags['force_preflight'] ) && ! empty( $flags['confirm_root_blocks'] ) ) {
+			$passing     = array_diff( $new_blocks, self::would_block_of( (array) ( $this->preflight_handler )( $config ) ) );
+			$would_block = array_values( array_diff( $would_block, $passing ) );
+			$new_blocks  = array_values( array_diff( $new_blocks, $passing ) );
+			// The Root mode tile shows the last pass: say what both blocked.
+			$tile = get_option( self::PREFLIGHT_OPTION );
+			if ( is_array( $tile ) ) {
+				$tile['would_block'] = count( $would_block );
+				$tile['sample']      = array_slice( array_merge( $would_block, (array) ( $tile['warn_sample'] ?? [] ) ), 0, 10 );
+				update_option( self::PREFLIGHT_OPTION, $tile, false );
+			}
+		}
 		// What stays accepted after this save: previously accepted URLs
 		// that still would-block (the rest fixed themselves), plus, on a
 		// forced save, everything it reported.
@@ -2924,6 +2987,17 @@ class ConfigStore {
 				/* translators: %d: number of URLs the root preflight would 404. */
 				sprintf( __( 'Root preflight FAILED: %d real URL(s) would be served a pre-boot 404 — nothing was saved.', 'post-404-shield' ), count( $new_blocks ) ),
 			];
+			// Every (entry, status) pair the confirmation covers is named, not
+			// only those among the sampled URLs below.
+			$per_pair = [];
+			foreach ( array_intersect( $new_blocks, array_keys( $dropped ) ) as $blocked_url ) {
+				$pair              = $pair_of( $blocked_url );
+				$per_pair[ $pair ] = ( $per_pair[ $pair ] ?? 0 ) + 1;
+			}
+			foreach ( $per_pair as $pair => $count ) {
+				[ $pair_entry, $pair_status ] = explode( ':', (string) $pair, 2 ) + [ 1 => '' ];
+				$block_errors[]               = self::status_drop_line( $this->entry_label( $pair_entry, (array) ( $config['entries'][ $pair_entry ] ?? [] ) ), $pair_status, $count );
+			}
 			foreach ( array_slice( $new_blocks, 0, 10 ) as $blocked_url ) {
 				$block_errors[] = isset( $dropped[ $blocked_url ] )
 					/* translators: 1: a URL the root preflight would 404, 2: post status. */
@@ -2934,6 +3008,7 @@ class ConfigStore {
 			return [
 				'ok'                => false,
 				'root_refused'      => true,
+				'blocked'           => $new_blocks,
 				'errors'            => $block_errors,
 				'warnings'          => $warnings,
 				// Refused only over dropped statuses: the screen offers to confirm
@@ -3088,7 +3163,8 @@ class ConfigStore {
 		$live              = $this->artifact();
 		$root_switching_on = $this->has_enabled_root_entries( $config['entries'] )
 			&& ! ( null !== $live && $this->has_enabled_root_entries( (array) $live['entries'] ) );
-		$root_extras       = $root_switching_on || ( $posts_leaving_root && $this->has_enabled_root_entries( $config['entries'] ) );
+		$root_extras       = $root_switching_on || self::has_root_type_in( $rebuild_before, (array) $config['entries'] )
+			|| ( $posts_leaving_root && $this->has_enabled_root_entries( $config['entries'] ) );
 		if ( null === $this->rebuild_handler || ( [] === $rebuild_before && ! $root_extras ) ) {
 			return true;
 		}
@@ -3176,11 +3252,7 @@ class ConfigStore {
 			return [];
 		}
 		$accepted = array_values( array_filter( (array) get_option( self::PREFLIGHT_ACCEPTED_OPTION, [] ), 'is_string' ) );
-		$blocked  = function () use ( $config, $accepted ): array {
-			$result = (array) ( $this->preflight_handler )( $config );
-			$would  = array_filter( (array) ( $result['would_block'] ?? ( isset( $result['dropped'] ) ? [] : $result ) ), 'is_string' );
-			return array_values( array_diff( $would, $accepted ) );
-		};
+		$blocked  = fn(): array => array_values( array_diff( self::would_block_of( (array) ( $this->preflight_handler )( $config ) ), $accepted ) );
 		try {
 			$first = $blocked();
 			$urls  = [] === $first ? [] : array_values( array_intersect( $first, $blocked() ) );
@@ -3188,6 +3260,50 @@ class ConfigStore {
 			error_log( '[post-404-shield] root revalidation: the preflight could not run: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			return [];
 		}
+		return self::root_off_messages( $urls );
+	}
+
+	/**
+	 * One (entry, status) pair of a status-drop refusal, with its count: the
+	 * confirmation covers each pair named this way.
+	 *
+	 * @param string $entry  Entry name.
+	 * @param string $status Post status.
+	 * @param int    $count  Real URLs that would 404.
+	 *
+	 * @return string
+	 */
+	private static function status_drop_line( string $entry, string $status, int $count ): string {
+		return sprintf(
+			/* translators: 1: entry name, 2: post status, 3: number of real URLs. */
+			_n( '%1$s — status "%2$s" is not listed: %3$d real URL checked would 404.', '%1$s — status "%2$s" is not listed: %3$d real URLs checked would 404.', $count, 'post-404-shield' ),
+			$entry,
+			$status,
+			$count
+		);
+	}
+
+	/**
+	 * The URLs a preflight handler's result would block.
+	 *
+	 * @param array<mixed> $result Handler result: `would_block` (and `dropped`), or a plain list.
+	 *
+	 * @return string[]
+	 */
+	private static function would_block_of( array $result ): array {
+		return array_values( array_filter( (array) ( $result['would_block'] ?? ( isset( $result['dropped'] ) ? [] : $result ) ), 'is_string' ) );
+	}
+
+	/**
+	 * What a switch-off tells the operator about the real URLs root matching
+	 * blocks: [] when there are none.
+	 *
+	 * @param string[] $urls Blocked URLs.
+	 *
+	 * @return string[] Messages.
+	 */
+	private static function root_off_messages( array $urls ): array {
+		$urls = array_values( array_filter( $urls, 'is_string' ) );
 		if ( [] === $urls ) {
 			return [];
 		}
@@ -3211,6 +3327,27 @@ class ConfigStore {
 	 */
 	private static function posts_left_root_of( array $config ): bool {
 		return true === ( $config['excluded_bases']['posts_left_root'] ?? false );
+	}
+
+	/**
+	 * Whether any of these types is the post type of an enabled root entry.
+	 *
+	 * @param string[]     $types   Effective post types.
+	 * @param array<mixed> $entries Config entries.
+	 *
+	 * @return bool
+	 */
+	private static function has_root_type_in( array $types, array $entries ): bool {
+		$types = array_map( 'strval', $types );
+		foreach ( $entries as $key => $entry ) {
+			if ( is_array( $entry ) && true === ( $entry['root'] ?? false )
+				&& ( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] ) && 'allowlist' === ( $entry['mode'] ?? 'allowlist' )
+				&& in_array( (string) ( $entry['post_type'] ?? $key ), $types, true )
+			) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -3714,8 +3851,9 @@ class ConfigStore {
 					$candidate,
 					$label . $reason,
 					[
-						'expect_revision' => $this->revision_of( $option ),
-						'fail_open'       => true,
+						'expect_revision'     => $this->revision_of( $option ),
+						'fail_open'           => true,
+						'confirm_root_blocks' => true,
 					]
 				);
 				// A save that landed meanwhile ran every check itself.
@@ -3731,7 +3869,14 @@ class ConfigStore {
 					error_log( '[post-404-shield] root revalidation (' . $reason . '): the refresh did not land, retried later: ' . implode( ' | ', $result['errors'] ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 					return false;
 				}
-				$errors = $result['errors'];
+				// The refresh confirmed each blocked URL with a second pass;
+				// the notice names them (the root refusal's own words say
+				// nothing was saved, and the switch-off is saved), and says
+				// that it is the refresh any other refusal's words are about.
+				$errors = array_merge(
+					[ __( 'The snapshot refresh root matching needs was refused, so root matching was switched off:', 'post-404-shield' ) ],
+					empty( $result['root_refused'] ) ? $result['errors'] : array_merge( self::root_off_messages( (array) ( $result['blocked'] ?? [] ) ), (array) ( $result['based_errors'] ?? [] ) )
+				);
 			}
 		}
 
@@ -4074,7 +4219,7 @@ class ConfigStore {
 			// FAILURE, so a heal that keeps failing costs one attempt a minute
 			// rather than the full save path on every request — while a fresh
 			// loss after a good heal still recovers on the very next request.
-			if ( false !== get_transient( 'post_shield_heal_backoff' ) ) {
+			if ( false !== get_transient( 'post_shield_heal_backoff' ) || $this->lock_held_within( self::HEAL_LOCK_WAIT ) ) {
 				return;
 			}
 			set_transient( 'post_shield_heal_backoff', 1, MINUTE_IN_SECONDS );
@@ -4339,6 +4484,38 @@ class ConfigStore {
 			return $this->insert_lock_row();
 		}
 		return false;
+	}
+
+	/**
+	 * Whether a save or heal holds the lock, stamped (acquired or kept fresh)
+	 * within the last $seconds.
+	 *
+	 * @param int $seconds Window.
+	 *
+	 * @return bool
+	 */
+	private function lock_held_within( int $seconds ): bool {
+		global $wpdb;
+		$held    = (string) $wpdb->get_var( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- mutex read must bypass the object cache.
+			$wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", self::LOCK_OPTION )
+		);
+		$held_at = (int) explode( ':', $held, 2 )[0];
+		return $held_at > 0 && ( time() - $held_at ) < $seconds;
+	}
+
+	/**
+	 * Keep this save's lock fresh while a long rebuild runs (the rebuild
+	 * handler calls it between lists): a lock older than LOCK_TTL is broken,
+	 * so a large site's save would lose it to the next one and be refused at
+	 * its commit point. A no-op outside a save; a lock already lost stays
+	 * lost, and the commit point refuses.
+	 *
+	 * @return void
+	 */
+	public function keep_lock(): void {
+		if ( '' !== $this->lock_value ) {
+			$this->refresh_lock();
+		}
 	}
 
 	/**
