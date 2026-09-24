@@ -202,13 +202,7 @@ final class BasedPreflight {
 		$this->pattern   = $pattern;
 		$builder         = new AllowlistBuilder( $entries );
 
-		$bodies = [];
-		$read   = static function ( string $type ) use ( $builder, &$bodies ): ?string {
-			if ( ! array_key_exists( $type, $bodies ) ) {
-				$bodies[ $type ] = self::armed_body( $builder->lines_for( $type ) );
-			}
-			return $bodies[ $type ];
-		};
+		$read = self::body_reader( $builder );
 
 		$checked   = 0;
 		$missed    = 0; // Samples that 404 over a status the entry does not list.
@@ -357,6 +351,24 @@ final class BasedPreflight {
 			'unlisted'  => $unlisted,
 			'private'   => $private,
 		];
+	}
+
+	/**
+	 * The replay's list reader: each type's candidate list, built once, as
+	 * armed_body() gives it — what decide_based() reads for every sample.
+	 *
+	 * @param AllowlistBuilder $builder Candidate builder.
+	 *
+	 * @return \Closure fn( string $type ): string
+	 */
+	private static function body_reader( AllowlistBuilder $builder ): \Closure {
+		$bodies = [];
+		return static function ( string $type ) use ( $builder, &$bodies ): ?string {
+			if ( ! array_key_exists( $type, $bodies ) ) {
+				$bodies[ $type ] = self::armed_body( $builder->lines_for( $type ) );
+			}
+			return $bodies[ $type ];
+		};
 	}
 
 	/**

@@ -1430,6 +1430,9 @@ class ConfigStore {
 			'derived'   => $derived,
 			'operator'  => $clean,
 			'endpoints' => $endpoints,
+			// The permalink post base this snapshot was taken under: a later
+			// write that finds it moved keeps it passing (with_vacated_post_base_kept()).
+			'post_base' => $this->post_base_info()['supported'] ? $this->post_base_info()['base'] : '',
 		];
 	}
 
@@ -1518,6 +1521,46 @@ class ConfigStore {
 			return $type;
 		}
 		return sprintf( '%s (%s)', $object->labels->name, $type );
+	}
+
+	/**
+	 * The cache-time warnings for one entry, modelled on what the loader
+	 * sends: a time over a day is capped; and a browser/CDN time longer than
+	 * the cache time keeps a launch URL's 404 in browsers after the post goes
+	 * live (only the server cache is purged on publish) — unless the cache
+	 * time is 0, which sends no-store and never reads the other. Blank times
+	 * are the loader's defaults (60 s and POST_SHIELD_404_TTL; the edge time
+	 * falls back to POST_SHIELD_404_EDGE_TTL).
+	 *
+	 * @param string               $label      Entry name.
+	 * @param array<string, mixed> $entry      Entry.
+	 * @param string               $entry_mode 'allowlist' or 'block'.
+	 *
+	 * @return string[]
+	 */
+	private static function ttl_warnings( string $label, array $entry, string $entry_mode ): array {
+		$warnings = [];
+		foreach ( [ 'cache_ttl', 'edge_ttl' ] as $field ) {
+			if ( isset( $entry[ $field ] ) && is_int( $entry[ $field ] ) && $entry[ $field ] > \Post404Shield\MAX_TTL ) {
+				/* translators: 1: entry name, 2: the longest cache time in seconds. */
+				$warnings[] = sprintf( __( '%1$s: a cache time longer than %2$d seconds (a day) is capped to it — browsers keep a cached 404 as long as they are told, and nothing can recall it.', 'post-404-shield' ), $label, \Post404Shield\MAX_TTL );
+			}
+		}
+		if ( 'block' === $entry_mode ) {
+			return $warnings; // Blocks have one time; the edge time is for publishable 404s.
+		}
+		$cache_time = isset( $entry['cache_ttl'] ) && is_int( $entry['cache_ttl'] ) ? $entry['cache_ttl'] : ( defined( 'POST_SHIELD_404_TTL' ) ? max( 0, (int) POST_SHIELD_404_TTL ) : 60 );
+		$edge_time  = isset( $entry['edge_ttl'] ) && is_int( $entry['edge_ttl'] ) ? $entry['edge_ttl'] : ( defined( 'POST_SHIELD_404_EDGE_TTL' ) ? max( 0, (int) POST_SHIELD_404_EDGE_TTL ) : null );
+		if ( 0 < $cache_time && null !== $edge_time && $edge_time > $cache_time ) {
+			$warnings[] = sprintf(
+				/* translators: 1: entry name, 2: the browser/CDN time, 3: the cache time, in seconds. */
+				__( '%1$s: browsers and the CDN keep its 404 for %2$d seconds, longer than the %3$d-second cache time; only the server cache is purged when a post is published, so a visitor can keep a new post\'s 404 that long. Set the browser and CDN time shorter.', 'post-404-shield' ),
+				$label,
+				$edge_time,
+				$cache_time
+			);
+		}
+		return $warnings;
 	}
 
 	/**
@@ -1615,7 +1658,15 @@ class ConfigStore {
 			/* translators: %s: entry name. */
 			$errors[] = sprintf( __( '%s: the post type must be a lowercase post type name.', 'post-404-shield' ), $label );
 		}
-		if ( isset( $entry['url_base'] ) && ( ! is_array( $entry['url_base'] ) || [] !== array_filter( $entry['url_base'], static fn( $b ) => ! is_string( $b ) ) ) ) {
+		// Lists, as the reader requires: a scalar (a legacy value, a WP-CLI
+		// patch) is named here, not left to fail the write's final check.
+		foreach ( [ 'url_base', 'post_status', 'reserved_allowlist' ] as $field ) {
+			if ( isset( $entry[ $field ] ) && ( ! is_array( $entry[ $field ] ) || array_values( $entry[ $field ] ) !== $entry[ $field ] ) ) {
+				/* translators: 1: entry name, 2: field name. */
+				$errors[] = sprintf( __( '%1$s: %2$s must be a list.', 'post-404-shield' ), $label, $field );
+			}
+		}
+		if ( isset( $entry['url_base'] ) && is_array( $entry['url_base'] ) && [] !== array_filter( $entry['url_base'], static fn( $b ) => ! is_string( $b ) ) ) {
 			/* translators: %s: entry name. */
 			$errors[] = sprintf( __( '%s: every URL base must be text.', 'post-404-shield' ), $label );
 		}
@@ -1658,6 +1709,13 @@ class ConfigStore {
 
 		$seen_bases         = [];
 		$enabled_root_types = [];
+		// The loader reads a root 404's cache times from this entry alone.
+		$first_root = '';
+		foreach ( $entries as $key => $entry ) {
+			if ( '' === $first_root && is_array( $entry ) && true === ( $entry['root'] ?? false ) && ( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] ) ) {
+				$first_root = (string) $key;
+			}
+		}
 		foreach ( $entries as $key => $entry ) {
 			if ( ! is_string( $key ) || 1 !== preg_match( '/^[a-z0-9_-]+$/', $key ) || ! is_array( $entry ) ) {
 				$errors[] = __( 'An entry has a malformed key.', 'post-404-shield' );
@@ -1730,25 +1788,11 @@ class ConfigStore {
 			foreach ( $this->entry_field_errors( $label, $entry ) as $field_error ) {
 				$errors[] = $field_error;
 			}
-			foreach ( [ 'cache_ttl', 'edge_ttl' ] as $field ) {
-				if ( isset( $entry[ $field ] ) && is_int( $entry[ $field ] ) && $entry[ $field ] > \Post404Shield\MAX_TTL ) {
-					/* translators: 1: entry name, 2: the longest cache time in seconds. */
-					$warnings[] = sprintf( __( '%1$s: a cache time longer than %2$d seconds (a day) is capped to it — browsers keep a cached 404 as long as they are told, and nothing can recall it.', 'post-404-shield' ), $label, \Post404Shield\MAX_TTL );
-				}
-			}
-			// The edge time is what browsers and the CDN keep; only the server
-			// cache is purged on publish. Longer than the cache time, it keeps a
-			// launch URL's 404 in browsers after the post goes live.
-			// A blank cache time is the loader's default (60 s, or POST_SHIELD_404_TTL).
-			$cache_time = isset( $entry['cache_ttl'] ) && is_int( $entry['cache_ttl'] ) ? $entry['cache_ttl'] : ( defined( 'POST_SHIELD_404_TTL' ) ? max( 0, (int) POST_SHIELD_404_TTL ) : 60 );
-			if ( 'block' !== $entry_mode && isset( $entry['edge_ttl'] ) && is_int( $entry['edge_ttl'] ) && $entry['edge_ttl'] > $cache_time ) {
-				$warnings[] = sprintf(
-					/* translators: 1: entry name, 2: the browser/CDN time, 3: the cache time, in seconds. */
-					__( '%1$s: browsers and the CDN keep its 404 for %2$d seconds, longer than the %3$d-second cache time; only the server cache is purged when a post is published, so a visitor can keep a new post\'s 404 that long. Set the browser and CDN time shorter.', 'post-404-shield' ),
-					$label,
-					$entry['edge_ttl'],
-					$cache_time
-				);
+			// The loader takes a root 404's times from the FIRST enabled root
+			// entry only: another root row's times are never read.
+			$ttls_read = true !== ( $entry['root'] ?? false ) || (string) $key === $first_root;
+			foreach ( $ttls_read ? self::ttl_warnings( $label, $entry, (string) $entry_mode ) : [] as $ttl_warning ) {
+				$warnings[] = $ttl_warning;
 			}
 
 			if ( 'block' === $entry_mode ) {
@@ -2063,9 +2107,11 @@ class ConfigStore {
 		}
 		// Root mode: a Posts base this save moves keeps passing to WordPress,
 		// whoever saves (the settings screen, the CLI, a restore, the
-		// automatic follow-up), or every old post link gets a pre-boot 404
-		// instead of WordPress's 301 to the new address.
-		if ( $this->has_enabled_root_entries( (array) $config['entries'] ) ) {
+		// automatic follow-up or switch-off), or every old post link gets a
+		// pre-boot 404 instead of WordPress's 301 to the new address. Root
+		// entries kept switched off count too: the base must still be kept
+		// when root matching comes back on.
+		if ( [] !== array_filter( (array) $config['entries'], static fn( $entry ) => is_array( $entry ) && true === ( $entry['root'] ?? false ) ) ) {
 			$live_doc = $this->artifact() ?? $this->option();
 			if ( is_array( $live_doc ) ) {
 				[ $config, $vacated ] = $this->with_vacated_post_base_kept( $live_doc, $config );
@@ -2168,10 +2214,13 @@ class ConfigStore {
 					if ( ! empty( $refused['status_drop'] ) ) {
 						$based_warnings = $validated['warnings'];
 						$based          = $this->coverage_gate( $config, $flags, $based_warnings );
+						// What the based gate confirmed is offered again with the
+						// root drops, and what it says is shown, refusal or not.
+						$refused['warnings']          = array_values( array_unique( array_merge( (array) $refused['warnings'], $based_warnings ) ) );
+						$refused['status_drop_pairs'] = array_values( array_unique( array_merge( (array) ( $refused['status_drop_pairs'] ?? [] ), $this->confirmed_drop_pairs, (array) ( $based['status_drop_pairs'] ?? [] ) ) ) );
 						if ( null !== $based ) {
-							$refused['errors']            = array_merge( $refused['errors'], $based['errors'] );
-							$refused['status_drop']       = ! empty( $based['status_drop'] );
-							$refused['status_drop_pairs'] = array_values( array_unique( array_merge( (array) ( $refused['status_drop_pairs'] ?? [] ), (array) ( $based['status_drop_pairs'] ?? [] ) ) ) );
+							$refused['errors']      = array_merge( $refused['errors'], $based['errors'] );
+							$refused['status_drop'] = ! empty( $based['status_drop'] );
 						}
 					}
 					return $refused;
@@ -2286,11 +2335,11 @@ class ConfigStore {
 			// (Disable shield, a restored revision, a CLI write) are kept, as an
 			// automatic switch-off keeps them: the next save from another tab
 			// must not delete them (revalidate_root() records its own reason).
-			if ( $this->has_enabled_root_entries( $config['entries'] ) ) {
+			$has_root = [] !== array_filter( (array) $config['entries'], static fn( $entry ) => is_array( $entry ) && true === ( $entry['root'] ?? false ) );
+			if ( ! $has_root || $this->has_enabled_root_entries( $config['entries'] ) ) {
+				// Root on again, or no root settings left to keep: the state is over.
 				delete_option( self::ROOT_OFF_OPTION );
-			} elseif ( [] !== array_filter( (array) $config['entries'], static fn( $entry ) => is_array( $entry ) && true === ( $entry['root'] ?? false ) )
-				&& ! is_array( get_option( self::ROOT_OFF_OPTION ) )
-			) {
+			} elseif ( ! is_array( get_option( self::ROOT_OFF_OPTION ) ) ) {
 				update_option(
 					self::ROOT_OFF_OPTION,
 					[
@@ -3343,23 +3392,14 @@ class ConfigStore {
 			if ( $candidate === $option && ! $this->snapshot_is_stale( $option ) ) {
 				return false;
 			}
-			// A Posts base moved (`/blog/` → `/news/`): root matching would take
-			// the old base, and every old post link would get a pre-boot 404
-			// instead of WordPress's 301 to the new address. Keep it excluded.
-			[ $candidate, $vacated ] = $this->with_vacated_post_base_kept( $option, $candidate );
-			$notes                   = array_map( [ self::class, 'vacated_base_note' ], $vacated );
-			if ( [] !== $vacated ) {
-				$label = 'auto: the Posts entry follows the permalink settings (old base kept) — ';
-			} else {
-				$label = $candidate === $option ? 'auto: root snapshot refreshed — ' : 'auto: the Posts entry follows the permalink settings — ';
-			}
+			// A moved Posts base is kept passing by write() itself.
+			$label  = $candidate === $option ? 'auto: root snapshot refreshed — ' : 'auto: the Posts entry follows the permalink settings — ';
 			$result = $this->write(
 				$candidate,
 				$label . $reason,
 				[
 					'expect_revision' => $this->revision_of( $option ),
 					'fail_open'       => true,
-					'notes'           => $notes,
 				]
 			);
 			// A save that landed meanwhile ran every check itself.
@@ -3475,6 +3515,9 @@ class ConfigStore {
 		if ( $this->redirect_read_failed ) {
 			$live['derived'] = array_values( array_unique( array_merge( (array) $live['derived'], array_filter( (array) ( $stored['derived'] ?? [] ), 'is_string' ) ) ) );
 		}
+		if ( (string) ( $stored['post_base'] ?? $live['post_base'] ) !== (string) $live['post_base'] ) {
+			return true; // The permalink post base moved.
+		}
 		foreach ( [ 'floor', 'derived', 'endpoints' ] as $bucket ) {
 			$a = array_values( array_filter( (array) ( $stored[ $bucket ] ?? [] ), 'is_string' ) );
 			$b = array_values( (array) $live[ $bucket ] );
@@ -3551,20 +3594,35 @@ class ConfigStore {
 	 * @return array{0: array<string, mixed>, 1: string[]}
 	 */
 	private function with_vacated_post_base_kept( array $option, array $candidate ): array {
-		$vacated = [];
+		// What the live document had posts under: the permalink post base its
+		// snapshot recorded (posts shielded or not), and its based Posts
+		// entry's bases, switched on or off (an artifact from before the
+		// snapshot recorded one, or an entry the switch-off left disabled).
+		$old = [];
+		if ( is_string( $option['excluded_bases']['post_base'] ?? null ) && '' !== $option['excluded_bases']['post_base'] ) {
+			$old[] = $option['excluded_bases']['post_base'];
+		}
 		foreach ( (array) ( $option['entries'] ?? [] ) as $key => $entry ) {
-			if ( ! is_array( $entry ) || 'post' !== (string) ( $entry['post_type'] ?? $key ) || true === ( $entry['root'] ?? false )
-				|| 'allowlist' !== ( $entry['mode'] ?? 'allowlist' ) || ( isset( $entry['enabled'] ) && false === $entry['enabled'] )
+			if ( is_array( $entry ) && 'post' === (string) ( $entry['post_type'] ?? $key ) && true !== ( $entry['root'] ?? false )
+				&& 'allowlist' === ( $entry['mode'] ?? 'allowlist' )
 			) {
-				continue;
-			}
-			$now = (array) ( $candidate['entries'][ $key ]['url_base'] ?? [] );
-			foreach ( array_diff( array_filter( (array) ( $entry['url_base'] ?? [] ), 'is_string' ), $now ) as $old_base ) {
-				$vacated[] = (string) $old_base;
+				$old = array_merge( $old, array_filter( (array) ( $entry['url_base'] ?? [] ), 'is_string' ) );
 			}
 		}
+		// Where posts live now: the current permalink base, and the candidate's
+		// enabled based Posts entry's bases.
+		$info = $this->post_base_info();
+		$now  = $info['supported'] && '' !== $info['base'] ? [ $info['base'] ] : [];
+		foreach ( (array) ( $candidate['entries'] ?? [] ) as $key => $entry ) {
+			if ( is_array( $entry ) && 'post' === (string) ( $entry['post_type'] ?? $key ) && true !== ( $entry['root'] ?? false )
+				&& ( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] )
+			) {
+				$now = array_merge( $now, array_filter( (array) ( $entry['url_base'] ?? [] ), 'is_string' ) );
+			}
+		}
+		$vacated  = array_diff( array_unique( $old ), $now );
 		$operator = array_values( array_filter( (array) ( $candidate['excluded_bases']['operator'] ?? [] ), 'is_string' ) );
-		$added    = array_values( array_diff( array_unique( $vacated ), $operator ) );
+		$added    = array_values( array_diff( $vacated, $operator ) );
 		if ( [] !== $added ) {
 			$candidate['excluded_bases']['operator'] = array_merge( $operator, $added );
 		}

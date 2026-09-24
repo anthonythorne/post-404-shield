@@ -66,9 +66,11 @@ class PostShieldRootPreflightTest extends TestCase {
 		$this->assertFalse( \Post404Shield\list_is_empty( $this->call( 'armed_body', [ '' ] ) ), 'Armed, not empty.' );
 		$this->assertSame( "<?php exit;\nabout\n", $this->call( 'armed_body', [ "<?php exit;\nabout\n" ] ) );
 
+		// The candidate as run() builds it, from an empty post list.
+		$post       = $this->call( 'root_candidate', [ 'post', [ 'root' => true ], '', [] ] ) + [ 'endpoints' => [] ];
 		$candidates = [
 			$this->candidate( 'page', "<?php exit;\nabout\n" ),
-			$this->candidate( 'post', $this->call( 'armed_body', [ '' ] ) ),
+			$post,
 			$this->candidate( 'root-extras', '' ),
 		];
 		$decision   = $this->call( 'decide', [ '/some-archive/', [], [], [], $candidates, '' ] );

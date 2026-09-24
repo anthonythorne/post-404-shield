@@ -871,6 +871,10 @@ function config_is_valid( $config ): bool {
 				}
 			}
 		}
+		// Optional: the permalink post base the snapshot was taken under.
+		if ( isset( $excluded['post_base'] ) && ( ! is_string( $excluded['post_base'] ) || ( '' !== $excluded['post_base'] && ! url_base_is_valid( $excluded['post_base'] ) ) ) ) {
+			return false;
+		}
 		// Optional: rewrite endpoint names, stripped like sub-routes.
 		if ( isset( $excluded['endpoints'] ) ) {
 			if ( ! is_array( $excluded['endpoints'] ) ) {

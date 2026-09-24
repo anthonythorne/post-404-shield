@@ -290,6 +290,29 @@ Moved out of the sites that used it into its own repository.
   browser/CDN time warning compares against the default cache time too.
 - Tests: the exact lazy-load hook list, confirmations bound to their pairs,
   the vacated base, optional-character bases, the import key collision.
+- Each snapshot records the permalink post base; any write with root entries
+  (on or kept off) keeps a Posts base that moved in the skip-list, whether
+  posts were shielded under it, the Posts entry was off, or the switch-off
+  disabled it.
+- Slug mode lists the top-level ancestor of every live post of a hierarchical
+  type (a published child under a draft or embargoed parent is real), and the
+  instant append writes the same line.
+- A term created, renamed or deleted, or a rewrite flush, queues the one-minute
+  re-check (new category routes under a stripped category base, plugin routes).
+- WPML's save-time parent sync is diffed like trash and delete (a filter,
+  `post_shield_wpml_syncs_parents`, opts out); a nested trash reads its type
+  once.
+- The kept-root notice ends when a write leaves no root entries; Discard does
+  not write an unchanged config. A root refusal re-offers the based drops the
+  nested check confirmed, and shows its warnings.
+- Cache-time warnings follow the loader (no-store at 0, the first root entry's
+  times only, the global edge default); a non-list field is named.
+- The last root preflight shows on the Root mode tile, with a notice listing
+  real URLs a based entry blocks. A row leaving root mode starts as slug.
+- Root-extras config lookups once per batch.
+- Tests: the loader's switched-off and invalid-document guards and endpoints
+  (child processes), the armed bodies through run()'s own helpers, nested
+  trash and delete reads.
 
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing

@@ -183,7 +183,10 @@ also selects the baked 404 file (`404/<locale>.html`, falling back to
 ## Matching: slug vs full-path
 
 - **`slug`** (default, today's behaviour): the allowlist holds top-level slugs;
-  deeper URLs follow `depth_allowed`/`depth_action`.
+  deeper URLs follow `depth_allowed`/`depth_action`. For a hierarchical type
+  it holds the top-level ancestor of every live post, whatever that parent's
+  own status: WordPress serves a published child under a draft, private or
+  embargoed parent, and the child's URL already shows the parent's slug.
 - **`full-path`**: the allowlist holds **full hierarchical paths** relative to
   the base (built via `get_page_uri()`); the loader exact-matches the entire
   sub-path; depth fields are ignored and hidden. Core sub-routes of a real page

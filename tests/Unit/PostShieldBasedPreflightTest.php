@@ -190,6 +190,25 @@ class PostShieldBasedPreflightTest extends TestCase {
 		$decide  = static fn( string $body ): ?array => \Post404Shield\decide_based( '/global/products/software/pc-autosave/', '/global/products/software/pc-autosave/', $entries, static fn() => $body, '[a-z]{2}-[a-z]{2}|global' );
 
 		$this->assertSame( 'blocked-unknown-slug', $decide( $armed->invoke( null, [] ) )['marker'] ?? 'pass', 'Armed: judged.' );
+
+		// Through the reader run() uses, with a builder whose list is empty.
+		require_once __DIR__ . '/../../post-404-shield/src/php/Library/AllowlistBuilder.php';
+		$empty  = new class( [] ) extends \Post404Shield\Library\AllowlistBuilder {
+			/**
+			 * No lines.
+			 *
+			 * @param string        $post_type Type.
+			 * @param string[]|null $statuses  Statuses.
+			 * @return string[]
+			 */
+			public function lines_for( string $post_type, ?array $statuses = null ): array { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- the parent's signature.
+				return [];
+			}
+		};
+		$reader = new \ReflectionMethod( BasedPreflight::class, 'body_reader' );
+		$reader->setAccessible( true );
+		$read   = $reader->invoke( null, $empty );
+		$this->assertSame( 'blocked-unknown-slug', $decide( $read( 'software' ) )['marker'] ?? 'pass', 'run()\'s reader arms it too.' );
 		$this->assertSame( 'pass', $decide( "<?php exit;\n\n" )['marker'] ?? 'pass', 'What the loader does with a truly empty list.' );
 		$this->assertSame( 'allowed-known-slug', $decide( $armed->invoke( null, [ 'pc-autosave' ] ) )['marker'] );
 	}

@@ -678,6 +678,18 @@ class AllowlistBuilder {
 		if ( $this->is_root_type( $post_type ) ) {
 			return $lines;
 		}
+		// Slug mode matches a URL's first segment: for a hierarchical type,
+		// that of every live post, which is its top-level ancestor's slug —
+		// WordPress serves a published child under a draft, private or
+		// embargoed parent (get_page_by_path() does not check ancestors), and
+		// the child's own URL already shows the parent's slug.
+		if ( 'full-path' !== $match && $this->is_hierarchical( $post_type ) ) {
+			foreach ( $this->fetch_paths( $post_type, $statuses ) as $path ) {
+				if ( false !== strpos( $path, '/' ) ) {
+					$lines[] = explode( '/', $path )[0];
+				}
+			}
+		}
 		$lines = array_merge( $lines, $this->fetch_old_slugs( $post_type, $statuses ) );
 		if ( $this->is_hierarchical( $post_type ) ) {
 			// A slug list takes a former top-level address; a full-path list any.
@@ -1452,12 +1464,19 @@ class AllowlistBuilder {
 		// serves (or private, which root-extras serves staff): a based type's
 		// media page sits under its base, which root matching already passes,
 		// so its line would match nothing and only confirm the parent's slug.
-		$by_type = [];
+		// Config lookups once per batch, not per row: each re-derives the
+		// entries (a stat of the live artifact on a live-following builder).
+		$root_types = array_flip( $this->root_types() );
+		$serves     = [];
+		$by_type    = [];
 		foreach ( $rows as $row ) {
-			$type = (string) ( $row->parent_type ?? '' );
-			if ( '' !== $type && 0 !== (int) $row->post_parent && $this->is_root_type( $type )
-				&& ( $this->is_shielding_status( $type, (string) ( $row->parent_status ?? '' ) ) || 'private' === ( $row->parent_status ?? '' ) )
-			) {
+			$type   = (string) ( $row->parent_type ?? '' );
+			$status = (string) ( $row->parent_status ?? '' );
+			if ( '' === $type || 0 === (int) $row->post_parent || ! isset( $root_types[ $type ] ) ) {
+				continue;
+			}
+			$serves[ $type ][ $status ] ??= $this->is_shielding_status( $type, $status ) || 'private' === $status;
+			if ( $serves[ $type ][ $status ] ) {
 				$by_type[ $type ][] = (int) $row->post_parent;
 			}
 		}
@@ -1570,13 +1589,15 @@ class AllowlistBuilder {
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		self::assert_query();
 
-		$lines  = [];
-		$nested = [];
+		$lines   = [];
+		$nested  = [];
+		$shields = []; // Per type and status, once per batch.
 		foreach ( (array) $rows as $row ) {
 			if ( ! is_string( $row->old_slug ) || '' === $row->old_slug ) {
 				continue;
 			}
-			if ( ! $this->is_shielding_status( (string) $row->post_type, (string) $row->post_status ) ) {
+			$shields[ (string) $row->post_type ][ (string) $row->post_status ] ??= $this->is_shielding_status( (string) $row->post_type, (string) $row->post_status );
+			if ( ! $shields[ (string) $row->post_type ][ (string) $row->post_status ] ) {
 				continue;
 			}
 			$lines[] = $row->old_slug;

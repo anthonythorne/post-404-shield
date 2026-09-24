@@ -269,4 +269,76 @@ echo "FELL-THROUGH";
 		file_put_contents( $this->uploads . '/config.php', strstr( (string) file_get_contents( $this->uploads . '/config.php' ), "\n", true ) . "\n{broken" );
 		$this->assertTrue( $this->passes( '/accommodation/fake-stay/' ), 'an unreadable document: fail-open' );
 	}
+
+	/**
+	 * Root rows switched off (as root_disabled() and Disable shield write
+	 * them) leave root matching off, lists on disk or not; so does a config
+	 * with no root entries at all beside a leftover root-extras file.
+	 *
+	 * @return void
+	 */
+	public function test_switched_off_or_absent_root_rows_leave_root_matching_off(): void {
+		$config                                     = $this->config();
+		$config['entries']['page']['enabled']       = false;
+		$config['entries']['post']['enabled']       = false;
+		$this->write_config( $config );
+		// Past the prefilter (a base needle in the path), not under the base.
+		$this->assertTrue( $this->passes( '/about/accommodation/x/' ), 'switched off' );
+
+		unset( $config['entries']['page'], $config['entries']['post'] );
+		$this->write_config( $config );
+		$this->assertTrue( $this->passes( '/contact/?from=/accommodation/x' ), 'no root entries, leftover root-extras' );
+		$this->assertFalse( $this->passes( '/accommodation/fake-stay/' ), 'the based entry still judges' );
+	}
+
+	/**
+	 * A document that is shaped right but not valid (a block on a reserved
+	 * base) is not acted on at all.
+	 *
+	 * @return void
+	 */
+	public function test_an_invalid_document_is_not_acted_on(): void {
+		$config                     = $this->config();
+		$config['entries']['feeds'] = [
+			'enabled'   => true,
+			'mode'      => 'block',
+			'url_base'  => [ 'wp-json' ],
+			'cache_ttl' => null,
+		];
+		$this->write_config( $config );
+		$this->assertTrue( \Post404Shield\config_shape_is_valid( $config ), 'shaped right' );
+		$this->assertFalse( \Post404Shield\config_is_valid( $config ), 'but invalid' );
+		$this->assertTrue( $this->passes( '/wp-json/x/' ) );
+		$this->assertTrue( $this->passes( '/definitely-fake/' ), 'the whole document is ignored' );
+	}
+
+	/**
+	 * Rewrite endpoints in the snapshot are stripped like sub-routes: a real
+	 * page's endpoint passes, at the root and under a full-path base.
+	 *
+	 * @return void
+	 */
+	public function test_endpoints_are_stripped_like_sub_routes(): void {
+		$config                                   = $this->config();
+		$config['excluded_bases']['endpoints']    = [ 'amp' ];
+		$config['entries']['guide']               = [
+			'enabled'            => true,
+			'mode'               => 'allowlist',
+			'post_type'          => 'guide',
+			'url_base'           => [ 'guides' ],
+			'reserved_allowlist' => [],
+			'post_status'        => [ 'publish' ],
+			'match'              => 'full-path',
+			'allow_pagination'   => true,
+			'cache_ttl'          => null,
+			'edge_ttl'           => null,
+		];
+		mkdir( $this->uploads . '/guide', 0755, true );
+		$this->write_list( 'guide', [ 'parent', 'parent/child' ] );
+		$this->write_config( $config );
+		$this->assertTrue( $this->passes( '/about/amp/' ), 'root: a page endpoint' );
+		$this->assertTrue( $this->passes( '/guides/parent/child/amp/' ), 'full-path: an endpoint' );
+		$this->assertFalse( $this->passes( '/about/not-real/' ), 'root still judges' );
+		$this->assertFalse( $this->passes( '/guides/parent/fake/' ), 'full-path still judges' );
+	}
 }

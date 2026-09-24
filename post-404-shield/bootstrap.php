@@ -188,10 +188,26 @@ $post_shield_revalidate = static function () use ( $post_shield_store ): void {
 add_action( 'permalink_structure_changed', $post_shield_revalidate );
 add_action( 'update_option_category_base', $post_shield_revalidate );
 add_action( 'update_option_tag_base', $post_shield_revalidate );
+// Routes also change without a settings change: a category created or
+// renamed while an SEO plugin strips the category base (each gets its own
+// rules), or any plugin flushing the rewrite rules. The follow-up alone,
+// deduped, a minute later — it re-snapshots only when the snapshot is stale.
+foreach ( [ 'created_term', 'edited_term', 'delete_term', 'update_option_rewrite_rules' ] as $post_shield_route_hook ) {
+	add_action(
+		$post_shield_route_hook,
+		static function (): void {
+			if ( false === wp_next_scheduled( 'post_shield_revalidate' ) ) {
+				wp_schedule_single_event( time() + MINUTE_IN_SECONDS, 'post_shield_revalidate' );
+			}
+		},
+		10,
+		0
+	);
+}
 add_action(
 	'post_shield_revalidate',
 	static function () use ( $post_shield_store ): void {
-		$post_shield_store->revalidate_root( 'the permalink settings changed (follow-up once the rules were flushed)' );
+		$post_shield_store->revalidate_root( 'a follow-up check (the permalinks, a term or the rewrite rules changed)' );
 	}
 );
 
@@ -233,6 +249,7 @@ $post_shield_store->set_preflight_handler(
 				'would_block' => count( $result['would_block'] ),
 				'warn_block'  => count( $result['warn_block'] ),
 				'sample'      => array_slice( array_merge( $result['would_block'], $result['warn_block'] ), 0, 10 ),
+				'warn_sample' => array_slice( $result['warn_block'], 0, 10 ),
 			],
 			false
 		);
@@ -422,6 +439,7 @@ if ( defined( 'WP_CLI' ) && WP_CLI && class_exists( '\WP_CLI' ) ) {
 					'would_block' => count( $result['would_block'] ),
 					'warn_block'  => count( $result['warn_block'] ),
 					'sample'      => array_slice( array_merge( $result['would_block'], $result['warn_block'] ), 0, 10 ),
+					'warn_sample' => array_slice( $result['warn_block'], 0, 10 ),
 				],
 				false
 			);

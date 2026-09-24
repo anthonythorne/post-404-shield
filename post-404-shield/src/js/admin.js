@@ -317,6 +317,21 @@
 						'post-404-shield'
 					)
 				: s.rootTypes.join(', ');
+			if (s.preflight) {
+				rootSub +=
+					' · ' +
+					sprintf(
+						/* translators: 1: when, 2: URLs checked, 3: URLs root mode would block, 4: URLs a based entry blocks. */
+						__(
+							'Last preflight %1$s: %2$d checked, %3$d would be blocked, %4$d blocked by a base',
+							'post-404-shield'
+						),
+						s.preflight.at.replace('T', ' ').slice(0, 16),
+						s.preflight.checked,
+						s.preflight.wouldBlock,
+						s.preflight.warnBlock
+					);
+			}
 		}
 		return el(
 			'div',
@@ -1185,9 +1200,33 @@
 	}) {
 		const rootTypes = types.filter((t) => t.root);
 		const excluded = data.excluded;
+		const preflight = data.status.preflight;
 		return el(
 			'div',
 			{ className: 'post-shield-admin__stack' },
+			// Real URLs the last preflight found a BASED entry answering with a
+			// 404: not a root-mode problem, but the operator should know.
+			preflight && preflight.warnBlock > 0
+				? el(
+						Notice,
+						{ status: 'warning', isDismissible: false },
+						el(
+							'p',
+							null,
+							__(
+								'The last root preflight found real addresses that a post type shielded under a base answers with a 404. If they are real or redirect somewhere, add their slugs to that type\'s reserved slugs:',
+								'post-404-shield'
+							)
+						),
+						el(
+							'ul',
+							null,
+							preflight.sample.map((url) =>
+								el('li', { key: url }, el('code', null, url))
+							)
+						)
+					)
+				: null,
 			el(
 				SectionCard,
 				{

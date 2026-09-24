@@ -91,6 +91,22 @@ class PostShieldSyncController {
 	private array $deleting = [];
 
 	/**
+	 * Types whose parent map was taken before WPML's save-time sync, diffed
+	 * after it (handle_translations_moved()).
+	 *
+	 * @var array<string, true>
+	 */
+	private array $saving = [];
+
+	/**
+	 * Managed hierarchical posts being trashed right now (WPML trashes each
+	 * translation inside the outer trash when it deletes them together).
+	 *
+	 * @var array<int, true>
+	 */
+	private array $trashing = [];
+
+	/**
 	 * Media of a post being deleted, keyed by its ID (root mode, or a
 	 * full-path type shielded under a base).
 	 *
@@ -192,7 +208,8 @@ class PostShieldSyncController {
 		add_action( 'after_delete_post', $this->guarded( 'handle_after_delete' ), 10, 1 );
 		// WPML re-syncs translated parents on trash as well.
 		add_action( 'wp_trash_post', $this->guarded( 'handle_before_trash' ), 1, 1 ); // Before WPML's, which syncs on this hook.
-		add_action( 'trashed_post', $this->guarded( 'handle_trashed' ), 10, 0 );
+		add_action( 'trashed_post', $this->guarded( 'handle_trashed' ), 10, 1 );
+		add_action( 'save_post', $this->guarded( 'handle_before_wpml_save' ), 1, 1 );
 		add_action( 'save_post', $this->guarded( 'handle_translations_moved' ), 200, 1 );
 
 		// Every managed type, root or based: core stores the outgoing slug in
@@ -495,17 +512,27 @@ class PostShieldSyncController {
 		$post_type = get_post_type( $post_id );
 		if ( is_string( $post_type ) && $this->managed( $post_type ) && is_post_type_hierarchical( $post_type ) ) {
 			$this->snapshot_type( $post_type );
+			$this->trashing[ $post_id ] = true;
 		}
 	}
 
 	/**
-	 * A post was trashed: append every post WPML moved meanwhile.
+	 * A post was trashed: append every post WPML moved meanwhile — once, when
+	 * the outermost trash ends (WPML trashes translations inside it).
+	 *
+	 * @param int $post_id Trashed post ID.
 	 *
 	 * @return void
 	 */
-	public function handle_trashed(): void {
-		$this->family = [];
-		$this->apply_all_type_moves();
+	public function handle_trashed( int $post_id ): void {
+		if ( ! isset( $this->trashing[ $post_id ] ) ) {
+			return;
+		}
+		unset( $this->trashing[ $post_id ] );
+		if ( [] === $this->trashing ) {
+			$this->family = [];
+			$this->apply_all_type_moves();
+		}
 	}
 
 	/**
@@ -660,6 +687,42 @@ class PostShieldSyncController {
 	}
 
 	/**
+	 * A managed hierarchical post is being saved and WPML syncs translated
+	 * parents on save (at save_post 100, type-wide, with direct queries):
+	 * take the type's parent map first (see snapshot_type()).
+	 *
+	 * @param int $post_id Post being saved.
+	 *
+	 * @return void
+	 */
+	public function handle_before_wpml_save( int $post_id ): void {
+		$post_type = get_post_type( $post_id );
+		if ( is_string( $post_type ) && $this->managed( $post_type ) && is_post_type_hierarchical( $post_type ) && $this->wpml_syncs_parents( $post_type ) ) {
+			$this->snapshot_type( $post_type );
+			$this->saving[ $post_type ] = true;
+		}
+	}
+
+	/**
+	 * Whether WPML re-parents this type's translations on save: its "sync
+	 * page parent" setting, as WPML's own filter says for the type. A site
+	 * that switches WPML's save-time sync off another way says so through
+	 * `post_shield_wpml_syncs_parents` (the diff is then skipped).
+	 *
+	 * @param string $post_type Post type.
+	 *
+	 * @return bool
+	 */
+	private function wpml_syncs_parents( string $post_type ): bool {
+		global $sitepress;
+		if ( ! defined( 'ICL_SITEPRESS_VERSION' ) || ! is_object( $sitepress ) || ! method_exists( $sitepress, 'get_setting' ) ) {
+			return false;
+		}
+		$sync = (bool) apply_filters( 'wpml_sync_parent_for_post_type', (bool) $sitepress->get_setting( 'sync_page_parent' ), $post_type );
+		return (bool) apply_filters( 'post_shield_wpml_syncs_parents', $sync, $post_type );
+	}
+
+	/**
 	 * WPML keeps translations' parents in sync: when an original moves, it
 	 * re-parents every translation with a direct query after save_post
 	 * priority 100. Append each translation's new address (and subtree) too.
@@ -669,6 +732,14 @@ class PostShieldSyncController {
 	 * @return void
 	 */
 	public function handle_translations_moved( int $post_id ): void {
+		// WPML's parent sync on save fixes EVERY out-of-step translation of
+		// the type, not just this post's: diff the parent map taken before it.
+		$saved_type = get_post_type( $post_id );
+		if ( is_string( $saved_type ) && isset( $this->saving[ $saved_type ] ) ) {
+			unset( $this->saving[ $saved_type ] );
+			$this->family = [];
+			$this->apply_type_moves( $saved_type );
+		}
 		// WPML syncs parents, not slugs: only a re-parent moves translations.
 		if ( ! isset( $this->reparented[ $post_id ] ) ) {
 			return;
@@ -1127,7 +1198,12 @@ class PostShieldSyncController {
 		if ( ! $live ) {
 			return;
 		}
-		$slug = get_post_field( 'post_name', $post_id );
+		// Slug mode lists a URL's first segment: for a hierarchical type,
+		// the post's top-level ancestor's slug, which is what its URL starts
+		// with (the rebuild writes the same line).
+		$slug = is_post_type_hierarchical( $post_type )
+			? explode( '/', (string) ( $this->builder->uris_for( $post_type, [ $post_id ] )[ $post_id ] ?? '' ) )[0]
+			: get_post_field( 'post_name', $post_id );
 		if ( is_string( $slug ) && '' !== $slug ) {
 			$this->append_lines( $post_type, [ $slug ] );
 			$this->purge_page_cache( $post_id );

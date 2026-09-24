@@ -462,12 +462,13 @@ class PostShieldAdminController {
 		$this->require_capability();
 
 		$current = $this->current_document();
-		if ( null !== $current ) {
+		$kept    = null === $current ? [] : array_filter( (array) ( $current['entries'] ?? [] ), static fn( $entry ) => is_array( $entry ) && true === ( $entry['root'] ?? false ) && false === ( $entry['enabled'] ?? true ) );
+		// Nothing kept to discard (the notice outlived its settings): no write,
+		// which would only rotate an unchanged revision.
+		if ( null !== $current && [] !== $kept ) {
 			$expect = $this->store->revision_of( $current );
-			foreach ( (array) ( $current['entries'] ?? [] ) as $key => $entry ) {
-				if ( is_array( $entry ) && true === ( $entry['root'] ?? false ) && false === ( $entry['enabled'] ?? true ) ) {
-					unset( $current['entries'][ $key ] );
-				}
+			foreach ( array_keys( $kept ) as $key ) {
+				unset( $current['entries'][ $key ] );
 			}
 			$result = $this->store->write(
 				$current,
@@ -830,8 +831,11 @@ class PostShieldAdminController {
 	 * @return array<string, mixed>
 	 */
 	private function based_entry_from_row( string $cpt, array $row, bool $enabled, array $entry_bases, array $statuses, ?array $old_entry ): array {
-		$has_old   = null !== $old_entry;
-		$old_entry = $old_entry ?? [];
+		// A root entry's full-path matching is root mode's, not a choice for
+		// the type under a base: a row coming back from root mode starts as a
+		// new row (slug, with the new-row depth rule).
+		$has_old   = null !== $old_entry && true !== ( $old_entry['root'] ?? false );
+		$old_entry = $has_old ? (array) $old_entry : [];
 		$match_raw = array_key_exists( 'match', $row ) ? (string) $row['match'] : (string) ( $old_entry['match'] ?? 'slug' );
 		$match     = 'full-path' === $match_raw ? 'full-path' : 'slug';
 
@@ -1505,6 +1509,7 @@ class PostShieldAdminController {
 					'checked'    => (int) ( $preflight['checked'] ?? 0 ),
 					'wouldBlock' => (int) ( $preflight['would_block'] ?? 0 ),
 					'warnBlock'  => (int) ( $preflight['warn_block'] ?? 0 ),
+					'sample'     => array_values( array_map( 'strval', array_slice( (array) ( $preflight['warn_sample'] ?? [] ), 0, 10 ) ) ),
 				]
 				: null,
 		];
@@ -1732,6 +1737,10 @@ class PostShieldAdminController {
 		// save into a root-mode switch-on. Saving removes it; switching it on
 		// shields the type at the root, with Pages.
 		$root_moved = $is_root_dweller && null !== $stored && true !== ( $stored['root'] ?? false );
+		// The reverse: a root entry for a type that now has a base. Its
+		// full-path matching was root mode's; the row offers what a new row
+		// would (slug, the new-row depth rule), not the root entry's.
+		$from_root = ! $is_root_dweller && null !== $stored && true === ( $stored['root'] ?? false ) && $entry === $stored;
 		// Root settings kept while root matching is switched off (automatically,
 		// or by Disable shield).
 		$root_kept = $is_root_dweller && null !== $stored && true === ( $stored['root'] ?? false )
@@ -1760,19 +1769,19 @@ class PostShieldAdminController {
 			'hasEntry'        => null !== $stored,
 			'enabled'         => null !== $entry && ! ( $root_moved && $entry === $stored ) && ( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] ),
 			'urlBase'         => isset( $entry['url_base'] ) && is_array( $entry['url_base'] ) ? implode( "\n", $entry['url_base'] ) : ( $removing ? '' : $default_base ),
-			'match'           => (string) ( $entry['match'] ?? 'slug' ),
+			'match'           => $from_root ? 'slug' : (string) ( $entry['match'] ?? 'slug' ),
 			// Matching is offered for hierarchical types, and for any type already
 			// stored as full-path (so it can be switched back). Fixed per page load:
 			// the control must not vanish mid-edit when the select changes.
-			'offerMatch'      => null === $type_object || (bool) $type_object->hierarchical || 'full-path' === ( $stored['match'] ?? 'slug' ),
+			'offerMatch'      => null === $type_object || (bool) $type_object->hierarchical || ( 'full-path' === ( $stored['match'] ?? 'slug' ) && ! $from_root ),
 			'allowPagination' => null === $entry || ! isset( $entry['allow_pagination'] ) || false !== $entry['allow_pagination'],
 			// A rejected save that switched a slug entry to full-path carries no
 			// depth rule (full-path has none): show the stored one, so switching
 			// back in the draft restores it rather than saving "unlimited".
-			'depthAllowed'    => isset( $entry['depth_allowed'] ) && null !== $entry['depth_allowed']
+			'depthAllowed'    => $from_root ? '0' : ( isset( $entry['depth_allowed'] ) && null !== $entry['depth_allowed']
 				? (string) (int) $entry['depth_allowed']
-				: ( $depth_kept ? (string) (int) $stored['depth_allowed'] : ( null === $entry || $depth_new ? '0' : '' ) ),
-			'depthAction'     => (string) ( $depth_kept && ! isset( $entry['depth_action'] ) ? $stored['depth_action'] ?? 'passthrough' : ( $depth_new ? 'redirect' : ( $entry['depth_action'] ?? ( null === $entry ? 'redirect' : 'passthrough' ) ) ) ),
+				: ( $depth_kept ? (string) (int) $stored['depth_allowed'] : ( null === $entry || $depth_new ? '0' : '' ) ) ),
+			'depthAction'     => $from_root ? 'redirect' : (string) ( $depth_kept && ! isset( $entry['depth_action'] ) ? $stored['depth_action'] ?? 'passthrough' : ( $depth_new ? 'redirect' : ( $entry['depth_action'] ?? ( null === $entry ? 'redirect' : 'passthrough' ) ) ) ),
 			// Published unless the entry says otherwise — the loader's default.
 			// Other statuses are ticked on purpose: listing one lets anyone
 			// confirm its posts' slugs exist, and a site may hide them.

@@ -337,15 +337,7 @@ class RootPreflight {
 				continue;
 			}
 			$root_type                     = (string) ( $settings['post_type'] ?? $key );
-			$root_candidates[ $root_type ] = [
-				'type'             => $root_type,
-				'allow_pagination' => ! isset( $settings['allow_pagination'] ) || false !== $settings['allow_pagination'],
-				// An empty list is measured ARMED: the loader leaves root
-				// matching inert while one is, but the first post appended arms
-				// it for the whole site, and no preflight runs then.
-				'body'             => self::armed_body( $bodies[ $root_type ] ?? '' ),
-				'set'              => $sets[ $root_type ] ?? [],
-			];
+			$root_candidates[ $root_type ] = self::root_candidate( $root_type, $settings, $bodies[ $root_type ] ?? '', $sets[ $root_type ] ?? [] );
 		}
 		if ( isset( $root_candidates['page'] ) ) {
 			$root_candidates = [ 'page' => $root_candidates['page'] ] + $root_candidates;
@@ -700,6 +692,28 @@ class RootPreflight {
 			return ''; // The loader treats an empty list as fail-open inert; '' mirrors that.
 		}
 		return "<?php exit;\n" . implode( "\n", $lines ) . "\n";
+	}
+
+	/**
+	 * One root type as the walk's matcher candidate. An empty list is
+	 * measured ARMED: the loader leaves root matching inert while one is, but
+	 * the first post appended arms it for the whole site, and no preflight
+	 * runs then.
+	 *
+	 * @param string               $type     Root post type.
+	 * @param array<string, mixed> $settings Its entry.
+	 * @param string               $body     Its candidate list body ('' when empty).
+	 * @param array<string, bool>  $set      Its lines as a set.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private static function root_candidate( string $type, array $settings, string $body, array $set ): array {
+		return [
+			'type'             => $type,
+			'allow_pagination' => ! isset( $settings['allow_pagination'] ) || false !== $settings['allow_pagination'],
+			'body'             => self::armed_body( $body ),
+			'set'              => $set,
+		];
 	}
 
 	/**
