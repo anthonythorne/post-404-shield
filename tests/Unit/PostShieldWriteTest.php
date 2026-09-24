@@ -138,6 +138,9 @@ class PostShieldWriteTest extends TestCase {
 
 		$this->dir = sys_get_temp_dir() . '/postshield-write-' . getmypid() . '-' . uniqid();
 		mkdir( $this->dir );
+		// What the store logs (a failed pass, a switch-off) is expected here.
+		ini_set( 'error_log', $this->dir . '/php-error.log' ); // phpcs:ignore WordPress.PHP.IniSet.Risky -- test process only.
+		$GLOBALS['post_shield_test_log'] = $this->dir . '/php-error.log';
 		$GLOBALS['post_shield_test_dir']     = $this->dir;
 		$GLOBALS['post_shield_test_options'] = [
 			'permalink_structure'                           => $structure,
@@ -209,8 +212,170 @@ class PostShieldWriteTest extends TestCase {
 
 		$this->assertTrue( $result['ok'], implode( ' | ', $result['errors'] ) );
 		$this->assertSame( [ 'publish' ], $store->artifact()['entries']['story']['post_status'] );
-		$rebuilt = array_merge( ...array_map( static fn( array $call ): array => (array) $call[0], $calls->getArrayCopy() ) );
-		$this->assertContains( 'story', $rebuilt, 'The narrowed list is rebuilt.' );
+		$this->assertSame( [ 'publish' ], self::last_statuses_rebuilt( $calls, 'story' ), 'The narrowed list is rebuilt with the narrowed statuses.' );
+	}
+
+	/**
+	 * A save that drops one status and adds another: the list ends up with
+	 * exactly the candidate's statuses (the union was only for before the
+	 * swap).
+	 *
+	 * @return void
+	 */
+	public function test_a_drop_and_an_add_end_with_the_candidates_statuses(): void {
+		[ $store, $calls ] = $this->store( self::doc( [ 'story' => self::story( [ 'publish', 'private' ] ) ] ) );
+
+		$result = $store->write( self::doc( [ 'story' => self::story( [ 'publish', 'zz-arch' ] ) ] ), 'test', [ 'allow_status_drop' => true ] );
+
+		$this->assertTrue( $result['ok'], implode( ' | ', $result['errors'] ) );
+		$this->assertSame( [ 'publish', 'zz-arch' ], self::last_statuses_rebuilt( $calls, 'story' ) );
+	}
+
+	/**
+	 * A post-swap pass that fails does not skip the other one.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_post_swap_pass_does_not_skip_the_other(): void {
+		$live              = self::doc(
+			[
+				'story'  => self::story( [ 'publish', 'private' ] ),
+				'camera' => [
+					'enabled'     => true,
+					'mode'        => 'allowlist',
+					'post_type'   => 'page',
+					'url_base'    => [ 'cameras' ],
+					'post_status' => [ 'publish' ],
+				],
+			]
+		);
+		[ $store ]         = $this->store( $live );
+		$calls             = new \ArrayObject();
+		$store->set_rebuild_handler(
+			static function ( ...$args ) use ( $calls ) {
+				$calls[] = $args;
+				// The first post-swap pass (the second call) fails.
+				if ( 2 === count( $calls ) ) {
+					throw new \RuntimeException( 'a list could not be written' );
+				}
+				return true;
+			}
+		);
+		$candidate                              = $live;
+		$candidate['entries']['camera']['match'] = 'full-path';
+		$candidate['entries']['story']          = self::story( [ 'publish' ] );
+
+		$result = $store->write( $candidate, 'test', [ 'allow_status_drop' => true ] );
+
+		$this->assertTrue( $result['ok'], implode( ' | ', $result['errors'] ) );
+		$this->assertSame( [ 'publish' ], self::last_statuses_rebuilt( $calls, 'story' ), 'The narrowing pass still ran.' );
+	}
+
+	/**
+	 * Posts off the site root: dropping a status from the Posts entry also
+	 * rebuilds root-extras, which lists those posts' old root slugs.
+	 *
+	 * @return void
+	 */
+	public function test_a_posts_status_drop_rebuilds_root_extras_once_posts_left_the_root(): void {
+		$live                   = self::doc(
+			[
+				'page' => [
+					'enabled'     => true,
+					'mode'        => 'allowlist',
+					'post_type'   => 'page',
+					'root'        => true,
+					'url_base'    => [],
+					'post_status' => [ 'publish' ],
+				],
+				'post' => [
+					'enabled'     => true,
+					'mode'        => 'allowlist',
+					'post_type'   => 'post',
+					'url_base'    => [ 'blog' ],
+					'post_status' => [ 'publish', 'private' ],
+				],
+			]
+		);
+		$live['root_acknowledged'] = true;
+		$live['excluded_bases']    = [
+			'floor'           => [],
+			'derived'         => [],
+			'operator'        => [],
+			'endpoints'       => [],
+			'post_base'       => 'blog',
+			'posts_left_root' => true,
+		];
+		[ $store, $calls ]         = $this->store( $live, '/blog/%postname%/' );
+		$candidate                 = $live;
+		$candidate['entries']['post']['post_status'] = [ 'publish' ];
+
+		$result = $store->write(
+			$candidate,
+			'test',
+			[
+				'skip_root_preflight' => true,
+				'allow_status_drop'   => true,
+			]
+		);
+
+		$this->assertTrue( $result['ok'], implode( ' | ', $result['errors'] ) );
+		$after_swap = array_filter( $calls->getArrayCopy(), static fn( array $call ): bool => in_array( 'post', (array) $call[0], true ) && true === ( $call[2] ?? false ) );
+		$this->assertNotEmpty( $after_swap, 'Root-extras is rebuilt with the Posts list.' );
+	}
+
+	/**
+	 * Root mode still fits and its snapshot is current, but a real URL is
+	 * now blocked (a type came to live at the root): the daily check
+	 * switches root matching off.
+	 *
+	 * @return void
+	 */
+	public function test_the_daily_check_switches_root_off_over_a_newly_blocked_url(): void {
+		$root = static fn( string $type ): array => [
+			'enabled'     => true,
+			'mode'        => 'allowlist',
+			'post_type'   => $type,
+			'root'        => true,
+			'url_base'    => [],
+			'post_status' => [ 'publish' ],
+		];
+		$doc  = self::doc(
+			[
+				'page' => $root( 'page' ),
+				'post' => $root( 'post' ),
+			]
+		);
+		$doc['root_acknowledged'] = true;
+		[ $store ]                = $this->store( $doc );
+		// Save once, so the stored snapshot is current.
+		$this->assertTrue( $store->write( $doc, 'test' )['ok'] );
+		$GLOBALS['post_shield_test_options'][ \Post404Shield\Library\ConfigStore::OPTION ] = $store->artifact();
+
+		$store->set_preflight_handler( static fn(): array => [ 'would_block' => [] ] );
+		$this->assertFalse( $store->revalidate_root( 'test' ), 'Nothing blocked: root stays on.' );
+
+		$store->set_preflight_handler( static fn(): array => [ 'would_block' => [ '/clothing/t-shirt/' ] ] );
+		$this->assertTrue( $store->revalidate_root( 'test' ), 'A real URL blocked: root goes off.' );
+		$this->assertFalse( $store->artifact()['entries']['page']['enabled'] );
+	}
+
+	/**
+	 * The statuses the last rebuild of a type received.
+	 *
+	 * @param \ArrayObject<int, array<int, mixed>> $calls Handler calls.
+	 * @param string                               $type  Type.
+	 *
+	 * @return string[]|null
+	 */
+	private static function last_statuses_rebuilt( \ArrayObject $calls, string $type ): ?array {
+		$last = null;
+		foreach ( $calls as $call ) {
+			if ( in_array( $type, (array) $call[0], true ) ) {
+				$last = $call[1][ $type ]['post_status'] ?? null;
+			}
+		}
+		return $last;
 	}
 
 	/**

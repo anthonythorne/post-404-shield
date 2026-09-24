@@ -1005,8 +1005,10 @@ class AllowlistBuilder {
 	 * rebuild runs.
 	 *
 	 * Deliberately a pure append (`FILE_APPEND`, under the list directory's
-	 * lock), NOT a read-modify-write: there is no lost-update race across
-	 * concurrent publishes (nothing is rewritten). The only cost is a possible duplicate line — harmless, since the
+	 * lock), NOT a read-modify-write: while the lock is held there is no
+	 * lost-update race across concurrent publishes (nothing is rewritten; on
+	 * network storage an append after the lock gave up is best effort, and an
+	 * append always starts on a fresh line). The only cost is a possible duplicate line — harmless, since the
 	 * loader still matches it, and the next daily rebuild rewrites the file
 	 * deduped and compacted. No-op if the guarded file does not exist yet (the
 	 * rebuild creates it) or the slug is malformed. Used for publishes and renames;
@@ -1034,6 +1036,24 @@ class AllowlistBuilder {
 	 */
 	public function append_slugs( string $post_type, array $slugs ): int {
 		return $this->append_slugs_to_file( $this->get_allowlist_file( $post_type ), $slugs, $this->match_for( $post_type ) );
+	}
+
+	/**
+	 * Whether a list file ends in a newline (an unreadable or empty one
+	 * counts as ending in one: there is nothing to fuse with).
+	 *
+	 * @param string $file Absolute path.
+	 *
+	 * @return bool
+	 */
+	private static function ends_with_newline( string $file ): bool {
+		$handle = fopen( $file, 'rb' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- one byte of a list under uploads/post-404-shield.
+		if ( false === $handle ) {
+			return true;
+		}
+		$last = 0 === fseek( $handle, -1, SEEK_END ) ? fread( $handle, 1 ) : "\n"; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
+		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		return "\n" === $last || false === $last || '' === $last;
 	}
 
 	/**
@@ -1106,11 +1126,15 @@ class AllowlistBuilder {
 			if ( [] === $lines ) {
 				return 0;
 			}
-			// The file always ends in "\n", so appending "a\nb\n" keeps every slug
-			// newline-wrapped for the loader's "\n{slug}\n" match. No LOCK_EX:
-			// the directory lock already orders writers, and on storage that
-			// cannot flock() at all, a LOCK_EX write fails without writing.
-			$written = file_put_contents( $file, implode( "\n", $lines ) . "\n", FILE_APPEND ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_file_put_contents
+			// Every line is newline-wrapped for the loader's "\n{slug}\n" match.
+			// A write cut short (a full disk, a killed worker) can leave the
+			// file without its final "\n": start on a fresh line then, or the
+			// next slug fuses with the fragment and neither matches. No
+			// LOCK_EX: the directory lock already orders writers, and on
+			// storage that cannot flock() at all, a LOCK_EX write fails
+			// without writing.
+			$lead    = self::ends_with_newline( $file ) ? '' : "\n";
+			$written = file_put_contents( $file, $lead . implode( "\n", $lines ) . "\n", FILE_APPEND ); // phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_file_put_contents
 			if ( false === $written ) {
 				error_log( '[post-404-shield] append: could not write to ' . $file . ' — ' . count( $lines ) . ' line(s) wait for the next rebuild.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 				return 0;

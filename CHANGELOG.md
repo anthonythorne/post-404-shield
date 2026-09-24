@@ -364,6 +364,13 @@ Moved out of the sites that used it into its own repository.
 - Tests: whole saves through `write()` (a dropped status, posts leaving the root,
   kept-off root rows), the loader's guards, old nested addresses, a flat post
   with a parent, the language-folder check, the shared builder's wiring.
+- Root mode: the daily check and the route follow-up replay the root preflight
+  on the live config and switch root matching off over a newly blocked real URL
+  (a type that came to live at the root). Once posts have left the root, a
+  change to the Posts entry's statuses rebuilds root-extras too.
+- The two post-swap rebuild passes run separately; an instant append starts on
+  a fresh line after a write cut short; the restore confirm screen shows the
+  errors a restore would be refused over and disables the button.
 
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing

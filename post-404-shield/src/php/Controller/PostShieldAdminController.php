@@ -2103,6 +2103,17 @@ class PostShieldAdminController {
 					$warnings[] = sprintf( __( '%1$s: the type’s detected rewrite slug "%2$s" is not among the revision’s bases (%3$s) — check it predates a permalink change.', 'post-404-shield' ), $this->store->entry_label( (string) $key, (array) $entry ), $slug, implode( ', ', (array) ( $entry['url_base'] ?? [] ) ) );
 				}
 			}
+			// Errors the restore would be refused over, said before the button
+			// rather than after it (a status whose plugin is now off, a base a
+			// block now covers, a permalink structure root mode no longer fits).
+			$restore_errors = array_map( 'strval', (array) $validated['errors'] );
+			if ( [] !== $restore_errors ) {
+				echo '<div class="notice notice-error"><p>' . esc_html__( 'This revision cannot be restored as it is — the save would be refused:', 'post-404-shield' ) . '</p><ul>';
+				foreach ( $restore_errors as $restore_error ) {
+					echo '<li>' . esc_html( $restore_error ) . '</li>';
+				}
+				echo '</ul></div>';
+			}
 			if ( [] !== $warnings ) {
 				echo '<div class="post-shield-admin__notices">';
 				foreach ( $warnings as $warning ) {
@@ -2186,7 +2197,7 @@ class PostShieldAdminController {
 					</div>
 				<?php endif; ?>
 				<p class="post-shield-admin__actions">
-					<button type="submit" class="button button-primary"><?php esc_html_e( 'Restore this revision', 'post-404-shield' ); ?></button>
+					<button type="submit" class="button button-primary"<?php disabled( [] !== $restore_errors ); ?>><?php esc_html_e( 'Restore this revision', 'post-404-shield' ); ?></button>
 					<a class="button" href="<?php echo esc_url( $back ); ?>"><?php esc_html_e( 'Cancel', 'post-404-shield' ); ?></a>
 				</p>
 			</form>

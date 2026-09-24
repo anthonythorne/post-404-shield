@@ -55,6 +55,24 @@ class PostShieldAppendLockTest extends TestCase {
 	}
 
 	/**
+	 * A write cut short left the list without its final newline: the next
+	 * append starts on a fresh line, so neither slug fuses with the fragment.
+	 *
+	 * @return void
+	 */
+	public function test_an_append_after_a_cut_write_starts_on_a_fresh_line(): void {
+		$file = $this->dir . '/allowlist.php';
+		file_put_contents( $file, "<?php exit;\nalpha\nbet" );
+
+		$this->assertSame( 1, ( new AllowlistBuilder( [] ) )->append_slugs_to_file( $file, [ 'gamma' ] ) );
+
+		$lines = explode( "\n", (string) file_get_contents( $file ) );
+		$this->assertContains( 'gamma', $lines, 'The new slug is a line of its own.' );
+		$this->assertContains( 'alpha', $lines );
+		$this->assertStringEndsWith( "\n", (string) file_get_contents( $file ) );
+	}
+
+	/**
 	 * An append during a rebuild waits for it, and every line lands in the
 	 * rebuilt file — the one only the old file listed too.
 	 *

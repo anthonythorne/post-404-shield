@@ -67,7 +67,13 @@ review; changing one is a design change, not a bug fix. Read
   the live and candidate statuses, and only while the save still holds its
   lock; the post-swap rebuild narrows them. A save refused after that leaves the
   union list until the nightly rebuild. **A status a save drops is rebuilt out
-  after the swap**, on every save path (settings, restore, CLI).
+  after the swap**, on every save path (settings, restore, CLI) — root-extras
+  too, when it lists former root posts in the Posts entry's statuses. The two
+  post-swap passes run separately, so a failed one never skips the other.
+- **An instant append always starts on a fresh line**, so a write cut short
+  (a full disk, a killed worker) never fuses two slugs.
+- **A restore that would be refused says so on its confirm screen**, and the
+  Restore button is disabled.
 - **List locks wait at most 20 s, then proceed**; appends during a root-extras
   stream skip the duplicate check, so duplicate lines until the nightly
   compaction are expected.
@@ -79,8 +85,11 @@ review; changing one is a design change, not a bug fix. Read
 
 - **Root mode ships inert** and engages only when its entries are switched on
   (Pages, and Posts too while posts have no base) and the acknowledgement is
-  confirmed. A permalink change that no longer
-  fits switches it off automatically (fail open), keeping its settings.
+  confirmed. A permalink change that no longer fits switches it off
+  automatically (fail open), keeping its settings. So does the daily check (and
+  the follow-up after a route change) when it replays the root preflight on
+  the live config and finds a real URL newly blocked — a type whose posts came
+  to live at the root, say. A failed read is no signal and switches nothing.
 - **Redirects the shield cannot place are warnings**: a regex with no leading
   literal, one not anchored at the start, or one under a blocked section.
 - **Operator excluded bases are entered without the language folder**: root

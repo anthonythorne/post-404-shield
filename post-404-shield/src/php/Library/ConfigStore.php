@@ -2477,26 +2477,25 @@ class ConfigStore {
 		}
 
 		// After the swap the save has landed: a rebuild that fails here keeps
-		// its previous list, which the nightly rebuild replaces.
-		try {
-			if ( null !== $this->rebuild_handler && [] !== $rebuild_after ) {
-				( $this->rebuild_handler )( $rebuild_after, $config['entries'], false, self::posts_left_root_of( $config ) );
-			}
-			// Once more for the types that became full-path, now that the artifact
-			// saying so is live: a rebuild started from the OLD artifact (the daily
-			// run, a queued job) could have replaced the pre-swap list with slug
-			// lines between that rebuild and the swap, and the builders' guard only
-			// knows the artifact that is live. From here on the guard refuses them.
-			// A save that switched root mode on rebuilds root-extras once more
-			// too: until the swap, the live artifact had root mode off, so the
-			// media, old slugs and private pages made meanwhile were not appended.
-			// So does a save after which posts no longer live at the root.
-			if ( null !== $this->rebuild_handler && ( [] !== $rebuild_before || $root_switching_on || $posts_leaving_root ) ) {
-				( $this->rebuild_handler )( $rebuild_before, $config['entries'], $root_switching_on || $posts_leaving_root, self::posts_left_root_of( $config ) );
-			}
-		} catch ( \Throwable $e ) {
-			error_log( '[post-404-shield] post-save rebuild: ' . $e->getMessage() . '; the previous lists stay until the nightly rebuild.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-		}
+		// its previous list, which the nightly rebuild replaces. Each pass
+		// runs on its own, so a failed one cannot skip the other.
+		//
+		// First, once more for the types that became full-path, now that the
+		// artifact saying so is live: a rebuild started from the OLD artifact
+		// (the daily run, a queued job) could have replaced the pre-swap list
+		// with slug lines between that rebuild and the swap, and the builders'
+		// guard only knows the artifact that is live. From here on the guard
+		// refuses them. A save that switched root mode on rebuilds root-extras
+		// once more too: until the swap, the live artifact had root mode off,
+		// so the media, old slugs and private pages made meanwhile were not
+		// appended. So does a save after which posts no longer live at the root.
+		$this->post_swap_rebuild( $rebuild_before, $config, $root_switching_on || $posts_leaving_root, [] !== $rebuild_before || $root_switching_on || $posts_leaving_root );
+		// Then the lists that drop a status. Once posts have left the root,
+		// root-extras lists their slugs in the Posts entry's statuses, so a
+		// change to those (or the entry switched off) rebuilds it as well.
+		$former_posts_changed = self::posts_left_root_of( $config ) && $this->has_enabled_root_entries( $config['entries'] )
+			&& self::former_post_statuses( (array) $config['entries'] ) !== self::former_post_statuses( (array) ( $live_before['entries'] ?? [] ) );
+		$this->post_swap_rebuild( $rebuild_after, $config, $former_posts_changed, [] !== $rebuild_after || $former_posts_changed );
 
 		$this->record_warnings( $flags, $generated_by, $validated['warnings'] );
 		return [
@@ -3113,6 +3112,77 @@ class ConfigStore {
 	}
 
 	/**
+	 * One post-swap rebuild pass; a failure is logged, never fatal: the save
+	 * has landed and the nightly rebuild replaces the list.
+	 *
+	 * @param string[]             $types       Types to rebuild.
+	 * @param array<string, mixed> $config      The document now live.
+	 * @param bool                 $root_extras Rebuild root-extras too.
+	 * @param bool                 $run         Whether the pass is needed at all.
+	 *
+	 * @return void
+	 */
+	private function post_swap_rebuild( array $types, array $config, bool $root_extras, bool $run ): void {
+		if ( null === $this->rebuild_handler || ! $run ) {
+			return;
+		}
+		try {
+			( $this->rebuild_handler )( $types, $config['entries'], $root_extras, self::posts_left_root_of( $config ) );
+		} catch ( \Throwable $e ) {
+			error_log( '[post-404-shield] post-save rebuild: ' . $e->getMessage() . '; the previous lists stay until the nightly rebuild.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+		}
+	}
+
+	/**
+	 * The statuses root-extras lists former root posts in, as the builder
+	 * reads them (AllowlistBuilder::post_statuses_for( 'post' )): those of the
+	 * enabled Posts entries, else Published.
+	 *
+	 * @param array<mixed> $entries Config entries.
+	 *
+	 * @return string[] Sorted.
+	 */
+	private static function former_post_statuses( array $entries ): array {
+		$statuses = [];
+		foreach ( $entries as $key => $entry ) {
+			if ( is_array( $entry ) && 'post' === (string) ( $entry['post_type'] ?? $key )
+				&& ( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] ) && 'allowlist' === ( $entry['mode'] ?? 'allowlist' )
+			) {
+				$statuses = array_merge( $statuses, \Post404Shield\effective_statuses( $entry ) );
+			}
+		}
+		$statuses = [] === $statuses ? [ 'publish' ] : array_values( array_unique( $statuses ) );
+		sort( $statuses );
+		return $statuses;
+	}
+
+	/**
+	 * The root preflight replayed on the live config: the refusal a save
+	 * would get for the real URLs it now blocks (none accepted on an earlier
+	 * forced save), or [] when none — or when it cannot be measured (no
+	 * preflight here, a failed read), which is no signal to switch root
+	 * matching off on.
+	 *
+	 * @param array<string, mixed> $config The stored config.
+	 *
+	 * @return string[] Errors.
+	 */
+	private function live_root_would_blocks( array $config ): array {
+		if ( null === $this->preflight_handler ) {
+			return [];
+		}
+		$warnings = [];
+		$accepted = null;
+		try {
+			$refused = $this->root_preflight_gate( $config, [], $warnings, $accepted );
+		} catch ( \Throwable $e ) {
+			error_log( '[post-404-shield] root revalidation: the preflight could not run: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+			return [];
+		}
+		return null === $refused ? [] : array_map( 'strval', (array) $refused['errors'] );
+	}
+
+	/**
 	 * Whether a document records that posts have left the site root.
 	 *
 	 * @param array<string, mixed> $config Config document.
@@ -3605,31 +3675,41 @@ class ConfigStore {
 			// matching would 404 them. Re-saving re-snapshots and re-runs the
 			// root preflight; only if that fails does root matching go off.
 			if ( $candidate === $option && ! $this->snapshot_is_stale( $option ) ) {
-				return false;
+				// Nothing in the snapshot moved, but content can come to live
+				// at the root without a route or a setting changing (a type
+				// whose permalink starts with a category, a plugin that drops
+				// a type's base): replay the root preflight on what is live,
+				// and switch root matching off over a real URL it now blocks.
+				$errors = $this->live_root_would_blocks( $option );
+				if ( [] === $errors ) {
+					return false;
+				}
+			} else {
+				// A moved Posts base is kept passing by write() itself.
+				$label  = $candidate === $option ? 'auto: root snapshot refreshed — ' : 'auto: the Posts entry follows the permalink settings — ';
+				$result = $this->write(
+					$candidate,
+					$label . $reason,
+					[
+						'expect_revision' => $this->revision_of( $option ),
+						'fail_open'       => true,
+					]
+				);
+				// A save that landed meanwhile ran every check itself.
+				if ( $result['ok'] || ! empty( $result['stale'] ) ) {
+					return false;
+				}
+				// A busy lock or a failed read says nothing about the config:
+				// the follow-up or the next daily check tries again. Any other
+				// refusal (the root preflight, the coverage gate, a new error)
+				// leaves the live snapshot stale for good, so root matching
+				// goes off.
+				if ( ! empty( $result['retry'] ) ) {
+					error_log( '[post-404-shield] root revalidation (' . $reason . '): the refresh did not land, retried later: ' . implode( ' | ', $result['errors'] ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+					return false;
+				}
+				$errors = $result['errors'];
 			}
-			// A moved Posts base is kept passing by write() itself.
-			$label  = $candidate === $option ? 'auto: root snapshot refreshed — ' : 'auto: the Posts entry follows the permalink settings — ';
-			$result = $this->write(
-				$candidate,
-				$label . $reason,
-				[
-					'expect_revision' => $this->revision_of( $option ),
-					'fail_open'       => true,
-				]
-			);
-			// A save that landed meanwhile ran every check itself.
-			if ( $result['ok'] || ! empty( $result['stale'] ) ) {
-				return false;
-			}
-			// A busy lock or a failed read says nothing about the config: the
-			// follow-up or the next daily check tries again. Any other refusal
-			// (the root preflight, the coverage gate, a new error) leaves the
-			// live snapshot stale for good, so root matching goes off.
-			if ( ! empty( $result['retry'] ) ) {
-				error_log( '[post-404-shield] root revalidation (' . $reason . '): the refresh did not land, retried later: ' . implode( ' | ', $result['errors'] ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-				return false;
-			}
-			$errors = $result['errors'];
 		}
 
 		// Switch root matching off: a write that only disables entries, so it
