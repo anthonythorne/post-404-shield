@@ -324,23 +324,11 @@ define( 'POST_SHIELD_LOADED', true );
 	// a permissive CUSTOM locale pattern (e.g. a class range spanning `/`) could
 	// otherwise capture a traversal-shaped string.
 	$emit_404 = static function ( string $marker, string $locale, int $ttl = 0, ?int $edge_ttl = null ) use ( $allowlist_dir ): void {
-		// No purge reaches a browser's cached 404: never longer than a day.
-		$max_ttl  = defined( 'Post404Shield\\MAX_TTL' ) ? \Post404Shield\MAX_TTL : 86400;
-		$ttl      = min( $ttl, $max_ttl );
-		$edge_ttl = null === $edge_ttl ? null : min( $edge_ttl, $max_ttl );
 		if ( ! headers_sent() ) {
 			http_response_code( 404 );
 			header( 'Content-Type: text/html; charset=UTF-8' );
-			if ( $ttl > 0 ) {
-				// Origin (a shared cache reading s-maxage, not CDN-Cache-Control)
-				// always caches for $ttl; the browser + CDN follow $edge_ttl if given.
-				$public_ttl = null !== $edge_ttl ? $edge_ttl : $ttl;
-				header( 'Cache-Control: public, max-age=' . $public_ttl . ', s-maxage=' . $ttl );
-				if ( null !== $edge_ttl ) {
-					header( $edge_ttl > 0 ? 'CDN-Cache-Control: max-age=' . $edge_ttl : 'CDN-Cache-Control: no-store' );
-				}
-			} else {
-				header( 'Cache-Control: no-store, max-age=0' );
+			foreach ( \Post404Shield\shield_404_cache_headers( $ttl, $edge_ttl ) as $cache_header ) {
+				header( $cache_header );
 			}
 			header( 'X-Robots-Tag: noindex, nofollow' );
 			header( 'X-Post-Shield: ' . $marker );
@@ -476,7 +464,7 @@ define( 'POST_SHIELD_LOADED', true );
 					header( 'X-Post-Shield: redirect-deep-path' );
 					// Cached briefly, like a publishable 404, rather than for as
 					// long as a cache's heuristics allow a bare 301.
-					header( 'Cache-Control: public, max-age=' . min( $entry_ttl ?? $publishable_ttl, defined( 'Post404Shield\\MAX_TTL' ) ? \Post404Shield\MAX_TTL : 86400 ) );
+					header( \Post404Shield\shield_redirect_cache_header( $entry_ttl ?? $publishable_ttl ) );
 					header( 'Location: ' . $decision['location'], true, 301 );
 				}
 				exit;
@@ -608,11 +596,9 @@ define( 'POST_SHIELD_LOADED', true );
 	}
 
 	if ( 'blocked' === $decision['outcome'] ) {
-		// TTL overrides come from the FIRST root entry (`page` — a blocked root
-		// URL has no single owning type; documented in HOW-IT-WORKS).
-		$first_settings = reset( $root_entries );
-		$root_ttl       = isset( $first_settings['cache_ttl'] ) ? max( 0, (int) $first_settings['cache_ttl'] ) : null;
-		$root_edge_ttl  = isset( $first_settings['edge_ttl'] ) ? max( 0, (int) $first_settings['edge_ttl'] ) : null;
+		// TTL overrides come from the Pages entry (a blocked root URL has no
+		// single owning type; documented in HOW-IT-WORKS).
+		[ $root_ttl, $root_edge_ttl ] = \Post404Shield\root_404_ttls( $root_entries );
 		$nr_tag( 'blocked-unknown-slug', $decision['type'] );
 		$emit_404( 'blocked-unknown-slug', $decision['locale'], $root_ttl ?? $publishable_ttl, $root_edge_ttl ?? $publishable_edge_ttl );
 	}

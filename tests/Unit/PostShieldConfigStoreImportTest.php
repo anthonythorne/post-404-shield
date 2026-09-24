@@ -15,6 +15,7 @@ namespace Post404Shield\Tests;
 use PHPUnit\Framework\TestCase;
 use Post404Shield\Library\ConfigStore;
 
+require_once __DIR__ . '/../../post-404-shield/src/php/Function/ConfigReader.php';
 require_once __DIR__ . '/../../post-404-shield/src/php/Library/ConfigStore.php';
 
 /**
@@ -191,6 +192,7 @@ class PostShieldConfigStoreImportTest extends TestCase {
 			5 => '9c9ff4bbfaebc567185879c94028faf9', // Round 7: an optional separator not end-anchored is a prefix.
 			6 => '3618dea9c8694af6e1f668175dcf2e2c', // Round 8: a zero-or-more brace quantifier on the separator.
 			7 => '7cc01b5eff7c64768b3970df0702259d', // Round 9: a locale group whose every branch carries its own slash.
+			8 => '38904bbff31f6ad6a1d282563b743f6a', // Round 15: a plain source is lower-cased before its locale is stripped.
 		];
 		$pattern = '[a-z]{2}-[a-z]{2}|global';
 		$table   = [
@@ -230,11 +232,23 @@ class PostShieldConfigStoreImportTest extends TestCase {
 			[ '^/global/news/old-post/{0,}$', true, [ 'news/old-post' ] ],
 			// Version 7: a locale group whose every branch carries its own slash.
 			[ '^(?:[a-z]{2}-[a-z]{2}/|global/)?products/(cameras|lenses)/x-t3/?$', true, [ 'products/cameras/x-t3', 'products/lenses/x-t3' ] ],
+			// Version 8: a plain source is lower-cased before its locale is stripped.
+			[ '/Global/stories/old-story/', false, [ 'stories/old-story' ] ],
+			[ '/EN-US/products/cameras/old-model', false, [ 'products/cameras/old-model' ] ],
 		];
+		$as_read = new \ReflectionMethod( ConfigStore::class, 'source_pattern' );
+		$as_read->setAccessible( true );
 		$out = [];
 		foreach ( $table as [ $source, $regex, $expected ] ) {
-			$got = [];
-			foreach ( \Post404Shield\redirect_source_variants( $source, $regex, $pattern ) as $variant ) {
+			$got     = [];
+			$pattern_in = $as_read->invoke(
+				null,
+				[
+					'pattern' => $source,
+					'regex'   => $regex,
+				]
+			);
+			foreach ( \Post404Shield\redirect_source_variants( $pattern_in, $regex, $pattern ) as $variant ) {
 				$got[] = \Post404Shield\redirect_pattern_base( $variant, $regex );
 			}
 			$this->assertSame( $expected, $got, $source );

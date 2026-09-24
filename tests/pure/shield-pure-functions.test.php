@@ -622,6 +622,33 @@ check( true, Post404Shield\generator_needed( [ 'REQUEST_URI' => '/x/' ], false, 
 check( true, Post404Shield\generator_needed( [ 'REQUEST_URI' => '/xmlrpc.php' ], false, false, false, true, 'wp-json' ), 'generator: XML-RPC loads it' );
 check( true, Post404Shield\generator_needed( [ 'REQUEST_URI' => '/api/v1/x?_method=PUT' ], false, false, false, false, 'api' ), 'generator: a custom REST prefix is honoured' );
 
+// ── Cache headers: what a shield 404 or 301 tells the origin, the CDN and the browser ──
+check( [ 'Cache-Control: no-store, max-age=0' ], Post404Shield\shield_404_cache_headers( 0, 3600 ), 'cache: 0 sends no-store, whatever the edge time' );
+check( [ 'Cache-Control: public, max-age=600, s-maxage=600' ], Post404Shield\shield_404_cache_headers( 600 ), 'cache: without an edge time, one time for all' );
+check( [ 'Cache-Control: public, max-age=60, s-maxage=600', 'CDN-Cache-Control: max-age=60' ], Post404Shield\shield_404_cache_headers( 600, 60 ), 'cache: the edge time caps the browser and the CDN, the origin keeps its own' );
+check( [ 'Cache-Control: public, max-age=0, s-maxage=600', 'CDN-Cache-Control: no-store' ], Post404Shield\shield_404_cache_headers( 600, 0 ), 'cache: edge time 0 keeps it out of the CDN and the browser' );
+check( [ 'Cache-Control: public, max-age=86400, s-maxage=86400', 'CDN-Cache-Control: max-age=86400' ], Post404Shield\shield_404_cache_headers( 604800, 604800 ), 'cache: never longer than a day (no purge reaches a browser)' );
+check( 'Cache-Control: public, max-age=86400', Post404Shield\shield_redirect_cache_header( 604800 ), 'cache: a deep-path 301 is capped too' );
+$root_ttl_entries = [
+	'post' => [
+		'cache_ttl' => 5,
+		'edge_ttl'  => 5,
+	],
+	'page' => [
+		'cache_ttl' => 60,
+		'edge_ttl'  => 3600,
+	],
+];
+check( [ 60, 3600 ], Post404Shield\root_404_ttls( $root_ttl_entries ), 'cache: a blocked root URL takes the Pages entry\'s times, whatever the order' );
+check( [ 5, 5 ], Post404Shield\root_404_ttls( [ 'post' => $root_ttl_entries['post'] ] ), 'cache: without Pages, the first root entry\'s' );
+check( [ null, null ], Post404Shield\root_404_ttls( [ 'page' => [] ] ), 'cache: blank times fall back to the defaults' );
+
+// ── An entry's statuses: one reading for every reader ──
+check( [ 'publish' ], Post404Shield\effective_statuses( [] ), 'statuses: none set lists Published' );
+check( [ 'publish' ], Post404Shield\effective_statuses( [ 'post_status' => [] ] ), 'statuses: an empty list lists Published' );
+check( [ 'private' ], Post404Shield\effective_statuses( [ 'post_status' => [ 'private' ] ] ), 'statuses: a list is kept' );
+check( [ 'x' ], Post404Shield\effective_statuses( [ 'post_status' => [ null, 'x', '' ] ] ), 'statuses: non-names are dropped' );
+
 // --------------------------------------------------------------------------------
 
 echo $failures > 0

@@ -1740,7 +1740,11 @@ class PostShieldAdminController {
 		// The reverse: a root entry for a type that now has a base. Its
 		// full-path matching was root mode's; the row offers what a new row
 		// would (slug, the new-row depth rule), not the root entry's.
-		$from_root = ! $is_root_dweller && null !== $stored && true === ( $stored['root'] ?? false ) && $entry === $stored;
+		// Whether the row comes from root mode decides what it offers, in the
+		// draft of a refused save too; its values are the root entry's only
+		// while the row shows the stored entry.
+		$comes_from_root = ! $is_root_dweller && null !== $stored && true === ( $stored['root'] ?? false );
+		$from_root       = $comes_from_root && $entry === $stored;
 		// Root settings kept while root matching is switched off (automatically,
 		// or by Disable shield).
 		$root_kept = $is_root_dweller && null !== $stored && true === ( $stored['root'] ?? false )
@@ -1773,7 +1777,7 @@ class PostShieldAdminController {
 			// Matching is offered for hierarchical types, and for any type already
 			// stored as full-path (so it can be switched back). Fixed per page load:
 			// the control must not vanish mid-edit when the select changes.
-			'offerMatch'      => null === $type_object || (bool) $type_object->hierarchical || ( 'full-path' === ( $stored['match'] ?? 'slug' ) && ! $from_root ),
+			'offerMatch'      => null === $type_object || (bool) $type_object->hierarchical || ( 'full-path' === ( $stored['match'] ?? 'slug' ) && ! $comes_from_root ),
 			'allowPagination' => null === $entry || ! isset( $entry['allow_pagination'] ) || false !== $entry['allow_pagination'],
 			// A rejected save that switched a slug entry to full-path carries no
 			// depth rule (full-path has none): show the stored one, so switching

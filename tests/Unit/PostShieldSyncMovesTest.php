@@ -233,6 +233,37 @@ class PostShieldSyncMovesTest extends TestCase {
 	}
 
 	/**
+	 * A long-running process (a CLI migration) saves many posts while other
+	 * requests change the table: each save starts from the table as it is,
+	 * not from the parent map an earlier save read, and a post moved in one
+	 * save is not "moved" in the next.
+	 *
+	 * @return void
+	 */
+	public function test_each_save_reads_the_table_afresh(): void {
+		$GLOBALS['post_shield_test_nodes'] = [
+			1 => [ 'd-one', 0, 'draft' ],
+			2 => [ 'd-two', 0, 'draft' ],
+			3 => [ 'spec', 1, 'publish' ],
+		];
+		[ $sync, $builder ] = $this->controller();
+		$moved              = new \ReflectionProperty( $sync, 'moved' );
+		$moved->setAccessible( true );
+
+		$moved->setValue( $sync, [ 1 => true ] );
+		self::fire( 'save_post', 10, 1 );
+		self::fire( 'wp_after_insert_post', PHP_INT_MAX, 1 );
+		$this->assertSame( [], $moved->getValue( $sync ), 'The move is over with its save.' );
+
+		// Another request publishes a child under the other draft parent.
+		$GLOBALS['post_shield_test_nodes'][4] = [ 'spec-2', 2, 'publish' ];
+		$moved->setValue( $sync, [ 2 => true ] );
+		self::fire( 'save_post', 10, 2 );
+
+		$this->assertSame( [ 'd-one', 'd-two' ], $builder->appended['photographer'] ?? [] );
+	}
+
+	/**
 	 * A draft parent with no live child lists nothing.
 	 *
 	 * @return void

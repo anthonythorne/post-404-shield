@@ -481,12 +481,7 @@ class AllowlistBuilder {
 			$post_type = (string) ( $settings['post_type'] ?? $key );
 			// Each entry's own default, as every other reader has it: one that
 			// names no status lists Published, even beside one that names Private.
-			$statuses = array_values(
-				array_filter( (array) ( $settings['post_status'] ?? [] ), 'is_string' )
-			);
-			if ( [] === $statuses ) {
-				$statuses = [ 'publish' ];
-			}
+			$statuses = \Post404Shield\effective_statuses( $settings );
 
 			$map[ $post_type ] = array_values( array_unique( array_merge( $map[ $post_type ] ?? [], $statuses ) ) );
 		}

@@ -333,6 +333,22 @@ Moved out of the sites that used it into its own repository.
 - Tests: the save-time WPML diff, a draft parent's rename, the page-view route
   hooks, the moved-base paths, posts leaving the root, the full-path first
   segments.
+- The loader's cache headers come from pure functions (`shield_404_cache_headers()`,
+  `shield_redirect_cache_header()`, `root_404_ttls()`), now tested: the day cap,
+  no-store at 0, the edge/browser split, Pages' times for root 404s.
+- One reading of an entry's statuses (`effective_statuses()`): `post_status: []`
+  lists Published to the builder, the coverage gate and the pre-swap rebuild
+  alike. Pre-swap lists, root-extras included, keep every live status.
+- Posts first leaving the root: root-extras is rebuilt before the swap, from
+  the save's own record. A plain redirect source is lower-cased before its
+  locale is stripped (derivation v8). A switched-off entry's status that is no
+  status name is refused by name. An earlier failed query no longer marks the
+  redirect read as failed.
+- `wp post-shield config write` and `import-legacy` are refused, not written
+  over, when a settings save lands while they run.
+- The sync controller forgets a save's parent map and move flags when the save
+  ends (long-running CLI and cron processes). A refused save's draft offers the
+  Posts row coming back from root mode no matching selector.
 
 - PHP namespace `PostShield` → `Post404Shield`; text domain → `post-404-shield`.
   Runtime identifiers are unchanged (see README → *Identifiers*), so an existing

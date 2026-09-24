@@ -639,3 +639,62 @@ function decide_based( string $uri, string $path, array $entries, callable $allo
 	}
 	return null;
 }
+
+/**
+ * The cache headers a shield 404 is sent with. $ttl is the origin's (shared
+ * caches read s-maxage) and, without $edge_ttl, the browser's and the CDN's;
+ * 0 sends no-store. $edge_ttl, when set, caps the browser (max-age) and the
+ * CDN (CDN-Cache-Control) to a shorter time while the origin keeps the 404
+ * for $ttl and is purged per URL on publish. Both are capped at a day: no
+ * purge reaches a browser's cached 404.
+ *
+ * @param int      $ttl      Origin cache time, seconds.
+ * @param int|null $edge_ttl Browser and CDN time, seconds, or null.
+ *
+ * @return string[] Header lines.
+ */
+function shield_404_cache_headers( int $ttl, ?int $edge_ttl = null ): array {
+	$max_ttl  = defined( 'Post404Shield\\MAX_TTL' ) ? MAX_TTL : 86400;
+	$ttl      = min( max( 0, $ttl ), $max_ttl );
+	$edge_ttl = null === $edge_ttl ? null : min( max( 0, $edge_ttl ), $max_ttl );
+	if ( 0 === $ttl ) {
+		return [ 'Cache-Control: no-store, max-age=0' ];
+	}
+	$headers = [ 'Cache-Control: public, max-age=' . ( $edge_ttl ?? $ttl ) . ', s-maxage=' . $ttl ];
+	if ( null !== $edge_ttl ) {
+		$headers[] = $edge_ttl > 0 ? 'CDN-Cache-Control: max-age=' . $edge_ttl : 'CDN-Cache-Control: no-store';
+	}
+	return $headers;
+}
+
+/**
+ * The cache header a deep-path 301 is sent with: brief, like a publishable
+ * 404, rather than as long as a cache's heuristics allow a bare 301.
+ *
+ * @param int $ttl Seconds.
+ *
+ * @return string
+ */
+function shield_redirect_cache_header( int $ttl ): string {
+	return 'Cache-Control: public, max-age=' . min( max( 0, $ttl ), defined( 'Post404Shield\\MAX_TTL' ) ? MAX_TTL : 86400 );
+}
+
+/**
+ * The cache times a blocked root URL gets: the root Pages entry's, else the
+ * first root entry's (a blocked root URL has no owning type). Blank times are
+ * null: the caller's defaults apply.
+ *
+ * @param array<string, array<string, mixed>> $root_entries Enabled root entries by effective post type.
+ *
+ * @return array{0: int|null, 1: int|null} [ cache_ttl, edge_ttl ].
+ */
+function root_404_ttls( array $root_entries ): array {
+	$settings = $root_entries['page'] ?? reset( $root_entries );
+	if ( ! is_array( $settings ) ) {
+		return [ null, null ];
+	}
+	return [
+		isset( $settings['cache_ttl'] ) ? max( 0, (int) $settings['cache_ttl'] ) : null,
+		isset( $settings['edge_ttl'] ) ? max( 0, (int) $settings['edge_ttl'] ) : null,
+	];
+}

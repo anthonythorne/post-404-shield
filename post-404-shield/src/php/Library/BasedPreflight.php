@@ -124,7 +124,7 @@ final class BasedPreflight {
 				return (string) ( $entry['mode'] ?? 'allowlist' );
 			case 'post_status':
 			case 'reserved_allowlist':
-				$list = array_values( array_unique( array_map( 'strval', (array) ( $entry[ $field ] ?? ( 'post_status' === $field ? [ 'publish' ] : [] ) ) ) ) );
+				$list = 'post_status' === $field ? \Post404Shield\effective_statuses( $entry ) : array_values( array_unique( array_map( 'strval', (array) ( $entry[ $field ] ?? [] ) ) ) );
 				sort( $list );
 				return $list;
 			default:
@@ -247,8 +247,8 @@ final class BasedPreflight {
 				// Every servable status the type's posts are in, listed or not: a
 				// public one the entry leaves out is served to anyone and would
 				// 404, and a save that drops a status must replay what it drops.
-				$listed     = array_map( 'strval', (array) ( $entry['post_status'] ?? [ 'publish' ] ) );
-				$was_listed = [] === $before ? [] : array_map( 'strval', (array) ( $before['post_status'] ?? [ 'publish' ] ) );
+				$listed     = \Post404Shield\effective_statuses( $entry );
+				$was_listed = [] === $before ? [] : \Post404Shield\effective_statuses( $before );
 				$in_use     = AllowlistBuilder::in_use_statuses( $type );
 				$statuses   = self::viewable_statuses(
 					array_merge(

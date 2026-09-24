@@ -116,8 +116,10 @@ $post_shield_builder = ( new \Post404Shield\Library\AllowlistBuilder( $post_shie
 // slug-format list. Every save path — admin, restore, CLI — inherits this.
 $post_shield_store->set_rebuild_handler(
 	// Returns true, or the names of the lists that could not be written.
-	static function ( array $post_types, array $entries, bool $root_switching_on = false ) {
-		$candidate_builder = new \Post404Shield\Library\AllowlistBuilder( $entries );
+	// $posts_left_root is the CANDIDATE's excluded_bases.posts_left_root: the
+	// live artifact may not say so yet.
+	static function ( array $post_types, array $entries, bool $root_switching_on = false, bool $posts_left_root = false ) {
+		$candidate_builder = ( new \Post404Shield\Library\AllowlistBuilder( $entries ) )->set_posts_left_root( $posts_left_root );
 		$failed            = [];
 		$read_failed       = false;
 		foreach ( $post_types as $rebuild_type ) {
@@ -481,6 +483,9 @@ if ( defined( 'WP_CLI' ) && WP_CLI && class_exists( '\WP_CLI' ) ) {
 					if ( null === $option ) {
 						\WP_CLI::error( 'No config option to write from — save Settings → Post 404 Shield first.' );
 					}
+					// What was read, checked again under the save lock: a settings
+					// save landing while this runs must not be written over.
+					$expected = $post_shield_store->current_revision();
 					// --force: the knowing-operator escape hatch for the S6 root
 					// preflight — an ACCEPTED would-block must not brick every
 					// future root-active save.
@@ -490,8 +495,12 @@ if ( defined( 'WP_CLI' ) && WP_CLI && class_exists( '\WP_CLI' ) ) {
 						[
 							'force_preflight' => ! empty( $assoc_args['force'] ),
 							'shows_warnings'  => true,
+							'expect_revision' => $expected,
 						]
 					);
+					if ( ! empty( $result['stale'] ) ) {
+						\WP_CLI::error( 'The settings changed while this ran — nothing was written. Run it again.' );
+					}
 					if ( ! $result['ok'] ) {
 						\WP_CLI::error( implode( ' | ', $result['errors'] ) );
 					}
@@ -505,6 +514,9 @@ if ( defined( 'WP_CLI' ) && WP_CLI && class_exists( '\WP_CLI' ) ) {
 					if ( null !== $post_shield_store->option() ) {
 						\WP_CLI::error( 'A config option already exists — refusing to overwrite it. Use the admin UI, or delete the option first.' );
 					}
+					// Checked again under the save lock: a first save from the
+					// settings screen meanwhile must not be written over.
+					$expected = $post_shield_store->current_revision();
 					// The legacy array is site-owned, so it is passed in rather
 					// than looked for inside the plugin: a vendored copy is
 					// replaced wholesale on every sync, and a file dropped into it
@@ -529,7 +541,17 @@ if ( defined( 'WP_CLI' ) && WP_CLI && class_exists( '\WP_CLI' ) ) {
 							$locale_pattern .= '|' . $default_lang;
 						}
 					}
-					$result = $post_shield_store->write( $post_shield_store->import_legacy( $legacy, $locale_mode, $locale_pattern ), 'wp-cli (import-legacy)', [ 'shows_warnings' => true ] );
+					$result = $post_shield_store->write(
+						$post_shield_store->import_legacy( $legacy, $locale_mode, $locale_pattern ),
+						'wp-cli (import-legacy)',
+						[
+							'shows_warnings'  => true,
+							'expect_revision' => $expected,
+						]
+					);
+					if ( ! empty( $result['stale'] ) ) {
+						\WP_CLI::error( 'A config was saved while this ran — nothing was imported. Check Settings → Post 404 Shield.' );
+					}
 					if ( ! $result['ok'] ) {
 						\WP_CLI::error( implode( ' | ', $result['errors'] ) );
 					}

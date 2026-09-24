@@ -140,4 +140,74 @@ class PostShieldRebuildBeforeSwapTest extends TestCase {
 		$this->assertSame( [ true, [] ], $result );
 		$this->assertFalse( $called );
 	}
+
+	/**
+	 * The candidate's own record that posts left the root reaches the
+	 * handler: the live artifact does not say so yet, and root-extras must
+	 * list their old addresses before the swap.
+	 *
+	 * @return void
+	 */
+	public function test_the_candidates_posts_left_root_reaches_the_handler(): void {
+		$args  = [];
+		$store = new ConfigStore();
+		$store->set_rebuild_handler(
+			static function ( ...$given ) use ( &$args ) {
+				$args = $given;
+				return true;
+			}
+		);
+		$method = new \ReflectionMethod( ConfigStore::class, 'rebuild_before_swap' );
+		$method->setAccessible( true );
+		$method->invoke(
+			$store,
+			[],
+			[
+				'entries'        => $this->root_entries(),
+				'excluded_bases' => [ 'posts_left_root' => true ],
+			],
+			true
+		);
+		$this->assertTrue( $args[2] ?? null, 'root-extras is rebuilt' );
+		$this->assertTrue( $args[3] ?? null, 'with the old post addresses' );
+	}
+
+	/**
+	 * A pre-swap list keeps every status the live artifact lists — for every
+	 * entry, since root-extras reads them all — and an empty list reads as
+	 * Published, as the builder has it.
+	 *
+	 * @return void
+	 */
+	public function test_pre_swap_lists_keep_every_live_status(): void {
+		$method = new \ReflectionMethod( ConfigStore::class, 'with_live_statuses' );
+		$method->setAccessible( true );
+		$live      = [
+			'entries' => [
+				'page' => [
+					'root'        => true,
+					'post_type'   => 'page',
+					'post_status' => [ 'publish', 'zz-archived' ],
+				],
+				'post' => [
+					'url_base'    => [ 'blog' ],
+					'post_status' => [],
+				],
+			],
+		];
+		$candidate = [
+			'page' => [
+				'root'        => true,
+				'post_type'   => 'page',
+				'post_status' => [ 'publish' ],
+			],
+			'post' => [
+				'url_base'    => [ 'blog' ],
+				'post_status' => [ 'private' ],
+			],
+		];
+		$entries   = $method->invoke( null, $candidate, $live );
+		$this->assertSame( [ 'publish', 'zz-archived' ], $entries['page']['post_status'] );
+		$this->assertSame( [ 'private', 'publish' ], $entries['post']['post_status'] );
+	}
 }

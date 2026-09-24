@@ -146,7 +146,7 @@ class ConfigStore {
 	 *
 	 * @var int
 	 */
-	private const REDIRECT_DERIVATION_VERSION = 7;
+	private const REDIRECT_DERIVATION_VERSION = 8;
 
 	/**
 	 * Optional rebuild seam for the match-mode-switch ordering (SPEC §3.2c).
@@ -572,7 +572,7 @@ class ConfigStore {
 	private function redirect_source_bases( string $locale_pattern = '' ): array {
 		$bases = [];
 		foreach ( $this->redirect_sources() as $source ) {
-			foreach ( \Post404Shield\redirect_source_variants( $source['pattern'], $source['regex'], $locale_pattern ) as $variant ) {
+			foreach ( \Post404Shield\redirect_source_variants( self::source_pattern( $source ), $source['regex'], $locale_pattern ) as $variant ) {
 				// Lower-cased AFTER literal extraction, so regex escapes are read
 				// with their original meaning first. The shield only ever matches
 				// lower-case slugs (an upper-case request fails its charset guard and
@@ -588,6 +588,21 @@ class ConfigStore {
 			}
 		}
 		return array_keys( $bases );
+	}
+
+	/**
+	 * A redirect source as the derivation reads it. A plain one is lower-cased
+	 * first: it holds no regex escape to misread, and a capitalised locale
+	 * (`/Global/stories/old/`, stored by a case-insensitive redirect) must be
+	 * stripped like a lower-case one, or the redirect is never placed under a
+	 * base. A regex is lower-cased after its literal part is extracted.
+	 *
+	 * @param array{pattern: string, regex: bool} $source Redirect source.
+	 *
+	 * @return string
+	 */
+	private static function source_pattern( array $source ): string {
+		return $source['regex'] ? (string) $source['pattern'] : strtolower( (string) $source['pattern'] );
 	}
 
 	/**
@@ -623,10 +638,15 @@ class ConfigStore {
 		$sources = [];
 		foreach ( $readers as $reader ) {
 			try {
+				// Each query resets last_error, but a reader whose plugin is off
+				// runs none: clear an earlier, unrelated failure first, so an
+				// error seen after the reader is its own.
+				if ( isset( $wpdb ) && property_exists( $wpdb, 'last_error' ) ) {
+					$wpdb->last_error = '';
+				}
 				foreach ( $this->$reader() as $source ) {
 					$sources[] = $source;
 				}
-				// Each query resets last_error: set now, the reader's own failed.
 				if ( isset( $wpdb ) && is_string( $wpdb->last_error ?? null ) && '' !== $wpdb->last_error ) {
 					$this->redirect_read_failed = true;
 					error_log( '[post-404-shield] redirect reader ' . $reader . ' failed: ' . $wpdb->last_error ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
@@ -1086,7 +1106,7 @@ class ConfigStore {
 			// A regex not anchored at the start matches anywhere in the path.
 			$anchored  = ! $source['regex'] || 0 === strpos( ltrim( (string) $source['pattern'] ), '^' );
 			$root_miss = false;
-			foreach ( \Post404Shield\redirect_source_variants( $source['pattern'], $source['regex'], $locale_pattern ) as $variant ) {
+			foreach ( \Post404Shield\redirect_source_variants( self::source_pattern( $source ), $source['regex'], $locale_pattern ) as $variant ) {
 				$placed   = [];
 				$consumed = 0;
 				$reduced  = trim( rtrim( strtolower( \Post404Shield\redirect_pattern_base( $variant, $source['regex'], $consumed ) ), '*' ), '/' );
@@ -1843,6 +1863,12 @@ class ConfigStore {
 						if ( $entry_enabled ) {
 							/* translators: 1: entry name, 2: the status. */
 							$errors[] = sprintf( __( '%1$s: post status "%2$s" does not exist.', 'post-404-shield' ), $label, $shown );
+						} elseif ( ! is_string( $status ) || 1 !== preg_match( '/^[a-z0-9_-]+$/', $status ) ) {
+							// Not a status name at all: the reader rejects it
+							// whether the entry is on or not (no registered
+							// status can be spelt so).
+							/* translators: 1: entry name, 2: the value. */
+							$errors[] = sprintf( __( '%1$s: "%2$s" is not a post status name.', 'post-404-shield' ), $label, $shown );
 						} else {
 							/* translators: 1: entry name, 2: the status. */
 							$warnings[] = sprintf( __( '%1$s: post status "%2$s" is not registered; it is ignored while the entry is off.', 'post-404-shield' ), $label, $shown );
@@ -2286,10 +2312,10 @@ class ConfigStore {
 				&& ! ( null !== $live_before && $this->has_enabled_root_entries( (array) $live_before['entries'] ) );
 			// The gates can outlast LOCK_TTL: no list is written for a save
 			// that lost its lock (another save owns the lists now).
-			if ( ( [] !== $rebuild_before || $root_switching_on ) && ! $this->refresh_lock() ) {
+			if ( ( [] !== $rebuild_before || $root_switching_on || $posts_leaving_root ) && ! $this->refresh_lock() ) {
 				return self::lock_lost( $validated['warnings'] );
 			}
-			if ( ! $this->rebuild_before_swap( $rebuild_before, $config ) ) {
+			if ( ! $this->rebuild_before_swap( $rebuild_before, $config, $posts_leaving_root ) ) {
 				return [
 					'ok'       => false,
 					'errors'   => [
@@ -2413,7 +2439,7 @@ class ConfigStore {
 		// its previous list, which the nightly rebuild replaces.
 		try {
 			if ( null !== $this->rebuild_handler && [] !== $rebuild_after ) {
-				( $this->rebuild_handler )( $rebuild_after, $config['entries'] );
+				( $this->rebuild_handler )( $rebuild_after, $config['entries'], false, self::posts_left_root_of( $config ) );
 			}
 			// Once more for the types that became full-path, now that the artifact
 			// saying so is live: a rebuild started from the OLD artifact (the daily
@@ -2425,7 +2451,7 @@ class ConfigStore {
 			// media, old slugs and private pages made meanwhile were not appended.
 			// So does a save after which posts no longer live at the root.
 			if ( null !== $this->rebuild_handler && ( [] !== $rebuild_before || $root_switching_on || $posts_leaving_root ) ) {
-				( $this->rebuild_handler )( $rebuild_before, $config['entries'], $root_switching_on || $posts_leaving_root );
+				( $this->rebuild_handler )( $rebuild_before, $config['entries'], $root_switching_on || $posts_leaving_root, self::posts_left_root_of( $config ) );
 			}
 		} catch ( \Throwable $e ) {
 			error_log( '[post-404-shield] post-save rebuild: ' . $e->getMessage() . '; the previous lists stay until the nightly rebuild.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
@@ -2514,8 +2540,8 @@ class ConfigStore {
 				continue;
 			}
 			$live_entry = is_array( $current_doc['entries'][ $entry_key ] ?? null ) ? $current_doc['entries'][ $entry_key ] : [];
-			$was        = isset( $live_entry['enabled'] ) && false === $live_entry['enabled'] ? [] : (array) ( $live_entry['post_status'] ?? [ 'publish' ] );
-			foreach ( array_diff( array_map( 'strval', (array) ( $entry['post_status'] ?? [] ) ), $was, [ 'publish' ] ) as $added ) {
+			$was        = isset( $live_entry['enabled'] ) && false === $live_entry['enabled'] ? [] : \Post404Shield\effective_statuses( $live_entry );
+			foreach ( array_diff( \Post404Shield\effective_statuses( $entry ), $was, [ 'publish' ] ) as $added ) {
 				$warnings[] = sprintf(
 					/* translators: 1: entry name, 2: post status. */
 					__( '%1$s now lists the status "%2$s": anyone can confirm its posts\' addresses exist, although WordPress decides whether to show them.', 'post-404-shield' ),
@@ -2995,25 +3021,29 @@ class ConfigStore {
 	}
 
 	/**
-	 * The pre-swap rebuild: the types becoming full-path, and root-extras when
-	 * this save switches root mode on.
+	 * The pre-swap rebuild: the types becoming full-path or widened, and
+	 * root-extras when this save switches root mode on or posts have just
+	 * left the site root (their old addresses must be listed before the
+	 * artifact that drops them from root matching goes live).
 	 *
-	 * @param string[]             $rebuild_before Types to rebuild before the swap.
-	 * @param array<string, mixed> $config         Candidate document.
+	 * @param string[]             $rebuild_before     Types to rebuild before the swap.
+	 * @param array<string, mixed> $config             Candidate document.
+	 * @param bool                 $posts_leaving_root Whether posts just left the root.
 	 *
 	 * @return bool False when a list failed to write.
 	 *
 	 * @throws ReadFailure When a database read failed (write() refuses with a retry).
 	 */
-	private function rebuild_before_swap( array $rebuild_before, array $config ): bool {
+	private function rebuild_before_swap( array $rebuild_before, array $config, bool $posts_leaving_root = false ): bool {
 		$live              = $this->artifact();
 		$root_switching_on = $this->has_enabled_root_entries( $config['entries'] )
 			&& ! ( null !== $live && $this->has_enabled_root_entries( (array) $live['entries'] ) );
-		if ( null === $this->rebuild_handler || ( [] === $rebuild_before && ! $root_switching_on ) ) {
+		$root_extras       = $root_switching_on || ( $posts_leaving_root && $this->has_enabled_root_entries( $config['entries'] ) );
+		if ( null === $this->rebuild_handler || ( [] === $rebuild_before && ! $root_extras ) ) {
 			return true;
 		}
 		try {
-			$result = ( $this->rebuild_handler )( $rebuild_before, self::with_live_statuses( (array) $config['entries'], $live, $rebuild_before ), $root_switching_on );
+			$result = ( $this->rebuild_handler )( $rebuild_before, self::with_live_statuses( (array) $config['entries'], $live ), $root_extras, self::posts_left_root_of( $config ) );
 		} catch ( ReadFailure $e ) {
 			throw $e; // A failed read: write() refuses with a retry.
 		} catch ( \Throwable $e ) {
@@ -3024,7 +3054,7 @@ class ConfigStore {
 		// The handler names the lists that failed; a plain false (or a bug)
 		// fails every list this rebuild was for — root-extras too, when it is
 		// the only one.
-		$asked = array_merge( $rebuild_before, $root_switching_on ? [ 'root-extras' ] : [] );
+		$asked = array_merge( $rebuild_before, $root_extras ? [ 'root-extras' ] : [] );
 		if ( is_array( $result ) ) {
 			$this->rebuild_failures = array_map( 'strval', $result );
 		} else {
@@ -3034,31 +3064,42 @@ class ConfigStore {
 	}
 
 	/**
-	 * Candidate entries with each pre-swap type's statuses joined by the ones
-	 * the live artifact lists for it. A pre-swap list is read by the artifact
-	 * that is live until the swap — or for good, when the save is refused
-	 * after it (a lost lock, a failed stage or swap) — so it must still hold
-	 * every post that artifact lists, although the save also drops a status.
-	 * The rebuild after the swap narrows it to the candidate's.
+	 * Whether a document records that posts have left the site root.
+	 *
+	 * @param array<string, mixed> $config Config document.
+	 *
+	 * @return bool
+	 */
+	private static function posts_left_root_of( array $config ): bool {
+		return true === ( $config['excluded_bases']['posts_left_root'] ?? false );
+	}
+
+	/**
+	 * Candidate entries with each type's statuses joined by the ones the live
+	 * artifact lists for it. A pre-swap list is read by the artifact that is
+	 * live until the swap — or for good, when the save is refused after it
+	 * (a lost lock, a failed stage or swap) — so it must still hold every post
+	 * that artifact lists, although the save also drops a status. Every entry,
+	 * not only the types rebuilt: root-extras reads every root type's and the
+	 * Posts entry's statuses. The rebuild after the swap narrows them.
 	 *
 	 * @param array<mixed>              $entries Candidate entries.
 	 * @param array<string, mixed>|null $live    Live artifact.
-	 * @param string[]                  $types   Pre-swap types.
 	 *
 	 * @return array<mixed>
 	 */
-	private static function with_live_statuses( array $entries, ?array $live, array $types ): array {
+	private static function with_live_statuses( array $entries, ?array $live ): array {
 		$listed = [];
 		foreach ( (array) ( $live['entries'] ?? [] ) as $key => $entry ) {
 			if ( is_array( $entry ) && ( ! isset( $entry['enabled'] ) || false !== $entry['enabled'] ) && 'allowlist' === ( $entry['mode'] ?? 'allowlist' ) ) {
 				$type            = (string) ( $entry['post_type'] ?? $key );
-				$listed[ $type ] = array_merge( $listed[ $type ] ?? [], (array) ( $entry['post_status'] ?? [ 'publish' ] ) );
+				$listed[ $type ] = array_merge( $listed[ $type ] ?? [], \Post404Shield\effective_statuses( $entry ) );
 			}
 		}
 		foreach ( $entries as $key => $entry ) {
 			$type = is_array( $entry ) ? (string) ( $entry['post_type'] ?? $key ) : '';
-			if ( isset( $listed[ $type ] ) && in_array( $type, $types, true ) ) {
-				$entries[ $key ]['post_status'] = array_values( array_unique( array_merge( (array) ( $entry['post_status'] ?? [ 'publish' ] ), $listed[ $type ] ) ) );
+			if ( isset( $listed[ $type ] ) ) {
+				$entries[ $key ]['post_status'] = array_values( array_unique( array_merge( \Post404Shield\effective_statuses( $entry ), $listed[ $type ] ) ) );
 			}
 		}
 		return $entries;
@@ -3108,7 +3149,7 @@ class ConfigStore {
 				}
 				$cpt                       = (string) ( $entry['post_type'] ?? $key );
 				$current_full_path[ $cpt ] = self::is_full_path( $entry );
-				$current_statuses[ $cpt ]  = array_merge( $current_statuses[ $cpt ] ?? [], (array) ( $entry['post_status'] ?? [ 'publish' ] ) );
+				$current_statuses[ $cpt ]  = array_merge( $current_statuses[ $cpt ] ?? [], \Post404Shield\effective_statuses( $entry ) );
 			}
 		}
 
@@ -3129,7 +3170,7 @@ class ConfigStore {
 			// before the swap. Safe then — the old artifact does not read that
 			// list, or reads a superset of what it needs.
 			$widened = ! isset( $current_full_path[ $cpt ] )
-				|| [] !== array_diff( (array) ( $entry['post_status'] ?? [ 'publish' ] ), $current_statuses[ $cpt ] ?? [] );
+				|| [] !== array_diff( \Post404Shield\effective_statuses( $entry ), $current_statuses[ $cpt ] ?? [] );
 			if ( $wants_fp && ! $serves_fp ) {
 				$before[] = $cpt;
 			} elseif ( ! $wants_fp && $serves_fp ) {
@@ -3957,7 +3998,7 @@ class ConfigStore {
 
 			$post_type = (string) ( $settings['post_type'] ?? $key );
 			$reserved  = array_values( array_filter( (array) ( $settings['reserved_allowlist'] ?? [] ), 'is_string' ) );
-			$statuses  = array_values( array_filter( (array) ( $settings['post_status'] ?? [ 'publish' ] ), 'is_string' ) );
+			$statuses  = \Post404Shield\effective_statuses( $settings );
 
 			// Entries sharing one CPT (category-segmented bases) collapse into the
 			// FIRST entry's position — bases append in legacy order, so the loader's

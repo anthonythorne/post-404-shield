@@ -761,6 +761,21 @@ function base_is_reserved_namespace( string $base ): bool {
 }
 
 /**
+ * The statuses an entry lists: its `post_status`, or Published when that is
+ * absent, empty or names no status — the one reading every part of the
+ * plugin shares, so an entry saved with `post_status: []` lists Published to
+ * the builder, the gates and the pre-swap rebuild alike.
+ *
+ * @param array<string, mixed> $entry Config entry.
+ *
+ * @return string[]
+ */
+function effective_statuses( array $entry ): array {
+	$statuses = array_values( array_filter( (array) ( $entry['post_status'] ?? [] ), static fn( $status ): bool => is_string( $status ) && '' !== $status ) );
+	return [] !== $statuses ? array_values( array_unique( $statuses ) ) : [ 'publish' ];
+}
+
+/**
  * Is a value absent, or an array of strings that each match a pattern?
  *
  * The shape of every optional per-entry list (reserved slugs, derived reserved

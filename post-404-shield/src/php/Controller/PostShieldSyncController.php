@@ -218,6 +218,26 @@ class PostShieldSyncController {
 		// nightly rebuild picked the meta up. Priority 20: after core's
 		// wp_check_for_changed_slugs (12) has written it.
 		add_action( 'post_updated', $this->guarded( 'handle_post_updated' ), 20, 3 );
+
+		// Last, when a save is over (terms and meta too): what this process
+		// learnt during it must not outlive it. A long-running process (a CLI
+		// migration, a cron batch) saves many posts while other requests
+		// change the table under it.
+		add_action( 'wp_after_insert_post', $this->guarded( 'handle_save_done' ), PHP_INT_MAX, 1 );
+	}
+
+	/**
+	 * A save is over: forget the parent map read during it (another request
+	 * may add a child before this process saves again) and the post's move
+	 * flags (a later content edit is not a move).
+	 *
+	 * @param int $post_id Saved post ID.
+	 *
+	 * @return void
+	 */
+	public function handle_save_done( int $post_id ): void {
+		unset( $this->moved[ $post_id ], $this->reparented[ $post_id ] );
+		$this->family = [];
 	}
 	/**
 	 * A hook callback that runs a handler and contains a failed database read
