@@ -171,6 +171,33 @@ Root mode ships **inert** — it only engages once `page`/`post` are switched on
 and the acknowledgement is confirmed — so give it its own e2e coverage on any
 site that turns it on.
 
+### Run environments in parallel
+
+A verification round is slow because of the end-to-end suites, not the host.
+Run independent environments at the same time, not one after another:
+
+- **Each site's local suite at once.** Every consuming site runs its suite
+  against its own local environment (its own container, database and uploads),
+  so two sites' suites share nothing — start them together.
+- **Deployed environments alongside.** The smoke script, a URL matrix and a
+  read-only state check against a deployed environment touch nothing local:
+  run them while the local suites run, not after.
+- **Fast gates first.** `composer check` and the site's linters take seconds:
+  run them before starting the long suites, and push on them.
+- **One site's suite stays serial** (one worker). Its cases share that site's
+  config and allowlists; a case switching a type to full-path would break
+  another that expects slug lists.
+- **Never change the copy a suite is running against.** Syncing a new plugin
+  version into a site mid-run tests two versions at once; stop the run and
+  start it again.
+- **Mind the load.** Parallel suites on an overloaded machine time out: stop
+  local environments that are not in use before starting.
+- **WP-CLI boots the whole site** — several seconds a call with a large plugin
+  stack. A plain read (an option, a post field, the cron list) can pass
+  `--skip-plugins --skip-themes`; batch a case's steps into one `wp eval-file`.
+  Keep plugins loaded for anything that saves or writes: they change what the
+  shield does.
+
 ## Pass criteria
 
 - All five header values observed across the matrix.
